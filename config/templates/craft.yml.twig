@@ -112,7 +112,7 @@ extra-env:
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS: "{{ cflags }} -g -fPIE{{ using_gcc ? '' : ' -flto'}}"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS: "-Wl,--build-id=sha1 -pie -release {{ release_suffix }}{{ using_gcc ? '' : ' -flto'}}"
     SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-cgi --disable-phpdbg --disable-debug --with-pic --enable-rtld-now --enable-re2c-cgoto --disable-rpath"
-    SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES: "--with github.com/dunglas/frankenphp/caddy --with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli --with github.com/baldinof/caddy-supervisor"
+    SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES: "--with github.com/dunglas/frankenphp/caddy --with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli"
     PHP_BUILD_PROVIDER: "Static PHP <https://static-php.dev> #StandWithUkraine"
     PHP_BUILD_ARCH: '{{ arch }}'
     {% if is_rhel -%}

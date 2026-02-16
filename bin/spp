@@ -20,6 +20,8 @@ use Symfony\Component\Console\Application;
 use staticphp\Command\BuildCommand;
 use staticphp\Command\PackageCommand;
 use staticphp\Command\AllCommand;
+use staticphp\Command\BuildCaddyCommand;
+use staticphp\Command\PackageCaddyCommand;
 
 // Create a new Symfony Console Application
 $application = new Application('SPC Packages', '1.0.0');
@@ -28,6 +30,8 @@ $application = new Application('SPC Packages', '1.0.0');
 $application->add(new BuildCommand());
 $application->add(new PackageCommand());
 $application->add(new AllCommand());
+$application->add(new BuildCaddyCommand());
+$application->add(new PackageCaddyCommand());
 
 // Set default command to list commands when no command is specified
 $application->setDefaultCommand('list');

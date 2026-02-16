@@ -196,6 +196,7 @@ class frankenphp implements package
             "{$packageFolder}/content/=/usr/share/frankenphp",
             "{$packageFolder}/empty/=/var/lib/frankenphp",
             "{$packageFolder}/empty/=/etc/frankenphp/Caddyfile.d",
+            "{$packageFolder}/empty/=/var/lib/caddy/modules",
         ]];
 
         $rpmProcess = new Process($fpmArgs);
@@ -391,7 +392,8 @@ class frankenphp implements package
             "{$packageFolder}/debian/frankenphp.service=/usr/lib/systemd/system/frankenphp{$frankenphpSuffix}.service",
             "{$packageFolder}/Caddyfile=/etc/frankenphp/Caddyfile",
             "{$packageFolder}/content/=/usr/share/frankenphp",
-            "{$packageFolder}/empty/=/var/lib/frankenphp"
+            "{$packageFolder}/empty/=/var/lib/frankenphp",
+            "{$packageFolder}/empty/=/var/lib/caddy/modules"
         ]];
 
         $rpmProcess = new Process($fpmArgs);
@@ -574,6 +576,10 @@ class frankenphp implements package
             ],
             [
                 'dst' => '/etc/frankenphp/Caddyfile.d',
+                'type' => 'dir',
+            ],
+            [
+                'dst' => '/var/lib/caddy/modules',
                 'type' => 'dir',
             ],
         ];

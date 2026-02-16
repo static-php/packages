@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "361a062c5be25845cceeeb154a44ba53",
+    "content-hash": "d12b0c88a48953e0f8451256efadd078",
     "packages": [
         {
             "name": "carbonphp/carbon-doctrine-types",
@@ -77,16 +77,16 @@
         },
         {
             "name": "crazywhalecc/static-php-cli",
-            "version": "dev-henderkes-patch-1",
+            "version": "dev-feat/xcaddy-plugins",
             "source": {
                 "type": "git",
                 "url": "https://github.com/crazywhalecc/static-php-cli.git",
-                "reference": "c5882c1f8e2d95643c50e29740209c1ea9e8dae8"
+                "reference": "823b26fbb9711e0b4439489e09fd6ba40a21e16d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/c5882c1f8e2d95643c50e29740209c1ea9e8dae8",
-                "reference": "c5882c1f8e2d95643c50e29740209c1ea9e8dae8",
+                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/823b26fbb9711e0b4439489e09fd6ba40a21e16d",
+                "reference": "823b26fbb9711e0b4439489e09fd6ba40a21e16d",
                 "shasum": ""
             },
             "require": {
@@ -133,7 +133,7 @@
             "description": "Build single static PHP binary, with PHP project together, with popular extensions included.",
             "support": {
                 "issues": "https://github.com/crazywhalecc/static-php-cli/issues",
-                "source": "https://github.com/crazywhalecc/static-php-cli/tree/henderkes-patch-1"
+                "source": "https://github.com/crazywhalecc/static-php-cli/tree/feat/xcaddy-plugins"
             },
             "funding": [
                 {
@@ -141,7 +141,7 @@
                     "type": "other"
                 }
             ],
-            "time": "2026-01-30T18:41:39+00:00"
+            "time": "2026-02-16T06:33:47+00:00"
         },
         {
             "name": "doctrine/inflector",
