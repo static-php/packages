@@ -328,6 +328,8 @@ class caddyplugins implements package
             throw new RuntimeException("Plugin {$pluginName} was not created at {$outputFile}");
         }
 
+        shell()->cd($outputDir)->exec("eu-strip $outputFile");
+
         echo "Plugin {$pluginName} built successfully: {$outputFile}\n";
 
         // Verify plugin loads correctly
