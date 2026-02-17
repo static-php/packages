@@ -71,15 +71,15 @@ class caddyplugins implements package
         // Additional useful modules
         'caddy-baldinof-caddy-supervisor' => 'github.com/baldinof/caddy-supervisor', // Run and supervise background processes
         // TODO: 'caddy-lucaslorentz-caddy-docker-proxy' => 'github.com/lucaslorentz/caddy-docker-proxy/v2', // Caddy as reverse proxy for Docker
-        'caddy-greenpau-caddy-security' => 'github.com/greenpau/caddy-security', // AAA plugin with MFA/2FA
+        // TODO: 'caddy-greenpau-caddy-security' => 'github.com/greenpau/caddy-security', // AAA plugin with MFA/2FA
         'caddy-greenpau-caddy-git' => 'github.com/greenpau/caddy-git', // Git-backed directory updates
         'caddy-caddyserver-replace-response' => 'github.com/caddyserver/replace-response', // Perform replacements in response bodies
         // 'caddy-abiosoft-caddy-yaml' => 'github.com/abiosoft/caddy-yaml', // Alternative YAML config adapter
         'caddy-caddyserver-nginx-adapter' => 'github.com/caddyserver/nginx-adapter', // Run Caddy with NGINX config
         'caddy-hslatman-caddy-crowdsec-bouncer' => 'github.com/hslatman/caddy-crowdsec-bouncer', // Block malicious traffic via CrowdSec
-        'caddy-hslatman-caddy-openapi-validator' => 'github.com/hslatman/caddy-openapi-validator', // Validate requests/responses against OpenAPI spec
+        // TODO: 'caddy-hslatman-caddy-openapi-validator' => 'github.com/hslatman/caddy-openapi-validator', // Validate requests/responses against OpenAPI spec
         // 'caddy-lindenlab-caddy-s3-proxy' => 'github.com/lindenlab/caddy-s3-proxy', // S3 proxy plugin
-        'caddy-WingLim-caddy-webhook' => 'github.com/WingLim/caddy-webhook', // Serve webhooks
+        // TODO: 'caddy-WingLim-caddy-webhook' => 'github.com/WingLim/caddy-webhook', // Serve webhooks
 
         // Authentication & Authorization
         // 'caddy-greenpau-caddy-auth-jwt' => 'github.com/greenpau/caddy-auth-jwt', // replaces caddy-authorize, can't use // JWT authorization plugin
@@ -92,7 +92,7 @@ class caddyplugins implements package
         // 'caddy-abiosoft-caddy-hmac' => 'github.com/abiosoft/caddy-hmac', // HMAC signature validation
         // 'caddy-abiosoft-caddy-json-parse' => 'github.com/abiosoft/caddy-json-parse', // Parse JSON requests
         // 'caddy-ueffel-caddy-imagefilter' => 'github.com/ueffel/caddy-imagefilter', // Transform images in various ways
-        'caddy-ueffel-caddy-brotli' => 'github.com/ueffel/caddy-brotli', // Brotli compression encoder
+        // 'caddy-ueffel-caddy-brotli' => 'github.com/ueffel/caddy-brotli', // Brotli compression encoder
         // 'caddy-txtdirect-txtdirect' => 'go.txtdirect.org/txtdirect', // DNS TXT-record based redirects
 
         // Storage & TLS
@@ -204,7 +204,7 @@ class caddyplugins implements package
      */
     public function createPackages(string $packageType, array $binaryDependencies, ?string $iterationOverride = null, bool $debuginfo = false): void
     {
-        echo "Building and packaging Caddy plugins...\n";
+        echo "Packaging Caddy plugins...\n";
 
         $xcaddyBin = BASE_PATH . '/pkgroot/x86_64-linux/go-xcaddy/bin/xcaddy';
         $frankenphpBin = BUILD_BIN_PATH . '/frankenphp';
@@ -237,14 +237,11 @@ class caddyplugins implements package
         }
 
         // First pass: build all plugins together to resolve versions correctly
-        echo "Running initial combined build to resolve plugin versions...\n";
-        $this->buildCombinedPlugins($xcaddyBin, $frankenphpBin, $pluginOutputDir);
+        // echo "Running initial combined build to resolve plugin versions...\n";
+        // $this->buildCombinedPlugins($xcaddyBin, $frankenphpBin, $pluginOutputDir);
 
         // Second pass: build each plugin individually and create package
         foreach (self::COMMON_PLUGINS as $pluginName => $pluginImport) {
-            // Build the plugin .so file
-            $this->buildPlugin($pluginName, $pluginImport, $frankenphpBin, $pluginOutputDir);
-
             // Create package for the plugin
             if ($packageType === 'rpm') {
                 $this->createPluginRpmPackage($pluginName, $pluginOutputDir, $architecture, $iterationOverride);
@@ -388,23 +385,97 @@ class caddyplugins implements package
     }
 
     /**
+     * Get the version and iteration of the latest FrankenPHP package
+     */
+    private function getFrankenPhpVersionAndIteration(string $packageType, string $architecture): array
+    {
+        $version = '1.0.0';
+        $iteration = '1';
+
+        $packageName = 'frankenphp';
+        $pattern = '';
+
+        if ($packageType === 'rpm') {
+            $pattern = DIST_RPM_PATH . "/{$packageName}-*-*.{$architecture}.rpm";
+        } elseif ($packageType === 'deb') {
+            $debArch = match ($architecture) {
+                'x86_64' => 'amd64',
+                'aarch64' => 'arm64',
+                default => $architecture,
+            };
+            $pattern = DIST_DEB_PATH . "/{$packageName}_*-*_{$debArch}.deb";
+        } elseif ($packageType === 'apk') {
+            $pattern = DIST_APK_PATH . "/{$packageName}-*-r*.{$architecture}.apk";
+        }
+
+        if ($pattern === '') {
+            return [$version, $iteration];
+        }
+
+        $files = glob($pattern);
+        if (empty($files)) {
+            echo "Warning: No FrankenPHP package found for {$packageType} and {$architecture}. Using default version {$version} and iteration {$iteration}.\n";
+            return [$version, $iteration];
+        }
+
+        // Sort files by mtime to get the latest one
+        usort($files, function ($a, $b) {
+            return filemtime($b) <=> filemtime($a);
+        });
+
+        $latestFile = basename($files[0]);
+
+        if ($packageType === 'rpm') {
+            // frankenphp-1.4.2_83-1.el10.x86_64.rpm
+            if (preg_match("/{$packageName}-([^-]+)-(\d+)(?:\.[^.]+)*\.{$architecture}\.rpm$/", $latestFile, $matches)) {
+                $version = $matches[1];
+                $iteration = $matches[2];
+            }
+        } elseif ($packageType === 'deb') {
+            // frankenphp_1.4.2_83-1_amd64.deb
+            $debArch = match ($architecture) {
+                'x86_64' => 'amd64',
+                'aarch64' => 'arm64',
+                default => $architecture,
+            };
+            if (preg_match("/{$packageName}_([^-]+)-(\d+)_{$debArch}\.deb$/", $latestFile, $matches)) {
+                $version = $matches[1];
+                $iteration = $matches[2];
+            }
+        } elseif ($packageType === 'apk') {
+            // frankenphp-1.4.2_83-r1.x86_64.apk
+            if (preg_match("/{$packageName}-([^-]+)-r(\d+)\.{$architecture}\.apk$/", $latestFile, $matches)) {
+                $version = $matches[1];
+                $iteration = $matches[2];
+            }
+        }
+
+        echo "Detected FrankenPHP version: {$version}, iteration: {$iteration} from {$latestFile}\n";
+
+        return [$version, $iteration];
+    }
+
+    /**
      * Create RPM package for a Caddy plugin
      */
     private function createPluginRpmPackage(string $pluginName, string $pluginOutputDir, string $architecture, ?string $iterationOverride): void
     {
-        $packageName = "caddyplugin-{$pluginName}";
+        $packageName = "{$pluginName}";
         $pluginFile = "{$pluginOutputDir}/{$pluginName}.so";
 
         if (!file_exists($pluginFile)) {
             echo "Plugin file not found, skipping package creation: {$pluginFile}\n";
             return;
         }
+        else {
+            echo "Building RPM package for {$pluginName}...\n";
+        }
 
         // Extract description from plugin comment
         $description = $this->getPluginDescription($pluginName);
 
-        $version = '1.0.0';
-        $iteration = $iterationOverride ?? '1';
+        [$version, $iteration] = $this->getFrankenPhpVersionAndIteration('rpm', $architecture);
+        $iteration = $iterationOverride ?? $iteration;
 
         $distVersion = $this->getDistVersion();
         $rpmRelease = $distVersion !== '' ? "{$iteration}.{$distVersion}" : $iteration;
@@ -455,8 +526,8 @@ class caddyplugins implements package
         // Extract description from plugin comment
         $description = $this->getPluginDescription($pluginName);
 
-        $version = '1.0.0';
-        $iteration = $iterationOverride ?? '1';
+        [$version, $iteration] = $this->getFrankenPhpVersionAndIteration('deb', $architecture);
+        $iteration = $iterationOverride ?? $iteration;
 
         // Convert system architecture to Debian architecture naming
         $debArch = match ($architecture) {
@@ -512,8 +583,8 @@ class caddyplugins implements package
         // Extract description from plugin comment
         $description = $this->getPluginDescription($pluginName);
 
-        $version = '1.0.0';
-        $iteration = $iterationOverride ?? '1';
+        [$version, $iteration] = $this->getFrankenPhpVersionAndIteration('apk', $architecture);
+        $iteration = $iterationOverride ?? $iteration;
 
         $nfpmConfig = [
             'name' => $packageName,
