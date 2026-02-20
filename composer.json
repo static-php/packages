@@ -22,7 +22,7 @@
         "php": ">=8.5",
         "ext-yaml": "*",
         "ext-zlib": "*",
-        "crazywhalecc/static-php-cli": "dev-feat/avif-dec",
+        "crazywhalecc/static-php-cli": "dev-shared",
         "laravel/helpers": "^1.7",
         "twig/twig": "^3.0"
     },

@@ -56,6 +56,7 @@ abstract class BaseCommand extends Command
         define('BUILD_LIB_PATH', BUILD_ROOT_PATH . '/lib');
         define('BUILD_INCLUDE_PATH', BUILD_ROOT_PATH . '/include');
         define('BUILD_MODULES_PATH', BUILD_ROOT_PATH . '/modules');
+        putenv('LD_LIBRARY_PATH=' . BUILD_LIB_PATH . ':' . BUILD_LIB_PATH);
 
         // Create necessary directories
         $this->createDirectories();
