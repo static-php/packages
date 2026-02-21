@@ -106,6 +106,7 @@ class TwigRenderer
 
         $sharedLibrarySuffix = getSharedLibrarySuffix();
         $templateVars = [
+            'ci' => getenv('GITHUB_ACTIONS') || getenv('CI'),
             'php_version' => $phpVersion,
             'php_version_nodot' => str_replace('.', '', $phpVersion),
             'target' => SPP_TARGET,

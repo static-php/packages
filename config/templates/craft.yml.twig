@@ -79,6 +79,7 @@ download-options:
     prefer-pre-built: false
     no-alt: false
     shallow-clone: true
+{% if ci %}
 {% if php_version == '8.5' %}
     # noinspection YAMLDuplicatedKeys
     ignore-cache-sources: 'php-src,swoole,pdo_sqlsrv'
@@ -88,6 +89,10 @@ download-options:
 {% else -%}
     # noinspection YAMLDuplicatedKeys
     ignore-cache-sources: 'php-src'
+{% endif -%}
+{% else %}
+    # noinspection YAMLDuplicatedKeys
+    ignore-cache-sources: ''
 {% endif -%}
 craft-options:
     doctor: true
@@ -108,7 +113,7 @@ extra-env:
     SPC_MICRO_PATCHES:
     SPC_DEFAULT_C_FLAGS: "{{ cflags }}"
     SPC_DEFAULT_CXX_FLAGS: "{{ cflags }}"
-    SPC_DEFAULT_LD_FLAGS: "-Wl,-z,relro -Wl,--as-needed -Wl,-z,now -Wl,-z,noexecstack {{ using_gcc and is_rhel ? specs_ldflags : '' }}"
+    SPC_DEFAULT_LD_FLAGS: "-Wl,-z,relro -Wl,--as-needed -Wl,--undefined-version -Wl,-z,now -Wl,-z,noexecstack {{ using_gcc and is_rhel ? specs_ldflags : '' }}"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS: "{{ cflags }} -g -fPIE{{ using_gcc ? '' : ' -flto'}}"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS: "-Wl,--build-id=sha1 -pie -release {{ release_suffix }}{{ using_gcc ? '' : ' -flto'}}"
     SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-cgi --disable-phpdbg --disable-debug --with-pic --enable-rtld-now --enable-re2c-cgoto --disable-rpath"
