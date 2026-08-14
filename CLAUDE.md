@@ -38,9 +38,10 @@ The `build-libs-gcc` job builds one lib set per (alma, arch) with `phpv: "8.4"` 
 
 ## Pre-release PHP and `allow-shared-ext-failure`
 
-PHP 8.6 is still a pre-release, so upstream resolves to whatever `php-8.6.0*` tag is newest (alpha/beta/RC). Two consequences:
+PHP 8.6 is still a pre-release, so upstream resolves to whatever `php-8.6.0*` tag is newest (alpha/beta/RC). Consequences:
 
 - **Version strings carry a tilde.** `8.6.0alpha3` is normalized to `8.6.0~alpha3` before it reaches any packager, because `rpmvercmp` orders `8.6.0alpha3 > 8.6.0` but `8.6.0~alpha3 < 8.6.0`. `bin/createrepo_static` parses the `~` in both the base-package and extension regexes. Never hardcode a specific pre-release marker — the scheme must work for alpha/beta/RC alike. APK has no `~` in its version grammar, so `createApkPackage` translates it to `_` (`8.6.0_alpha3`, verified against `apk version -c/-t`). apk has no `_dev` either, so `~dev` maps to `_pre`, and a pre-release suffix forces the `p<NN>` extension suffix behind its own underscore (`5.1.29~dev` → `5.1.29_pre_p86`); plain releases keep the old `5.1.28p86` form.
+- **Every package carries the pre-release marker, not just the base ones.** `php-zts-cli`/`-embed` get the PHP version itself (`8.6.0~beta1`), and everything built against them — extensions, `pie-zts`, `frankenphp` — carries the same marker inside its php tag, via `CreatePackages::getPhpVersionTag()`: `0.21.0_86~beta1` (rpm), `0.21.0+php86~beta1` (deb), `0.21.0_beta1_p86` (apk). Without it an extension's version never moves when PHP goes alpha3 → beta1, so a `.so` built against the older libphp stays installed and loads into the newer one. rpm/deb put the marker behind the digits so `_86~alpha3` still outranks `_85`; apk has no tilde and rejects the bare post-suffix once a pre-release suffix is present (`6.2.0_rc2p86`), so there the marker goes in front and forces the `_p` form. Against a GA release the tag is byte-identical to what it always was (`0.21.0_85`), so nothing changes for 8.2–8.5. `bin/createrepo_static` keys the module stream on the tag's digits (`php_stream()`) and `TestCommand::filterForVersion` reads them back the same way — both tolerate the marker on either side.
 - **A pre-release must never become the default module stream.** RPM puts every PHP version in one repo and separates them with modularity, so the highest stream would otherwise be installed unasked. `PRERELEASE_STREAMS` at the top of `bin/createrepo_static` lists the streams excluded from `modulemd-defaults`; drop an entry once that stream goes GA. The stream is still published, so users opt in with `dnf module switch-to php-zts:static-8.6`. Deb and apk need no equivalent — each version is its own Forgejo repo.
 - **Not every shared extension compiles or loads yet.** `craft.yml`'s `build-options.allow-shared-ext-failure` tells static-php-cli to skip such an extension instead of aborting the whole build.
 
@@ -145,6 +146,7 @@ Don't narrate. No comment restating the line below it, no explaining what a well
 
 ## Don'ts
 
+- Don't delete `src/hook/Frankenphp.php` because its patches "landed upstream" — spc builds frankenphp's newest *release tarball*, and both the PHP 8.6 `PG(output_handler)` fix and the `do_php_cli()` switch are still only on `main`; v1.12.7 carries neither, and without the hook `frankenphp.c` fails to compile against 8.6. Check the tag, not the branch. The hook is self-disabling — it no-ops when `php_globals.h` still declares `char *output_handler` and when the source already has the fix — so it costs nothing to keep until a release ships it.
 - Don't switch `tar --zstd` to pipes in the deb/apk workflows — they don't run on Alma.
 - Don't skip pinning new actions to SHAs.
 - Don't add `container: <alpine image>` to the apk jobs — musl containers can't run JS actions on arm64. Keep the host + `docker run` pattern.

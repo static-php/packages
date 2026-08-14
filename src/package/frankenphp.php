@@ -117,13 +117,7 @@ class frankenphp implements package
         $version = $matches[1];
 
         // Append PHP version suffix to FrankenPHP version
-        $phpMajorMinor = SPP_PHP_VERSION;
-        if (preg_match('/^(\d+)\.(\d+)/', $phpMajorMinor, $phpMatches)) {
-            $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-        } else {
-            $phpVersionSuffix = str_replace('.', '', $phpMajorMinor);
-        }
-        $rpmVersion = $version . '_' . $phpVersionSuffix;
+        $rpmVersion = $version . CreatePackages::getPhpVersionTag('rpm', $version);
 
         $name = $this->getName();
 
@@ -270,13 +264,7 @@ class frankenphp implements package
 
         // For DEB packages, append PHP version to package version for proper sorting
         // e.g., 1.11.0+php85 is higher than 1.11.0+php83
-        $phpMajorMinor = SPP_PHP_VERSION;
-        if (preg_match('/^(\d+)\.(\d+)/', $phpMajorMinor, $phpMatches)) {
-            $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-        } else {
-            $phpVersionSuffix = str_replace('.', '', $phpMajorMinor);
-        }
-        $debVersion = $version . '+php' . $phpVersionSuffix;
+        $debVersion = $version . CreatePackages::getPhpVersionTag('deb', $version);
 
         // Calculate iteration for DEB (with possible override)
         $iteration = $this->resolveIteration($name, $debVersion, $debArch, 'deb', $iterationOverride, $bump);
@@ -442,13 +430,10 @@ class frankenphp implements package
 
         // For APK packages, append PHP version to package version for proper sorting
         // e.g., 1.11.0p85 is higher than 1.11.0p83
-        $phpMajorMinor = SPP_PHP_VERSION;
-        if (preg_match('/^(\d+)\.(\d+)/', $phpMajorMinor, $phpMatches)) {
-            $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-        } else {
-            $phpVersionSuffix = str_replace('.', '', $phpMajorMinor);
-        }
-        $apkVersion = $version . 'p' . $phpVersionSuffix;
+        $apkVersion = $version . CreatePackages::getPhpVersionTag('apk', $version);
+        // apk spells pre-releases _alpha/_beta/_rc and has no _dev; a tilde reaches apk add as-is
+        // and is rejected there. Mirrors the translation CreatePackages does for extensions.
+        $apkVersion = str_replace(['~dev', '~'], ['_pre', '_'], $apkVersion);
 
         // Calculate iteration for APK (with possible override)
         $iteration = $this->resolveIteration($name, $apkVersion, $architecture, 'apk', $iterationOverride, $bump);
@@ -574,11 +559,7 @@ class frankenphp implements package
         echo "nfpm config written to: {$nfpmConfigFile}\n";
 
         // Run nfpm with full filename including PHP version suffix
-        $phpSuffix = '';
-        if ($version !== self::getPhpVersionAndArchitecture()[0]) {
-            $phpSuffix = str_replace('static-', 'p', $this->getPhpVersionSuffix());
-        }
-        $outputFile = DIST_APK_PATH . "/{$name}-{$version}{$phpSuffix}-r{$iteration}.{$architecture}.apk";
+        $outputFile = DIST_APK_PATH . "/{$name}-{$apkVersion}-r{$iteration}.{$architecture}.apk";
         $nfpmProcess = new Process([
             'nfpm', 'package',
             '--config', $nfpmConfigFile,

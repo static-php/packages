@@ -340,7 +340,7 @@ class TestCommand extends BaseCommand
             if (preg_match($re, $x['deps'], $m)) {
                 return $m[1] === $mm;
             }
-            if (preg_match('/(?:_|\+php|p)(\d{2,3})$/', $x['version'], $m)) {
+            if (preg_match('/(?:_|\+php|p)(\d{2,3})(?:~[a-z0-9]+)?$/', $x['version'], $m)) {
                 return $m[1] === $marker;
             }
             if (str_starts_with($x['name'], $cli) && preg_match('/^(\d+\.\d+)/', $x['version'], $m)) {

@@ -359,6 +359,38 @@ class CreatePackages
         return trim($raw);
     }
 
+    /**
+     * The tag binding a package to the PHP it was built against, appended to that package's own
+     * version: '_86' (rpm), '+php86' (deb), 'p86' (apk).
+     *
+     * While that PHP is a pre-release the tag carries its marker as well, so an extension built
+     * against 8.6.0~alpha3 sorts below the same one built against ~beta1 and both below the GA
+     * rebuild — otherwise the version never moves and a .so built against an older libphp stays
+     * installed after PHP is bumped.
+     *
+     * rpm and deb put the marker behind the version digits ('_86~beta1'), where it keeps the
+     * ordering across minors that the digits carry: 8.6's pre-release builds still outrank 8.5's,
+     * exactly as php-zts-cli 8.6.0~alpha3 outranks 8.5.4. apk has no tilde and only accepts the
+     * post-suffix behind its own underscore once a pre-release suffix is present ('6.2.0_rc2p86'
+     * is rejected), so there the marker goes in front and forces the '_p' form.
+     */
+    public static function getPhpVersionTag(string $packageType, string $packageVersion): string
+    {
+        [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
+        if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
+            $phpVersionSuffix = $m[1] . $m[2];
+        } else {
+            $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
+        }
+        $preRelease = preg_match('/~(.+)$/', $fullPhpVersion, $m) ? '~' . $m[1] : '';
+
+        return match ($packageType) {
+            'deb' => '+php' . $phpVersionSuffix . $preRelease,
+            'apk' => $preRelease . (str_contains($packageVersion . $preRelease, '~') ? '_p' : 'p') . $phpVersionSuffix,
+            default => '_' . $phpVersionSuffix . $preRelease,
+        };
+    }
+
     /** Pull SPC's internal-env constants and package configs in after BaseCommand has set BUILD_ROOT_PATH. */
     public static function bootstrapSpcGlobals(): void
     {
@@ -437,12 +469,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $phpMatches)) {
-                $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-            } else {
-                $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
-            }
-            $rpmVersion = $phpVersion . '_' . $phpVersionSuffix;
+            $rpmVersion = $phpVersion . self::getPhpVersionTag('rpm', $phpVersion);
         }
 
         // Calculate iteration for RPM (--iteration override > --bump remote query > local)
@@ -634,12 +661,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $phpMatches)) {
-                $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-            } else {
-                $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
-            }
-            $debVersion = $phpVersion . '+php' . $phpVersionSuffix;
+            $debVersion = $phpVersion . self::getPhpVersionTag('deb', $phpVersion);
         }
 
         // Calculate iteration for DEB (--iteration override > --bump remote query > local)
@@ -836,15 +858,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $phpMatches)) {
-                $phpVersionSuffix = $phpMatches[1] . $phpMatches[2]; // e.g., "85" from "8.5"
-            } else {
-                $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
-            }
-            // apk only accepts a post-suffix behind its own underscore once a pre-release
-            // suffix is present: '6.2.0_rc2p86' is rejected, '6.2.0_rc2_p86' is not.
-            $separator = str_contains($phpVersion, '~') ? '_p' : 'p';
-            $apkVersion = $phpVersion . $separator . $phpVersionSuffix;
+            $apkVersion = $phpVersion . self::getPhpVersionTag('apk', $phpVersion);
         }
 
         // apk spells pre-releases _alpha/_beta/_pre/_rc; nfpm passes a tilde straight through and

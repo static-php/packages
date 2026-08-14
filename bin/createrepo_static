@@ -28,6 +28,14 @@ def detect_arch():
             return a
     return None
 
+def php_stream(version):
+    # Stream from the trailing php tag, which carries the PHP pre-release marker while
+    # there is one: '5.1.28_86' and '5.1.28~dev_86~beta1' both belong to stream 8.6.
+    tag = re.match(r'\d+', version.split('_')[-1])
+    if tag and len(tag.group()) >= 2:
+        return f"{tag.group()[0]}.{tag.group()[1]}"
+    return '.'.join(version.split('_')[0].split('.')[:2])
+
 def parse_rpm_info(filename):
     basename = os.path.basename(filename)
 
@@ -45,48 +53,36 @@ def parse_rpm_info(filename):
 
     # Match extension packages (including debuginfo)
     # Format: php-zts-apcu-5.1.28_85-1.el10.x86_64.rpm or php-zts-apcu-debuginfo-5.1.28_85-1.el10.x86_64.rpm
-    match_ext = re.match(r'(?P<name>php-zts-[^-]+(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+(?:~[a-z0-9]+)?_\d+)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
+    # Built against a pre-release PHP the tag carries its marker: php-zts-apcu-5.1.28_86~beta1-1.el10.x86_64.rpm
+    match_ext = re.match(r'(?P<name>php-zts-[^-]+(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+(?:~[a-z0-9]+)?_\d+(?:~[a-z0-9]+)?)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
     if match_ext:
         name = match_ext.group("name")
         version = match_ext.group("version")
         release = match_ext.group("release")
         arch = match_ext.group("arch")
-        php_version = version.split('_')[-1]
-        if len(php_version) >= 2:
-            major = php_version[0]
-            minor = php_version[1]
-            stream = f"{major}.{minor}"
-        else:
-            stream = '.'.join(version.split('_')[0].split('.')[:2])
+        stream = php_stream(version)
         return name, version, release, arch, stream
 
     # Match pie-zts (including debuginfo)
     # Format: pie-zts-1.3.4_85-7.el10.x86_64.rpm or pie-zts-debuginfo-1.3.4_85-7.el10.x86_64.rpm
-    match_pie = re.match(r'(pie-zts(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+_\d+)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
+    match_pie = re.match(r'(pie-zts(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+(?:~[a-z0-9]+)?_\d+(?:~[a-z0-9]+)?)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
     if match_pie:
         name = match_pie.group(1)
         version = match_pie.group("version")
         release = match_pie.group("release")
         arch = match_pie.group("arch")
-        php_version = version.split('_')[-1]
-        if len(php_version) >= 2:
-            major = php_version[0]
-            minor = php_version[1]
-            stream = f"{major}.{minor}"
-        else:
-            stream = '.'.join(version.split('_')[0].split('.')[:2])
+        stream = php_stream(version)
         return name, version, release, arch, stream
 
     # Match frankenphp (including debuginfo)
     # Format: frankenphp-1.11.0_85-1.el10.x86_64.rpm or frankenphp-debuginfo-1.11.0_85-1.el10.x86_64.rpm
-    match_franken = re.match(r'(frankenphp(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+_\d+)-(?P<release>\d+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
+    match_franken = re.match(r'(frankenphp(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+(?:~[a-z0-9]+)?_\d+(?:~[a-z0-9]+)?)-(?P<release>\d+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
     if match_franken:
         name = match_franken.group(1)
         version = match_franken.group("version")
         release = match_franken.group("release")
         arch = match_franken.group("arch")
-        php_patch = version.split('_')[-1]
-        stream = f"8.{php_patch[-1]}"
+        stream = php_stream(version)
         return name, version, release, arch, stream
 
     # Match static-php
