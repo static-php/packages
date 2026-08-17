@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace staticphp\hook;
 
+use StaticPHP\Attribute\Package\BeforeStage;
 use StaticPHP\Attribute\Package\Extension;
-use StaticPHP\Attribute\Package\PatchBeforeBuild;
 use StaticPHP\Attribute\PatchDescription;
 use StaticPHP\Exception\WrongUsageException;
 use StaticPHP\Package\PhpExtensionPackage;
@@ -58,7 +58,7 @@ class Rar
         #endif
         C;
 
-    #[PatchBeforeBuild]
+    #[BeforeStage('ext-rar', 'phpizeForUnix')]
     #[PatchDescription('Adapt rar_stream.c to the PHP 8.6 stream error API')]
     public function patchBeforeBuild(PhpExtensionPackage $ext): bool
     {
