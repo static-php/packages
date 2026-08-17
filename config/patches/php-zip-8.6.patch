@@ -1,0 +1,45 @@
+pecl/zip has no PHP 8.6 branch: config.m4 hard-errors past 8.5, and the 8.5
+sources use XtOffsetOf(), which PHP 8.6 removed. Route 8.6 at the php85 sources
+and use offsetof() directly. No upstream PR exists to reference.
+
+diff --git a/config.m4 b/config.m4
+index 9d5e0c7..3370e1f 100644
+--- a/config.m4
++++ b/config.m4
+@@ -36,8 +36,8 @@ if test "$PHP_ZIP" != "no"; then
+   elif test $PHP_VERSION -lt 80500; then
+     AC_MSG_RESULT(8.1/8.2/8.3/8.4)
+     subdir=php81
+-  elif test $PHP_VERSION -lt 80600; then
+-    AC_MSG_RESULT(8.5)
++  elif test $PHP_VERSION -lt 80700; then
++    AC_MSG_RESULT(8.5/8.6)
+     subdir=php85
+   else
+     AC_MSG_ERROR(PHP version $PHP_VERSION is not supported yet)
+diff --git a/php85/php_zip.c b/php85/php_zip.c
+index 3417f04..40d6910 100644
+--- a/php85/php_zip.c
++++ b/php85/php_zip.c
+@@ -3129,7 +3129,7 @@ static void php_zip_free_prop_handler(zval *el) /* {{{ */ {
+ static PHP_MINIT_FUNCTION(zip)
+ {
+ 	memcpy(&zip_object_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+-	zip_object_handlers.offset = XtOffsetOf(ze_zip_object, zo);
++	zip_object_handlers.offset = offsetof(ze_zip_object, zo);
+ 	zip_object_handlers.free_obj = php_zip_object_free_storage;
+ 	zip_object_handlers.clone_obj = NULL;
+ 	zip_object_handlers.get_property_ptr_ptr = php_zip_get_property_ptr_ptr;
+diff --git a/php85/php_zip.h b/php85/php_zip.h
+index cccdc6d..1540931 100644
+--- a/php85/php_zip.h
++++ b/php85/php_zip.h
+@@ -86,7 +86,7 @@ typedef struct _ze_zip_object {
+ } ze_zip_object;
+ 
+ static inline ze_zip_object *php_zip_fetch_object(zend_object *obj) {
+-	return (ze_zip_object *)((char*)(obj) - XtOffsetOf(ze_zip_object, zo));
++	return (ze_zip_object *)((char*)(obj) - offsetof(ze_zip_object, zo));
+ }
+ 
+ #define Z_ZIP_P(zv) php_zip_fetch_object(Z_OBJ_P((zv)))

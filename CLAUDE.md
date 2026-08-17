@@ -147,6 +147,7 @@ Don't narrate. No comment restating the line below it, no explaining what a well
 ## Don'ts
 
 - Don't delete `src/hook/Frankenphp.php` because its patches "landed upstream" — spc builds frankenphp's newest *release tarball*, and both the PHP 8.6 `PG(output_handler)` fix and the `do_php_cli()` switch are still only on `main`; v1.12.7 carries neither, and without the hook `frankenphp.c` fails to compile against 8.6. Check the tag, not the branch. The hook is self-disabling — it no-ops when `php_globals.h` still declares `char *output_handler` and when the source already has the fix — so it costs nothing to keep until a release ships it.
+- Don't drop `src/hook/Zip.php` / `config/patches/php-zip-8.6.patch` — pecl/zip's `config.m4` aborts above 8.5 (`PHP version 80600 is not supported yet`) and its 8.5 sources still call `XtOffsetOf()`, which 8.6 removed, so without the patch `zip` is skipped on 8.6 and no `php-*-zip` package is built. Upstream has no 8.6 branch and no open PR for one. The hook no-ops once `config.m4` stops capping at `80600`.
 - Don't switch `tar --zstd` to pipes in the deb/apk workflows — they don't run on Alma.
 - Don't skip pinning new actions to SHAs.
 - Don't add `container: <alpine image>` to the apk jobs — musl containers can't run JS actions on arm64. Keep the host + `docker run` pattern.
