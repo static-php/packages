@@ -133,7 +133,8 @@ jobs:
                     workflow: spc-download.yml
                     name: downloads-tarball
                     branch: master
-                    search_artifacts: true
+                    workflow_conclusion: success
+                    if_no_artifact_found: fail
 
             -   name: Prepare cache directories
                 if: steps.cache.outputs.cache-hit != 'true'
@@ -302,7 +303,8 @@ jobs:
                     workflow: spc-download.yml
                     name: downloads-tarball
                     branch: master
-                    search_artifacts: true
+                    workflow_conclusion: success
+                    if_no_artifact_found: fail
 
             -   name: Extract with permissions
                 run: |
@@ -366,7 +368,7 @@ jobs:
                       exit 0
                     fi
 
-                    if ! tolerant=$(jq -r 'if .allow_shared_ext_failure == true then "true" else "false" end' "$MANIFEST"); then
+                    if ! tolerant=$(jq -r 'if (.allow_shared_ext_failure // false) == true then "true" else "false" end' "$MANIFEST"); then
                       echo "::warning::unreadable skipped-extension manifest at ${MANIFEST} (${LABEL})"
                       exit 0
                     fi
