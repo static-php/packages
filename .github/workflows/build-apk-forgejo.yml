@@ -334,8 +334,12 @@ jobs:
                     docker run --rm \
                         -v "$GITHUB_WORKSPACE":/build -w /build \
                         -e PHPV="${{ matrix.php-version }}" \
+                        -e PACKAGES \
                         "$IMAGE" \
-                        bash -lc 'php bin/spp test --phpv="$PHPV" --prefix=-zts --type=apk'
+                        bash -lc '
+                            PACKAGES_FLAG=""; [ -n "$PACKAGES" ] && PACKAGES_FLAG="--packages=$PACKAGES"
+                            php bin/spp test --phpv="$PHPV" --prefix=-zts --type=apk $PACKAGES_FLAG
+                        '
 
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}

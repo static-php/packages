@@ -394,7 +394,12 @@ jobs:
                     MATRIX_PHP_VERSION: ${{ matrix.php-version }}
 
             -   name: Test packages
-                run: php bin/spp test --type=rpm --phpv=${{ matrix.php-version }}
+                run: |
+                    PACKAGES_FLAG=""
+                    if [[ -n "${PACKAGES}" ]]; then
+                      PACKAGES_FLAG="--packages=${PACKAGES}"
+                    fi
+                    php bin/spp test --type=rpm --phpv=${{ matrix.php-version }} $PACKAGES_FLAG
 
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}

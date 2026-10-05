@@ -344,7 +344,12 @@ jobs:
                     bin/spp all --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb --debuginfo $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
 
             -   name: Test packages
-                run: bin/spp test --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb
+                run: |
+                    PACKAGES_FLAG=""
+                    if [[ -n "${{ env.PACKAGES }}" ]]; then
+                      PACKAGES_FLAG="--packages=${{ env.PACKAGES }}"
+                    fi
+                    bin/spp test --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb $PACKAGES_FLAG
 
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}
