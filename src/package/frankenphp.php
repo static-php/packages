@@ -345,7 +345,6 @@ class frankenphp implements package
             $frankenphpSuffix = $matches[1];
         }
 
-        $patchPackageFolder = BASE_PATH . '/src/package/frankenphp';
         $completionFile = TEMP_DIR . '/frankenphp' . $frankenphpSuffix . '.bash';
         $ldLibraryPath = 'LD_LIBRARY_PATH=' . BUILD_LIB_PATH;
         shell()->exec($ldLibraryPath . ' ' . BUILD_BIN_PATH . '/frankenphp completion bash > ' . $completionFile);
