@@ -147,10 +147,13 @@ class TestCommand extends BaseCommand
             // partial build won't have pulled it — install it from the repo like the base.
             if (!is_executable($franken)) {
                 $output->writeln("frankenphp not in this build — installing it from the repo...");
+                // A build that ships the base but not frankenphp skipped baseRepoArgs() above, so
+                // the repo was never wired up — do it now or the install below can't resolve.
+                $frRepoArgs = $hasBase ? $this->baseRepoArgs($type, $output) : $repoArgs;
                 $frInstall = match ($type) {
-                    'rpm' => array_merge(['dnf', 'install', '-y'], $repoArgs, ['frankenphp']),
-                    'deb' => array_merge(['apt-get', 'install', '-y', '--no-install-recommends'], ['frankenphp']),
-                    'apk' => array_merge(['apk', 'add', '--allow-untrusted'], $repoArgs, ['frankenphp']),
+                    'rpm' => array_merge(['dnf', 'install', '-y'], $frRepoArgs, ['frankenphp']),
+                    'deb' => array_merge(['apt-get', 'install', '-y', '--no-install-recommends'], $frRepoArgs, ['frankenphp']),
+                    'apk' => array_merge(['apk', 'add', '--allow-untrusted'], $frRepoArgs, ['frankenphp']),
                 };
                 $this->sh($this->maybeSudo($frInstall), $output);
             }
