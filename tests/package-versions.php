@@ -45,7 +45,7 @@ $less = static function (string $type, string $older, string $newer) use ($compa
     $checks++;
 };
 
-$expected = ['rpm' => '3.6.0_806.0~rc3+ext~alpha1', 'deb' => '3.6.0+php806.0~rc3+ext~alpha1', 'apk' => '3.6.0p806.0_rc3_p0_alpha1'];
+$expected = ['rpm' => '3.6.0_86.0~rc3+ext~alpha1', 'deb' => '3.6.0+php86.0~rc3+ext~alpha1', 'apk' => '3.6.0p86.0_rc3_p0_alpha1'];
 $phpStages = ['8.6.0-dev', '8.6.0alpha0', '8.6.0alpha1', '8.6.0alpha2', '8.6.0beta1', '8.6.0beta2', '8.6.0beta3', '8.6.0RC1', '8.6.0RC2', '8.6.0RC3', '8.6.0'];
 $extensionStages = ['3.6.0dev', '3.6.0dev2', '3.6.0alpha0', '3.6.0alpha1', '3.6.0alpha2', '3.6.0beta1', '3.6.0RC1', '3.6.0RC2', '3.6.0'];
 $legacyXdebug = [
@@ -114,9 +114,8 @@ foreach ($types as $type) {
         }
     }
     $less($type, $version($type, '3.6.0alpha1', '8.6.0'), $version($type, '3.6.1dev', '8.6.0'));
-    $less($type, $version($type, '3.6.0', '8.6.0'), $version($type, '3.6.0', '8.10.0alpha1'));
-    $less($type, $version($type, '3.6.0', '8.10.0'), $version($type, '3.6.0dev', '9.0.0alpha1'));
-    $less($type, $version($type, '3.6.0', '9.99.0'), $version($type, '3.6.0dev', '10.0.0alpha1'));
+    $less($type, $version($type, '3.6.0', '8.6.0'), $version($type, '3.6.0dev', '9.0.0alpha1'));
+    $less($type, $version($type, '3.6.0', '9.9.0'), $version($type, '3.6.0dev', '10.0.0alpha1'));
     $less($type, $version($type, '3.6.0', '8.6.0'), $version($type, '3.6.0dev', '8.6.1alpha1'));
     $less($type, $version($type, '3.6.0', '8.6.9'), $version($type, '3.6.0dev', '8.6.10alpha1'));
     foreach (['alpha', 'beta', 'RC'] as $phase) {

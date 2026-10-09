@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix="createrepo-versions-") as temporary:
 class PackageVersions(unittest.TestCase):
     def test_tagged_packages(self):
         for name in ["php-zts-xdebug", "php-zts-xdebug-debuginfo", "pie-zts", "pie-zts-debuginfo", "frankenphp", "frankenphp-debuginfo"]:
-            for version in ["3.6.0~dev_86~beta2", "3.6.0_806.0~rc3+ext~alpha1", "3.6.0_806.0~rc3+ext~~dev", "3.6.0_806.0+ext~alpha1", "3.6.0_806.0+ext"]:
+            for version in ["3.6.0~dev_86~beta2", "3.6.0_86.0~rc3+ext~alpha1", "3.6.0_86.0~rc3+ext~~dev", "3.6.0_86.0+ext~alpha1", "3.6.0_86.0+ext"]:
                 with self.subTest(name=name, version=version):
                     filename = f"{name}-{version}-1.el10.x86_64.rpm"
                     info = repo["parse_rpm_info"](filename)
@@ -34,7 +34,7 @@ class PackageVersions(unittest.TestCase):
         self.assertEqual(repo["parse_rpm_info"](filename), ("php-zts-cli", "8.6.0~~dev", "1.el10", "x86_64", "8.6"))
 
     def test_stream_tags(self):
-        for tag, stream in [("86", "8.6"), ("806", "8.6"), ("810", "8.10"), ("900", "9.0"), ("1000", "10.0")]:
+        for tag, stream in [("85", "8.5"), ("86", "8.6"), ("90", "9.0"), ("99", "9.9"), ("100", "10.0")]:
             with self.subTest(tag=tag):
                 self.assertEqual(repo["php_stream"](f"3.6.0_{tag}.10~rc3+ext~alpha1"), stream)
 

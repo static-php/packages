@@ -16,10 +16,8 @@ def php_stream(version):
         tag = re.match(r'\d+', version.rsplit('_', 1)[1])
         if tag:
             digits = tag.group()
-            if len(digits) == 2:
-                return '{}.{}'.format(digits[0], digits[1])
-            if len(digits) > 2:
-                return '{}.{}'.format(digits[:-2], int(digits[-2:]))
+            if len(digits) >= 2:
+                return '{}.{}'.format(digits[:-1], digits[-1])
     match = re.match(r'\d+\.\d+', version)
     return match.group() if match else None
 

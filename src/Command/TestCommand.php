@@ -366,17 +366,15 @@ class TestCommand extends BaseCommand
         $cli = 'php' . SPP_PREFIX . '-cli';
         $re = '/' . preg_quote($cli, '/') . '\s*\(?\s*>=\s*(\d+\.\d+)/';
         $marker = str_replace('.', '', $mm);
-        [$major, $minor] = explode('.', $mm);
-        $markers = [$marker, sprintf('%d%02d', (int)$major, (int)$minor)];
 
         // php-zts-cli and frankenphp carry no php-cli bound — the first IS the PHP version,
         // the second marks it as _86 / +php86 / p86. Without this both minors would be kept.
-        $matchesVersion = static function (array $x) use ($re, $mm, $markers, $cli): bool {
+        $matchesVersion = static function (array $x) use ($re, $mm, $marker, $cli): bool {
             if (preg_match($re, $x['deps'], $m)) {
                 return $m[1] === $mm;
             }
             if (preg_match('/(?:_|\+php|p)(\d{2,})(?=\.|~|\+ext|_(?:alpha|beta|pre|rc|p0)|-r?\d+$|$)/', $x['version'], $m)) {
-                return in_array($m[1], $markers, true);
+                return $m[1] === $marker;
             }
             if (str_starts_with($x['name'], $cli) && preg_match('/^(\d+\.\d+)/', $x['version'], $m)) {
                 return $m[1] === $mm;

@@ -7,7 +7,7 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 putenv('SPP_FORGEJO_HOST=https://example.com');
 putenv('SPP_FORGEJO_OWNER=86');
 $cache = new ReflectionProperty(CreatePackages::class, 'httpCache');
-$version = '3.6.0+php806.0~rc3+ext~alpha1';
+$version = '3.6.0+php86.0~rc3+ext~alpha1';
 
 foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
     $suffix = $type === 'deb' ? '-9' : '-r9';

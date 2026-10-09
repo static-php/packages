@@ -34,9 +34,7 @@ def php_stream(version):
     tag = re.match(r'\d+', version.split('_')[-1])
     if tag and len(tag.group()) >= 2:
         digits = tag.group()
-        if len(digits) == 2:
-            return f"{digits[0]}.{digits[1]}"
-        return f"{digits[:-2]}.{int(digits[-2:])}"
+        return f"{digits[:-1]}.{digits[-1]}"
     return '.'.join(version.split('_')[0].split('.')[:2])
 
 def parse_rpm_info(filename):

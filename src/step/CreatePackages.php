@@ -363,9 +363,9 @@ class CreatePackages
 
     /**
      * The tag binding a package to the PHP it was built against, appended to that package's own
-     * version: '_806.0' (rpm), '+php806.0' (deb), 'p806.0' (apk).
+     * version: '_86.0' (rpm), '+php86.0' (deb), 'p86.0' (apk).
      *
-     * A two-digit minor keeps 8.10 below 9.0. The PHP prerelease stays attached to the tag;
+     * The PHP prerelease stays attached to the tag;
      * getTaggedPackageVersion moves the extension prerelease after it and adds a boundary
      * that keeps both PHP GA and the extension's own GA above their respective prereleases.
      */
@@ -373,7 +373,7 @@ class CreatePackages
     {
         [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
         if (preg_match('/^(\d+)\.(\d+)(?:\.(\d+))?/', $fullPhpVersion, $m)) {
-            $phpVersionSuffix = sprintf('%d%02d.%d', (int)$m[1], (int)$m[2], (int)($m[3] ?? 0));
+            $phpVersionSuffix = sprintf('%d%d.%d', (int)$m[1], (int)$m[2], (int)($m[3] ?? 0));
         } else {
             $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
         }
