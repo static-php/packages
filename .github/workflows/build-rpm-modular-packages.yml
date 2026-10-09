@@ -11,7 +11,7 @@ on:
                 description: "Bump each package iteration to (latest published on the repo) + 1"
                 type: boolean
                 required: false
-                default: false
+                default: true
             php_versions:
                 description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
                 required: false
@@ -273,7 +273,7 @@ jobs:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             BASH_ENV: /tmp/gha-bashenv
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ inputs.bump || false }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
             PACKAGES: ${{ inputs.packages || '' }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         strategy:
@@ -377,6 +377,9 @@ jobs:
 
             -   name: Build PHP
                 run: |
+                    php tests/package-versions.php --type=rpm
+                    php tests/package-iterations.php
+                    python3 tests/upgrade-guards.py
                     PACKAGES_FLAG=""
                     if [[ -n "${PACKAGES}" ]]; then
                       PACKAGES_FLAG="--packages=${PACKAGES}"
@@ -386,7 +389,7 @@ jobs:
                       ITERATION_FLAG="--iteration=${ITERATION}"
                     fi
                     BUMP_FLAG=""
-                    if [[ "${BUMP}" == "true" ]]; then
+                    if [[ "${BUMP}" == "true" && -z "${ITERATION}" ]]; then
                       BUMP_FLAG="--bump"
                     fi
                     php bin/spp all --type=rpm --debuginfo --phpv=${MATRIX_PHP_VERSION} $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
@@ -488,7 +491,10 @@ jobs:
                     done
 
             -   name: Upload packages
+                env:
+                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
                 run: |
+                    python3 bin/check-rpm-upgrades --host "github@${{ secrets.DEB_SERVER_IP }}" --remote-directory "/mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}" --php-version "$MATRIX_PHP_VERSION" dist/rpm
                     rsync -av --ignore-existing dist/rpm/*.rpm github@${{ secrets.DEB_SERVER_IP }}:/mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}/
 
             -   name: Upload logs
@@ -552,6 +558,11 @@ jobs:
             fail-fast: false
             matrix: ${{ fromJson(needs.setup-update-matrix.outputs.matrix) }}
         steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+
             -   name: Set architecture variables
                 run: |
                     if [[ "${MATRIX_ARCH}" == "arm64" ]]; then
@@ -586,4 +597,4 @@ jobs:
 
             -   name: Update repository metadata
                 run: |
-                    ssh github@${{ secrets.DEB_SERVER_IP }} "cd /mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}/ && createrepo_static && createrepo_c --update . && modifyrepo_c --mdtype=modules modules.yaml repodata/"
+                    ssh github@${{ secrets.DEB_SERVER_IP }} "cd /mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}/ && python3 - && createrepo_c --update . && modifyrepo_c --mdtype=modules modules.yaml repodata/" < bin/createrepo_static

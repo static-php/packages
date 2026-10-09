@@ -3,6 +3,8 @@
 import sys
 import requests
 import re
+import subprocess
+import tarfile
 from pathlib import Path
 from fnmatch import fnmatch
 
@@ -11,14 +13,29 @@ host2 = "https://git.static-php.dev"
 
 def get_remote_packages(host, owner, password, pkg_type):
     url = f"{host}/api/v1/packages/{owner}"
-    params = {"type": pkg_type, "limit": 1000}
-    response = requests.get(url, params=params, auth=(owner, password))
-    response.raise_for_status()
-    return response.json()
+    packages = []
+    page = 1
+    previous = None
+    while True:
+        params = {"type": pkg_type, "limit": 1000, "page": page}
+        response = requests.get(url, params=params, auth=(owner, password), timeout=30)
+        response.raise_for_status()
+        batch = response.json()
+        if not isinstance(batch, list):
+            raise RuntimeError(f"Invalid package list from {url}")
+        if not batch:
+            return packages
+        if batch == previous:
+            raise RuntimeError(f"Package pagination did not advance at {url}")
+        packages.extend(batch)
+        previous = batch
+        page += 1
 
-def get_remote_package_archs(host, owner, password, pkg_type, name, version):
+def get_remote_package_archs(host, owner, password, pkg_type, name, version, strict=False):
     url = f"{host}/api/v1/packages/{owner}/{pkg_type}/{name}/{version}/files"
-    resp = requests.get(url, auth=(owner, password))
+    resp = requests.get(url, auth=(owner, password), timeout=30)
+    if strict:
+        resp.raise_for_status()
     archs = set()
     if resp.status_code == 200:
         for f in resp.json():
@@ -27,6 +44,39 @@ def get_remote_package_archs(host, owner, password, pkg_type, name, version):
                 if arch in fname:
                     archs.add(arch)
     return archs
+
+def package_metadata(pkg_file, pkg_type):
+    if pkg_type == 'debian':
+        output = subprocess.check_output(['dpkg-deb', '-f', str(pkg_file), 'Package', 'Version', 'Architecture'], universal_newlines=True)
+        fields = dict(line.split(': ', 1) for line in output.splitlines())
+        return fields['Package'], fields['Version'], fields['Architecture']
+    with tarfile.open(str(pkg_file), 'r:gz') as archive:
+        metadata = archive.extractfile('.PKGINFO').read().decode()
+    fields = dict(re.findall(r'^(pkgname|pkgver|arch)\s*=\s*(\S+)', metadata, re.M))
+    return fields['pkgname'], fields['pkgver'], fields['arch']
+
+def version_is_newer(pkg_type, left, right):
+    if pkg_type == 'debian':
+        result = subprocess.run(['dpkg', '--compare-versions', left, 'gt', right])
+        if result.returncode not in [0, 1]:
+            raise RuntimeError(f"Cannot compare Debian versions {left} and {right}")
+        return result.returncode == 0
+    result = subprocess.check_output(['apk', 'version', '-t', left, right], universal_newlines=True).strip()
+    if result not in ['<', '=', '>']:
+        raise RuntimeError(f"Cannot compare APK versions {left} and {right}")
+    return result == '>'
+
+def verify_upload_versions(host, owner, password, pkg_type, files, packages):
+    for pkg_file in files:
+        name, version, arch = package_metadata(pkg_file, pkg_type)
+        for published in packages:
+            if published['name'] != name or not version_is_newer(pkg_type, published['version'], version):
+                continue
+            archs = get_remote_package_archs(host, owner, password, pkg_type, name, published['version'], strict=True)
+            if not archs:
+                raise RuntimeError(f"Cannot determine published architectures for {name} {published['version']}")
+            if arch in archs:
+                raise RuntimeError(f"Refusing upload: {pkg_file.name} ({version}) sorts below published {name} {published['version']} for {arch}")
 
 def get_package_info(pkg_file, pkg_type):
     if pkg_type == 'rpm':
@@ -120,18 +170,16 @@ def delete_packages(host, owner, password, pkg_type, pattern):
 def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", branch="main"):
     # Build set of name-version strings that exist remotely
     remote_names = set()
-    try:
-        packages = get_remote_packages(host, owner, password, pkg_type)
-        remote_names = {f"{p['name']}-{p['version']}" for p in packages}
-    except Exception as e:
-        print(f"Warning: Could not fetch existing packages: {e}")
+    packages = get_remote_packages(host, owner, password, pkg_type)
+    remote_names = {f"{p['name']}-{p['version']}" for p in packages}
+    files = [path for path in Path('.').glob(pattern) if path.is_file()]
+    if pkg_type in ['debian', 'alpine']:
+        verify_upload_versions(host, owner, password, pkg_type, files, packages)
 
     # Cache arch lookups so we only fetch files once per name-version
     arch_cache = {}
 
-    for pkg_file in Path(".").glob(pattern):
-        if not pkg_file.is_file():
-            continue
+    for pkg_file in files:
 
         info = get_package_info(pkg_file, pkg_type)
         if not info:

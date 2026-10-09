@@ -11,7 +11,7 @@ on:
                 description: "Bump each package iteration to (latest published on the repo) + 1"
                 type: boolean
                 required: false
-                default: false
+                default: true
             php_versions:
                 description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
                 required: false
@@ -258,7 +258,7 @@ jobs:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             BASH_ENV: /tmp/gha-bashenv
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ inputs.bump || false }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
             PACKAGES: ${{ inputs.packages || '' }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -328,7 +328,12 @@ jobs:
                     rm buildroot.tar.zst
 
             -   name: Build PHP packages
+                env:
+                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
                 run: |
+                    php tests/package-versions.php --type=deb
+                    php tests/package-iterations.php
+                    python3 tests/upgrade-guards.py
                     PACKAGES_FLAG=""
                     if [[ -n "${{ env.PACKAGES }}" ]]; then
                       PACKAGES_FLAG="--packages=${{ env.PACKAGES }}"
@@ -338,7 +343,7 @@ jobs:
                       ITERATION_FLAG="--iteration=${ITERATION}"
                     fi
                     BUMP_FLAG=""
-                    if [[ "${BUMP}" == "true" ]]; then
+                    if [[ "${BUMP}" == "true" && -z "${ITERATION}" ]]; then
                       BUMP_FLAG="--bump"
                     fi
                     bin/spp all --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb --debuginfo $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG

@@ -11,7 +11,7 @@ on:
                 description: "Bump each package iteration to (latest published on the repo) + 1"
                 type: boolean
                 required: false
-                default: false
+                default: true
             php_versions:
                 description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
                 required: false
@@ -244,7 +244,7 @@ jobs:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             IMAGE: ghcr.io/static-php/packages-builder-alpine:latest
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ inputs.bump || false }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
             PACKAGES: ${{ inputs.packages || '' }}
 
         steps:
@@ -308,12 +308,14 @@ jobs:
                     rm buildroot.tar.zst
 
             -   name: Build PHP packages
+                env:
+                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
                 run: |
                     docker run --rm \
                         -v "$GITHUB_WORKSPACE":/build -w /build \
                         -v "$HOME/.cache/composer":/composer-cache \
                         -e GITHUB_TOKEN -e COMPOSER_CACHE_DIR=/composer-cache \
-                        -e ITERATION -e BUMP -e PACKAGES \
+                        -e ITERATION -e BUMP -e PACKAGES -e FORGEJO_PASSWORD \
                         -e PHPV="${{ matrix.php-version }}" \
                         "$IMAGE" \
                         bash -lc '
@@ -323,9 +325,12 @@ jobs:
                             # and SPC re-clones every git source. Trust them.
                             git config --global --add safe.directory "*"
                             composer install --no-interaction --prefer-dist --no-progress
+                            php tests/package-versions.php --type=apk
+                            php tests/package-iterations.php
+                            python3 tests/upgrade-guards.py
                             PACKAGES_FLAG=""; [ -n "$PACKAGES" ] && PACKAGES_FLAG="--packages=$PACKAGES"
                             ITERATION_FLAG=""; [ -n "$ITERATION" ] && ITERATION_FLAG="--iteration=$ITERATION"
-                            BUMP_FLAG=""; [ "$BUMP" = "true" ] && BUMP_FLAG="--bump"
+                            BUMP_FLAG=""; [ "$BUMP" = "true" ] && [ -z "$ITERATION" ] && BUMP_FLAG="--bump"
                             php bin/spp all --phpv="$PHPV" --prefix=-zts --type=apk $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
                         '
 
