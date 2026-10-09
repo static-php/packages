@@ -2,6 +2,7 @@
 
 namespace staticphp\Command;
 
+use RuntimeException;
 use staticphp\CraftConfig;
 use staticphp\step\CreatePackages;
 use staticphp\util\SkippedExtensions;
@@ -365,15 +366,17 @@ class TestCommand extends BaseCommand
         $cli = 'php' . SPP_PREFIX . '-cli';
         $re = '/' . preg_quote($cli, '/') . '\s*\(?\s*>=\s*(\d+\.\d+)/';
         $marker = str_replace('.', '', $mm);
+        [$major, $minor] = explode('.', $mm);
+        $markers = [$marker, sprintf('%d%02d', (int)$major, (int)$minor)];
 
         // php-zts-cli and frankenphp carry no php-cli bound — the first IS the PHP version,
         // the second marks it as _86 / +php86 / p86. Without this both minors would be kept.
-        $matchesVersion = static function (array $x) use ($re, $mm, $marker, $cli): bool {
+        $matchesVersion = static function (array $x) use ($re, $mm, $markers, $cli): bool {
             if (preg_match($re, $x['deps'], $m)) {
                 return $m[1] === $mm;
             }
-            if (preg_match('/(?:_|\+php|p)(\d{2,3})(?:~[a-z0-9]+)?$/', $x['version'], $m)) {
-                return $m[1] === $marker;
+            if (preg_match('/(?:_|\+php|p)(\d{2,})(?=\.|~|\+ext|_(?:alpha|beta|pre|rc|p0)|-r?\d+$|$)/', $x['version'], $m)) {
+                return in_array($m[1], $markers, true);
             }
             if (str_starts_with($x['name'], $cli) && preg_match('/^(\d+\.\d+)/', $x['version'], $m)) {
                 return $m[1] === $mm;
@@ -410,7 +413,7 @@ class TestCommand extends BaseCommand
         foreach ($keep as $x) {
             $cur = $newest[$x['name']] ?? null;
             if ($cur === null
-                || version_compare($x['version'], $cur['version'], '>')
+                || $this->comparePackageVersions($type, $x['version'], $cur['version']) > 0
                 || ($x['version'] === $cur['version'] && strnatcmp($x['release'], $cur['release']) > 0)) {
                 if ($cur !== null) {
                     $skip[] = $cur['file'];
@@ -422,6 +425,45 @@ class TestCommand extends BaseCommand
         }
 
         return [array_column($newest, 'file'), $skip, array_values(array_unique(array_column($newest, 'name')))];
+    }
+
+    private function comparePackageVersions(string $type, string $left, string $right): int
+    {
+        if ($left === $right) {
+            return 0;
+        }
+        if ($type === 'rpm') {
+            $process = new Process(['rpmdev-vercmp', $left, $right]);
+            $process->run();
+            return match ($process->getExitCode()) {
+                0 => 0,
+                11 => 1,
+                12 => -1,
+                default => throw new RuntimeException('Cannot compare RPM versions: ' . $process->getErrorOutput()),
+            };
+        }
+        if ($type === 'deb') {
+            foreach (['lt' => -1, 'gt' => 1] as $operator => $result) {
+                $process = new Process(['dpkg', '--compare-versions', $left, $operator, $right]);
+                $process->run();
+                if ($process->isSuccessful()) {
+                    return $result;
+                }
+                if ($process->getExitCode() !== 1) {
+                    throw new RuntimeException('Cannot compare Debian versions: ' . $process->getErrorOutput());
+                }
+            }
+            return 0;
+        }
+
+        $process = new Process(['apk', 'version', '-t', $left, $right]);
+        $process->mustRun();
+        return match (trim($process->getOutput())) {
+            '-1', '<' => -1,
+            '0', '=' => 0,
+            '1', '>' => 1,
+            default => throw new RuntimeException("Cannot compare {$type} versions: " . $process->getOutput()),
+        };
     }
 
     /** @return array{file:string,name:string,version:string,deps:string} name + version + raw dependency string for a package file */

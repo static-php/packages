@@ -346,39 +346,34 @@ class CreatePackages
 
     /**
      * Turn an upstream PHP/extension version string into a package-orderable one:
-     *   8.6.0beta1 / 8.6.0-beta1 / 8.6.0RC1 / 8.6.0-dev  ->  8.6.0~beta1 / 8.6.0~rc1 / 8.6.0~dev
+     *   8.6.0beta1 / 8.6.0-beta1 / 8.6.0RC1 / 8.6.0-dev  ->  8.6.0~beta1 / 8.6.0~rc1 / 8.6.0~~dev
      * Plain releases pass through untouched. Without the tilde a pre-release outranks its
      * own GA release (rpmvercmp reads 8.6.0beta1 > 8.6.0); with it the chain is
      *   8.5.4 < 8.6.0~alpha3 < 8.6.0~beta1 < 8.6.0~rc1 < 8.6.0
      */
     public static function normalizeVersion(string $raw): string
     {
-        if (preg_match('/^(\d+\.\d+(?:\.\d+)?)(?:[.-]?((?:alpha|beta|rc|dev)\d*))?$/i', trim($raw), $m)) {
-            return $m[1] . (empty($m[2]) ? '' : '~' . strtolower($m[2]));
+        if (preg_match('/^(\d+\.\d+(?:\.\d+)?)(?:(?:[.-]|~{1,2})?((?:alpha|beta|rc|dev)\d*))?$/i', trim($raw), $m)) {
+            $marker = strtolower($m[2] ?? '');
+            // dev must precede alpha; a single tilde leaves these labels in lexical order.
+            return $m[1] . ($marker === '' ? '' : (str_starts_with($marker, 'dev') ? '~~' : '~') . $marker);
         }
         return trim($raw);
     }
 
     /**
      * The tag binding a package to the PHP it was built against, appended to that package's own
-     * version: '_86' (rpm), '+php86' (deb), 'p86' (apk).
+     * version: '_806.0' (rpm), '+php806.0' (deb), 'p806.0' (apk).
      *
-     * While that PHP is a pre-release the tag carries its marker as well, so an extension built
-     * against 8.6.0~alpha3 sorts below the same one built against ~beta1 and both below the GA
-     * rebuild — otherwise the version never moves and a .so built against an older libphp stays
-     * installed after PHP is bumped.
-     *
-     * rpm and deb put the marker behind the version digits ('_86~beta1'), where it keeps the
-     * ordering across minors that the digits carry: 8.6's pre-release builds still outrank 8.5's,
-     * exactly as php-zts-cli 8.6.0~alpha3 outranks 8.5.4. apk has no tilde and only accepts the
-     * post-suffix behind its own underscore once a pre-release suffix is present ('6.2.0_rc2p86'
-     * is rejected), so there the marker goes in front and forces the '_p' form.
+     * A two-digit minor keeps 8.10 below 9.0. The PHP prerelease stays attached to the tag;
+     * getTaggedPackageVersion moves the extension prerelease after it and adds a boundary
+     * that keeps both PHP GA and the extension's own GA above their respective prereleases.
      */
     public static function getPhpVersionTag(string $packageType, string $packageVersion): string
     {
         [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
-        if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
-            $phpVersionSuffix = $m[1] . $m[2];
+        if (preg_match('/^(\d+)\.(\d+)(?:\.(\d+))?/', $fullPhpVersion, $m)) {
+            $phpVersionSuffix = sprintf('%d%02d.%d', (int)$m[1], (int)$m[2], (int)($m[3] ?? 0));
         } else {
             $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
         }
@@ -389,6 +384,26 @@ class CreatePackages
             'apk' => $preRelease . (str_contains($packageVersion . $preRelease, '~') ? '_p' : 'p') . $phpVersionSuffix,
             default => '_' . $phpVersionSuffix . $preRelease,
         };
+    }
+
+    public static function getTaggedPackageVersion(string $packageType, string $packageVersion): string
+    {
+        $packageVersion = self::normalizeVersion($packageVersion);
+        $markerPosition = strpos($packageVersion, '~');
+        $baseVersion = $markerPosition === false ? $packageVersion : substr($packageVersion, 0, $markerPosition);
+        $marker = $markerPosition === false ? '' : substr($packageVersion, $markerPosition);
+        $tag = self::getPhpVersionTag($packageType === 'apk' ? 'rpm' : $packageType, $packageVersion);
+        // The boundary keeps PHP GA above every PHP prerelease even when the extension is still a prerelease.
+        $tag = $packageType === 'apk' ? 'p' . substr($tag, 1) . '_p0' : $tag . '+ext';
+        $version = $baseVersion . $tag . $marker;
+
+        return $packageType === 'apk' ? self::toApkVersion($version) : $version;
+    }
+
+    public static function toApkVersion(string $version): string
+    {
+        // APK orders _pre after _alpha; a second _alpha keeps dev below even alpha0.
+        return str_replace(['~~dev', '~dev', '~'], ['_alpha0_alpha0', '_alpha0_alpha0', '_'], $version);
     }
 
     /** Pull SPC's internal-env constants and package configs in after BaseCommand has set BUILD_ROOT_PATH. */
@@ -469,7 +484,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $rpmVersion = $phpVersion . self::getPhpVersionTag('rpm', $phpVersion);
+            $rpmVersion = self::getTaggedPackageVersion('rpm', $phpVersion);
         }
 
         // Calculate iteration for RPM (--iteration override > --bump remote query > local)
@@ -661,7 +676,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $debVersion = $phpVersion . self::getPhpVersionTag('deb', $phpVersion);
+            $debVersion = self::getTaggedPackageVersion('deb', $phpVersion);
         }
 
         // Calculate iteration for DEB (--iteration override > --bump remote query > local)
@@ -858,13 +873,10 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $apkVersion = $phpVersion . self::getPhpVersionTag('apk', $phpVersion);
+            $apkVersion = self::getTaggedPackageVersion('apk', $phpVersion);
         }
 
-        // apk spells pre-releases _alpha/_beta/_pre/_rc; nfpm passes a tilde straight through and
-        // apk add then rejects it. apk has no _dev, so a dev snapshot maps to _pre — it sorts
-        // below the release it precedes, same as ~dev does. RPM and DEB keep ~.
-        $apkVersion = str_replace(['~dev', '~'], ['_pre', '_'], $apkVersion);
+        $apkVersion = self::toApkVersion($apkVersion);
 
         // Calculate iteration for APK (--iteration override > --bump remote query > local)
         $iteration = self::resolveIteration($name, $apkVersion, $architecture, 'apk');
@@ -1484,14 +1496,23 @@ class CreatePackages
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
         $owner = self::getForgejoOwner();
-        $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}&limit=1000";
-        [$code, $body] = self::httpGet($url);
-        if ($code !== 200 || $body === null) {
-            throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
-        }
-        $packages = json_decode($body, true);
-        if (!is_array($packages)) {
-            throw new RuntimeException("--bump: invalid Forgejo response for {$url}");
+        $packages = [];
+        $previous = null;
+        for ($page = 1; ; $page++) {
+            $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}&limit=1000&page={$page}";
+            [$code, $body] = self::httpGet($url);
+            if ($code !== 200 || $body === null) {
+                throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
+            }
+            $batch = json_decode($body, true);
+            if (!is_array($batch) || !array_is_list($batch) || $batch === $previous) {
+                throw new RuntimeException("--bump: invalid Forgejo pagination for {$url}");
+            }
+            if ($batch === []) {
+                break;
+            }
+            $packages = array_merge($packages, $batch);
+            $previous = $batch;
         }
 
         // Debian package names cannot contain underscores, so the registry stores them
@@ -1556,7 +1577,13 @@ class CreatePackages
         // listing is far smaller/faster than the HTML autoindex (e.g. 0.8MB/2s vs 4MB/120s);
         // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
         // both payloads, so the same regex extracts iterations either way.
-        $process = new Process(['curl', '-sSL', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}", $url]);
+        $arguments = ['curl', '-sSL', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
+        $forgejoHost = rtrim(getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com', '/');
+        $password = getenv('FORGEJO_PASSWORD') ?: '';
+        if ($password !== '' && str_starts_with($url, $forgejoHost . '/api/v1/packages/')) {
+            $arguments = [...$arguments, '--user', self::getForgejoOwner() . ':' . $password];
+        }
+        $process = new Process([...$arguments, $url]);
         $process->run();
         if (!$process->isSuccessful()) {
             return [0, null]; // transport failure: do not cache, allow a retry
