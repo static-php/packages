@@ -38,7 +38,7 @@ Every PASS includes CLI, CGI, FPM and FrankenPHP requests with the expected modu
 
 Production `php bin/spp test --phpv=8.6 --prefix=-zts --type=<apk|deb|rpm>` also passed independently on all five platforms, with the current TestCommand source, PNG requests, matching CLI/FrankenPHP VM kinds, install/uninstall checks and cleanup.
 
-| Library baseline | Owners | ELF | Typed SONAME corpora | Verified empty ABI | License owners | Runtime/debug packages |
+| Library baseline | Owners | ELF | SONAME ABI corpora | Verified empty ABI | License owners | Runtime/debug packages |
 |---|---:|---:|---:|---:|---:|---:|
 | alpine | 68 | 244 | 240 | 2 | 68 | 136 |
 | debian | 68 | 244 | 240 | 2 | 68 | 136 |
@@ -54,11 +54,11 @@ PHP 8.6.0beta1 intentionally records 15 unsupported shared extensions on every p
 
 SPC is locally committed at `d910c62cf4dbda527688038705449513ad7c0046` and the Composer source/dist references use that exact unpublished commit. The frozen PIE payload is 1.5.3 while the original download metadata says 1.4.10; that provenance difference is preserved. Public pushes, package publication, remote repository/secret provisioning and hosted installer publication were not performed.
 
-[The portable JSON](shared-library-validation.json) records source/helper generations, per-cell native/manifest/provenance hashes, all consumer archive hashes, deduplicated library archive inventories, skipped-extension corroboration, production CI proof, regression/source checks and retired attempt history. The four older ROOT-helper passes are distinguished from later v2 helper passes; observer attachment limits are explicit. Per-cell temporary resources were cleaned. Final task image/cache/filesystem cleanup is handled separately after this export.
+[The portable JSON](shared-library-validation.json) records source/helper generations, per-cell native/manifest/provenance hashes, all consumer archive hashes, deduplicated library archive inventories, skipped-extension corroboration, production CI proof, regression/source checks and retired attempt history. The four older ROOT-helper passes are distinguished from later v2 helper passes; observer attachment limits are explicit. Per-cell temporary resources and the final task build directory were removed. All 13 task image references and 106 remaining task cache records were removed; all 480 pre-existing cache records and unrelated image aliases were preserved. [Cleanup evidence](shared-library-cleanup.json) records the final checks.
 
 Final checker certificate SHA-256: `34a9e564f90efd0d67a4201a704134808a9c93a0de0b74d2fd10d04d3de92d26`.
 
-Portable JSON SHA-256: `7940169600d67d844960ba8007859a4d5f57248721bdbbc89caae0abb1440b8d`.
+Portable JSON SHA-256: `1a86a4881cce1ee580dce1229560c79d38f4f9833d8be07643a89afac437c742`.
 
 ## Reproduce checks
 
