@@ -19,6 +19,14 @@ with tempfile.TemporaryDirectory(prefix="createrepo-versions-") as temporary:
 
 
 class PackageVersions(unittest.TestCase):
+    def test_libraries_are_non_modular(self):
+        for name, version in [('php-zts-lib-openssl', '3.5.1'), ('php-zts-lib-gcc-runtime', '16.1.0'), ('php-zts-lib-libxml2-debuginfo', '2.14.0~rc1')]:
+            filename = f'{name}-{version}-1.el10.x86_64.rpm'
+            self.assertEqual(repo['parse_rpm_info'](filename), (name, version, '1.el10', 'x86_64', 'libraries'))
+            self.assertEqual(repo['build_module_structure']({'libraries': [filename]}, 'el10', 'x86_64'), [])
+        module = repo['build_module_structure']({'libraries': ['php-zts-lib-zlib-1.3.1-1.el10.x86_64.rpm'], '8.4': ['php-zts-cli-8.4.1-1.el10.x86_64.rpm']}, 'el10', 'x86_64')[0]
+        self.assertEqual(module['data']['artifacts']['rpms'], ['php-zts-cli-0:8.4.1-1.el10.x86_64'])
+
     def test_tagged_packages(self):
         for name in ["php-zts-xdebug", "php-zts-xdebug-debuginfo", "pie-zts", "pie-zts-debuginfo", "frankenphp", "frankenphp-debuginfo"]:
             for version in ["3.6.0~dev_86~beta2", "3.6.0_86.0~rc3+ext~alpha1", "3.6.0_86.0~rc3+ext~~dev", "3.6.0_86.0+ext~alpha1", "3.6.0_86.0+ext", "3.6.0_86.0", "3.6.0~alpha1_86.0", "3.6.0~~dev_86.0", "3.6.0_86.0~rc3", "3.6.0~alpha1_86.0~rc3", "3.6.0~~dev_86.0~rc3", "3.6.0~~dev_86.0~~dev"]:

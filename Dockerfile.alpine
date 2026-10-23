@@ -16,7 +16,19 @@ RUN if [ -z "${RPM_ARCH}" ]; then \
 
 RUN apk add --no-cache bash build-base linux-headers curl tar zstd xz gzip jq sudo git gnupg \
         python3 py3-requests bison re2c flex autoconf automake gettext-dev libtool pkgconf \
-        nasm gperf cmake patch perl unzip zlib-dev
+        nasm gperf cmake patch perl unzip zlib-dev patchelf
+
+# Alpine 3.21 does not package the ABI tools.
+ARG LIBABIGAIL_VERSION=2.10
+RUN apk add --no-cache elfutils-dev libxml2-dev xxhash-dev musl-fts-dev boost-dev && \
+    abi_build=$(mktemp -d) && trap 'rm -rf "$abi_build"' EXIT && \
+    curl -fsSL --retry 5 "https://sourceware.org/pub/libabigail/libabigail-${LIBABIGAIL_VERSION}.tar.xz" | \
+        tar -xJ -C "$abi_build" && \
+    cd "$abi_build/libabigail-${LIBABIGAIL_VERSION}" && \
+    PATH=/usr/bin:/bin ./configure --prefix=/usr/local \
+        --disable-apidoc --disable-manual --disable-deb --disable-rpm && \
+    PATH=/usr/bin:/bin make -j2 && PATH=/usr/bin:/bin make install && \
+    abidw --version && abidiff --version
 
 RUN RPM_ARCH=$(cat /tmp/rpm_arch) && \
     NFPM_ARCH=$(case "$RPM_ARCH" in aarch64) echo arm64 ;; *) echo x86_64 ;; esac) && \
@@ -57,19 +69,21 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
             --enable-checking=release --enable-languages=c,c++ --with-system-zlib \
             --with-as=/opt/gcc/bin/as --with-ld=/opt/gcc/bin/ld \
             --enable-default-pie --disable-libsanitizer --with-pkgversion="static-php GCC" && \
-        make -j"$(nproc)" && \
+        make -j"$(nproc)" CFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' CXXFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' LIBGCC2_DEBUG_CFLAGS='-g -gdwarf-4' && \
         make install-strip && \
+        make install-target && \
+        install -Dm644 ../COPYING3 /opt/gcc/share/licenses/gcc/COPYING3 && \
+        install -m644 ../COPYING.RUNTIME /opt/gcc/share/licenses/gcc/COPYING.RUNTIME && \
         cd / && rm -rf /tmp/gcc-${GCC_VERSION}; \
     fi
 
-# libstdc++.so dev-symlink becomes a linker script INPUT(libstdc++.a) so -lstdc++ links
-# gcc 16's C++ runtime statically: shipped artifacts then depend only on the system
-# musl/libgcc_s (built on the oldest supported Alpine, so no too-new symbols can leak in).
-# The assertions fail the image build if the toolchain regresses.
+COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
+RUN GCC_VERSION="${GCC_VERSION}" /usr/local/bin/build-gcc-runtime
+
+# Older toolchain archives contain a static-only linker script here.
 RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.a" ]; then \
-            rm -f "$d/libstdc++.so" && \
-            printf 'INPUT(libstdc++.a)\n' > "$d/libstdc++.so"; \
+        if [ -e "$d/libstdc++.so.6" ]; then \
+            ln -sf libstdc++.so.6 "$d/libstdc++.so"; \
         fi; \
     done && \
     ln -sf gcc /opt/gcc/bin/cc && \
@@ -81,8 +95,10 @@ RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
     gcc /tmp/cc-check.c -o /tmp/cc-check && /tmp/cc-check && \
     ! readelf -ld /tmp/cc-check | grep -qE 'linuxbrew|/opt/gcc' && \
     printf '#include <string>\nint main(){ return std::string("x").size() != 1; }\n' > /tmp/cxx-check.cpp && \
-    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && /tmp/cxx-check && \
-    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc|libstdc\+\+' && \
+    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && \
+    LD_LIBRARY_PATH="$(dirname "$(g++ -print-file-name=libstdc++.so.6)")" /tmp/cxx-check && \
+    readelf -d /tmp/cxx-check | grep -q 'libstdc++' && \
+    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc' && \
     rm -f /tmp/cc-check* /tmp/cxx-check*
 
 # Pre-install SPC's go-xcaddy package so workflows don't redownload it.

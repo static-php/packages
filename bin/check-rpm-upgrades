@@ -70,6 +70,7 @@ def published_packages(read_file):
             'arch': package.find(namespace + 'arch').text,
             'version': version['ver'],
             'evr': '{}:{}-{}'.format(version.get('epoch', '0'), version['ver'], version['rel']),
+            'location': package.find(namespace + 'location').attrib['href'] if package.find(namespace + 'location') is not None else None,
         })
     return packages
 
@@ -83,11 +84,13 @@ def local_package(path):
 
 
 def verify_package(local, published, stream=None):
-    local_stream = php_stream(local['version'])
-    if stream is not None and local_stream != stream:
+    independent = local['name'].startswith('php-zts-lib-')
+    local_stream = None if independent else php_stream(local['version'])
+    if stream is not None and not independent and local_stream != stream:
         raise RuntimeError('Cannot match {} to PHP {}'.format(local['name'], stream))
     for remote in published:
-        if (remote['name'], remote['arch'], php_stream(remote['version'])) != (local['name'], local['arch'], local_stream):
+        remote_stream = None if independent else php_stream(remote['version'])
+        if (remote['name'], remote['arch'], remote_stream) != (local['name'], local['arch'], local_stream):
             continue
         result = subprocess.run(['rpmdev-vercmp', local['evr'], remote['evr']], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if result.returncode == 12:
@@ -100,7 +103,7 @@ def main():
     parser = argparse.ArgumentParser(description='Select RPM packages that do not downgrade existing candidates in their PHP stream.')
     parser.add_argument('--host', required=True)
     parser.add_argument('--remote-directory', required=True)
-    parser.add_argument('--php-version', required=True)
+    parser.add_argument('--php-version')
     parser.add_argument('--files-from', required=True, type=Path)
     parser.add_argument('directory', type=Path)
     arguments = parser.parse_args()

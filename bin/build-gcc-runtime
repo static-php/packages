@@ -1,0 +1,95 @@
+#!/bin/bash
+set -euo pipefail
+
+check_only=false
+case ${1-} in
+    --check) check_only=true ;;
+    '') ;;
+    *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 1 ;;
+esac
+
+gcc_prefix=${SPP_GCC_PREFIX:-/opt/gcc}
+gcc_version=${GCC_VERSION:-16.2.0}
+gcc_binary="$gcc_prefix/bin/gcc"
+cxx_binary="$gcc_prefix/bin/g++"
+license_directory="$gcc_prefix/share/licenses/gcc"
+[[ $("$gcc_binary" -dumpfullversion) == "$gcc_version" ]]
+
+has_debug_info() {
+    LC_ALL=C readelf --debug-dump=info --wide "$1" | awk -v library="$1" '
+        /^[[:space:]]*Version:/ { version = $2; units++; versions[version]++ }
+        /DW_TAG_(subprogram|structure_type|class_type|base_type)/ {
+            types++
+            if (version != 4) incompatible = 1
+        }
+        END {
+            if (units && types && !incompatible) exit 0
+            for (version in versions) summary = summary " " version ":" versions[version]
+            printf "Invalid GCC runtime DWARF4: %s (units=%d, type/function DIEs=%d, CU versions:%s)\n", \
+                library, units, types, summary > "/dev/stderr"
+            exit 1
+        }
+    '
+}
+
+runtime_has_debug_info() {
+    has_debug_info "$("$gcc_binary" -print-file-name=libgcc_s.so.1)" &&
+        has_debug_info "$("$cxx_binary" -print-file-name=libstdc++.so.6)" || return 1
+    local library library_path
+    for library in libatomic.so.1 libgomp.so.1 libitm.so.1 libquadmath.so.0 libssp.so.0; do
+        library_path=$("$gcc_binary" -print-file-name="$library")
+        if [[ "$library_path" != "$library" && -f "$library_path" ]]; then
+            has_debug_info "$library_path" || return 1
+        fi
+    done
+}
+
+licenses_installed() {
+    [[ -s "$license_directory/COPYING3" && -s "$license_directory/COPYING.RUNTIME" ]]
+}
+
+if runtime_has_debug_info && licenses_installed; then
+    exit 0
+fi
+if "$check_only"; then
+    printf '%s\n' 'GCC runtime DWARF4 and COPYING3/COPYING.RUNTIME are required.' >&2
+    exit 1
+fi
+
+build_directory=$(mktemp -d)
+trap 'rm -rf "$build_directory"' EXIT
+trap 'exit 1' HUP INT TERM
+archive="$build_directory/gcc.tar.xz"
+curl -fsSL --retry 5 "https://ftp.gnu.org/gnu/gcc/gcc-${gcc_version}/gcc-${gcc_version}.tar.xz" -o "$archive"
+tar -xJf "$archive" -C "$build_directory"
+source_directory="$build_directory/gcc-$gcc_version"
+install -Dm644 "$source_directory/COPYING3" "$license_directory/COPYING3"
+install -m644 "$source_directory/COPYING.RUNTIME" "$license_directory/COPYING.RUNTIME"
+if runtime_has_debug_info; then
+    exit 0
+fi
+
+# GCC's target library build requires its generated compiler headers and support tools.
+printf 'Rebuilding GCC %s runtime with DWARF from matching source.\n' "$gcc_version"
+cd "$source_directory"
+./contrib/download_prerequisites
+mkdir "$build_directory/build"
+cd "$build_directory/build"
+configure_options=(
+    --prefix="$gcc_prefix" --disable-multilib --disable-bootstrap --disable-nls
+    --enable-checking=release --enable-languages=c,c++ --with-system-zlib
+    --with-as="$gcc_prefix/bin/as" --with-ld="$gcc_prefix/bin/ld"
+    --enable-default-pie '--with-pkgversion=static-php GCC'
+)
+if [[ -f /etc/alpine-release ]]; then
+    configure_options+=(--disable-libsanitizer)
+elif [[ -f /etc/debian_version ]]; then
+    configure_options+=(--enable-multiarch)
+fi
+CC=/usr/bin/gcc CXX=/usr/bin/g++ "$source_directory/configure" "${configure_options[@]}"
+build_jobs=${SPP_GCC_BUILD_JOBS:-$(nproc)}
+make -j"$build_jobs" CFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' \
+    CXXFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' LIBGCC2_DEBUG_CFLAGS='-g -gdwarf-4'
+make install-target
+runtime_has_debug_info
+licenses_installed

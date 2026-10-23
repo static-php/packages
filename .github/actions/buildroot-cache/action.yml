@@ -11,7 +11,7 @@ inputs:
         description: '"restore" or "save".'
     key:
         required: true
-        description: Cache key ending in -YYYY-WW (e.g. buildroot-rpm-alma10-arm64-zig-2026-19).
+        description: Source/configuration/toolchain fingerprint key ending in -YYYY-WW.
     fail-on-cache-miss:
         required: false
         default: 'false'

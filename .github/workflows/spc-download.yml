@@ -147,86 +147,16 @@ jobs:
                     FORCE_FULL: ${{ inputs.force_full || github.event.schedule == '0 0 * * 1' }}
                 run: |
                     set -euo pipefail
-
-                    # spc v3 writes downloads/.cache.json, keyed by artifact/package name,
-                    # with a source's hash at .<key>.source.hash. Only a subset of these keys
-                    # are valid `--packages` values for bin/spp: PHP extensions (keyed "ext-<name>",
-                    # emitted without the prefix) and the frankenphp SAPI. Every other key is a
-                    # bare library/toolchain source (libaom, openssl, zlib, …), php-src, or
-                    # php-micro — none of which are craft packages. Passing those to bin/spp
-                    # produces "Package X not found in configuration" warnings and wasteful
-                    # partial rebuilds, so they are dropped here. php-src bumps are handled
-                    # separately via full_versions below; a library-only bump intentionally
-                    # triggers nothing and gets folded into the tarball on the next real trigger.
-                    changed_pkgs=$(jq -nc \
-                        --slurpfile prev .download-state/lock.prev.json \
-                        --slurpfile cur downloads/.cache.json '
-                        ($prev[0] // {}) as $p | ($cur[0] // {}) as $c |
-                        [ ($c | keys[]) as $k
-                          | select(($p[$k].source.hash // "") != ($c[$k].source.hash // ""))
-                          | select(($k | startswith("ext-")) or $k == "frankenphp")
-                          | ($k | sub("^ext-"; "")) ]
-                        | unique
-                    ')
-                    echo "Changed packages: $(jq -c . <<< "$changed_pkgs")"
-
-                    # pie is downloaded outside SPC (src/package/pie.php pulls from
-                    # github.com/php/pie releases), so it never appears in .cache.json.
-                    # Detect bumps via the version stashed in .spc-meta.json by probe-upstream.
-                    prev_pie=$(jq -r '.pie_version // ""' .download-state/meta.prev.json)
-                    cur_pie=$(jq -r '.pie_version // ""'  downloads/.spc-meta.json)
-                    if [[ "$prev_pie" != "$cur_pie" ]]; then
-                        echo "pie version bump: ${prev_pie:-<none>} -> ${cur_pie}"
-                        changed_pkgs=$(jq -c '. + ["pie"] | unique' <<< "$changed_pkgs")
-                    fi
-
-                    pkgs=$(jq -r 'join(",")' <<< "$changed_pkgs")
-                    echo "Changed packages: ${pkgs:-<none>}"
-
-                    full_versions=$(jq -nrc \
-                        --slurpfile prev .download-state/meta.prev.json \
-                        --slurpfile cur downloads/.spc-meta.json '
-                        (($prev[0].php_versions) // {}) as $p |
-                        (($cur[0].php_versions)  // {}) as $c |
-                        [ ($c | keys[]) as $k
-                          | select($c[$k] != ($p[$k] // ""))
-                          | $k ]
-                    ')
-                    echo "PHP minors with bumped php-src: $(jq -c . <<< "$full_versions")"
-
-                    all_minors=$(jq -nc --arg s "$PHP_MINORS" '$s | split(" ")')
+                    args=()
                     if [[ "$FORCE_FULL" == "true" ]]; then
-                        echo "Full rebuild requested -> rebuilding all PHP versions"
-                        full_versions="$all_minors"
+                        args+=(--force-full)
                     fi
-
-                    full_csv=$(jq -r 'join(",")' <<< "$full_versions")
-
-                    partial_csv=""
-                    if [[ -n "$pkgs" ]]; then
-                        partial_csv=$(jq -nrc \
-                            --argjson all "$all_minors" \
-                            --argjson full "$full_versions" '
-                            $all - $full | join(",")
-                        ')
-                    fi
-
-                    any="false"
-                    if [[ -n "$pkgs" || -n "$full_csv" ]]; then
-                        any="true"
-                    fi
-
-                    echo "full_php=$full_csv"           | tee -a $GITHUB_OUTPUT
-                    echo "partial_php=$partial_csv"    | tee -a $GITHUB_OUTPUT
-                    echo "changed_packages=$pkgs"      | tee -a $GITHUB_OUTPUT
-                    echo "any_change=$any"             | tee -a $GITHUB_OUTPUT
-
+                    python3 .github/actions/shared-libraries/source-plan.py "${args[@]}" | tee -a "$GITHUB_OUTPUT"
                     {
-                        echo "## spc-download summary"
-                        echo "- Full rebuild PHP versions: ${full_csv:-<none>}"
-                        echo "- Partial rebuild PHP versions: ${partial_csv:-<none>}"
-                        echo "- Changed packages: ${pkgs:-<none>}"
-                        echo "- Any change: $any"
+                        echo '## Source build plan'
+                        echo '```json'
+                        cat downloads/build-plan.json
+                        echo '```'
                     } >> "$GITHUB_STEP_SUMMARY"
 
             -   name: Persist current state for next run
@@ -270,26 +200,10 @@ jobs:
                 if: steps.diff.outputs.any_change == 'true'
                 env:
                     GH_TOKEN: ${{ secrets.GH_PAT }}
-                    FULL_PHP: ${{ steps.diff.outputs.full_php }}
-                    PARTIAL_PHP: ${{ steps.diff.outputs.partial_php }}
-                    CHANGED_PACKAGES: ${{ steps.diff.outputs.changed_packages }}
                 run: |
                     set -euo pipefail
-                    workflows=(
-                        build-rpm-modular-packages.yml
-                        build-deb-forgejo.yml
-                        build-apk-forgejo.yml
-                    )
-                    for wf in "${workflows[@]}"; do
-                        if [[ -n "$FULL_PHP" ]]; then
-                            echo ">> $wf : full rebuild for $FULL_PHP"
-                            gh workflow run "$wf" -f php_versions="$FULL_PHP" -f downloads_run_id="$GITHUB_RUN_ID"
-                        fi
-                        if [[ -n "$CHANGED_PACKAGES" && -n "$PARTIAL_PHP" ]]; then
-                            echo ">> $wf : partial rebuild for $PARTIAL_PHP, packages=$CHANGED_PACKAGES"
-                            gh workflow run "$wf" \
-                                -f php_versions="$PARTIAL_PHP" \
-                                -f packages="$CHANGED_PACKAGES" \
-                                -f downloads_run_id="$GITHUB_RUN_ID"
-                        fi
+                    for workflow in build-rpm-modular-packages.yml build-deb-forgejo.yml build-apk-forgejo.yml; do
+                        gh workflow run "$workflow" \
+                            -f mode=incremental \
+                            -f downloads_run_id="$GITHUB_RUN_ID"
                     done

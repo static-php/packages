@@ -18,10 +18,8 @@ class devel implements package
 
         $phpConfigContent = file_get_contents($phpConfigPath);
 
-        // Replace buildroot paths with BUILD_ROOT_PATH
         $builtDir = BASE_PATH . '/buildroot';
-        $phpConfigContent = str_replace($builtDir, BUILD_ROOT_PATH, $phpConfigContent);
-        $phpConfigContent = str_replace('/app/buildroot', BUILD_ROOT_PATH, $phpConfigContent);
+        $phpConfigContent = str_replace([$builtDir, '/app/buildroot', BUILD_ROOT_PATH], '/usr', $phpConfigContent);
 
         $binarySuffix = getBinarySuffix();
         $sharedLibrarySuffix = getSharedLibrarySuffix();
@@ -48,6 +46,7 @@ class devel implements package
         // libphp filename with shared library suffix: libphp-zts-85.so, libphp-nts-84.so
         $libName = 'libphp' . $sharedLibrarySuffix . '.so';
         $phpConfigContent = str_replace('libphp.so', $libName, $phpConfigContent);
+        $phpConfigContent = preg_replace('/^ldflags=.*$/m', 'ldflags="-lpthread -Wl,--enable-new-dtags -Wl,-rpath,' . getLibdir() . '/php-zts/lib"', $phpConfigContent);
 
         // For APK, sed is in /bin/sed instead of /usr/bin/sed
         if (defined('SPP_TYPE') && SPP_TYPE === 'apk') {
@@ -62,9 +61,7 @@ class devel implements package
 
         $phpizeContent = file_get_contents($phpizePath);
 
-        // Replace buildroot paths with BUILD_ROOT_PATH
-        $phpizeContent = str_replace($builtDir, BUILD_ROOT_PATH, $phpizeContent);
-        $phpizeContent = str_replace('/app/buildroot', BUILD_ROOT_PATH, $phpizeContent);
+        $phpizeContent = str_replace([$builtDir, '/app/buildroot', BUILD_ROOT_PATH], '/usr', $phpizeContent);
 
         $phpizeContent = preg_replace(
             [

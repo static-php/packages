@@ -3,106 +3,173 @@ name: Build RPM modular packages
 on:
     workflow_dispatch:
         inputs:
+            mode:
+                description: "Full manual build or incremental source build plan"
+                type: choice
+                options: [full, incremental]
+                default: full
+            libraries:
+                description: "Optional: shared library IDs (comma-separated)"
+                default: ""
             downloads_run_id:
-                description: "Optional: pin the spc-download run providing the source snapshot"
-                required: false
+                description: "Optional: pin the spc-download source snapshot"
                 default: ""
             iteration:
-                description: "Optional: override package iteration (integer). Leave empty for auto"
-                required: false
+                description: "Optional: override package iteration"
                 default: ""
             bump:
-                description: "Bump each package iteration to (latest published on the repo) + 1"
+                description: "Bump package revisions above published packages"
                 type: boolean
-                required: false
-                default: false
+                default: true
             php_versions:
-                description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
-                required: false
+                description: "Optional: PHP streams (comma-separated); ABI transitions include all affected streams"
                 default: ""
             alma_versions:
-                description: "Optional: AlmaLinux versions (comma-separated, e.g., 8,10). Leave empty for all"
-                required: false
+                description: "Optional: Alma versions (comma-separated)"
                 default: ""
             architectures:
-                description: "Optional: Architectures (comma-separated, e.g., x86_64,arm64). Leave empty for all"
-                required: false
+                description: "Optional: architectures (comma-separated)"
                 default: ""
             packages:
-                description: "Optional: override packages list. Leave empty for default"
-                required: false
+                description: "Optional: PHP package selection"
                 default: ""
             debug_tmate:
-                description: "Open tmate session on failure"
+                description: "Open tmate on failure"
                 type: boolean
-                required: false
                 default: false
 
 permissions:
     contents: read
     packages: read
 
+concurrency:
+    group: shared-packages-rpm
+    cancel-in-progress: false
+
 jobs:
     setup-matrix:
         runs-on: ubuntu-24.04
-        if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request')
         permissions:
+            actions: read
             contents: read
         outputs:
-            libs-pairs: ${{ steps.set-matrix.outputs.libs-pairs }}
-            gcc-php-versions: ${{ steps.set-matrix.outputs.gcc-php-versions }}
-            gcc-needed: ${{ steps.set-matrix.outputs.gcc-needed }}
+            downloads-run-id: ${{ steps.source.outputs.run-id }}
+            matrix: ${{ steps.matrix.outputs.matrix }}
+            php-versions: ${{ steps.matrix.outputs.php-versions }}
         steps:
-            -   name: Set up matrix
-                id: set-matrix
-                run: |
-                    default_php='["8.2","8.3","8.4","8.5","8.6"]'
-                    default_alma='["8","9","10"]'
-                    default_arch='["x86_64","arm64"]'
-
-                    if [[ -n "${INPUTS_PHP_VERSIONS}" ]]; then
-                        php_versions=$(echo "${INPUTS_PHP_VERSIONS}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        php_versions=$default_php
-                    fi
-
-                    if [[ -n "${INPUTS_ALMA_VERSIONS}" ]]; then
-                        alma_versions=$(echo "${INPUTS_ALMA_VERSIONS}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        alma_versions=$default_alma
-                    fi
-
-                    if [[ -n "${INPUTS_ARCHITECTURES}" ]]; then
-                        arch_versions=$(echo "${INPUTS_ARCHITECTURES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        arch_versions=$default_arch
-                    fi
-
-                    # All PHP versions build with gcc; zig is only used for alpine/musl (separate workflow).
-                    gcc_php="$php_versions"
-
-                    gcc_needed=$(jq -nr --argjson p "$gcc_php" 'if ($p | length) > 0 then "true" else "false" end')
-
-                    libs_pairs=$(jq -nc \
-                        --argjson alma "$alma_versions" \
-                        --argjson arch "$arch_versions" \
-                        '{include: [$alma[] as $a | $arch[] as $r | {alma: $a, arch: $r}]}')
-
-                    echo "libs-pairs=$libs_pairs" >> $GITHUB_OUTPUT
-                    echo "gcc-php-versions=$gcc_php" >> $GITHUB_OUTPUT
-                    echo "gcc-needed=$gcc_needed" >> $GITHUB_OUTPUT
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Resolve one source snapshot for the entire build
+                id: source
                 env:
-                    INPUTS_PHP_VERSIONS: ${{ inputs.php_versions }}
-                    INPUTS_ALMA_VERSIONS: ${{ inputs.alma_versions }}
-                    INPUTS_ARCHITECTURES: ${{ inputs.architectures }}
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    REQUESTED_RUN_ID: ${{ inputs.downloads_run_id }}
+                run: |
+                    set -euo pipefail
+                    source_run="$REQUESTED_RUN_ID"
+                    if [[ -z "$source_run" ]]; then
+                        runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/spc-download.yml/runs?status=success&per_page=100" --paginate --jq '.workflow_runs[].id')
+                        for candidate in $runs; do
+                            available=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts" --paginate --jq '.artifacts[] | select(.name == "downloads-tarball" and .expired == false) | .id')
+                            if [[ -n "$available" ]]; then
+                                source_run="$candidate"
+                                break
+                            fi
+                        done
+                    fi
+                    if [[ ! "$source_run" =~ ^[0-9]+$ ]]; then
+                        echo '::error::No available spc-download source snapshot'
+                        exit 1
+                    fi
+                    echo "run-id=$source_run" >> "$GITHUB_OUTPUT"
+            -   name: Set target matrix
+                id: matrix
+                env:
+                    ARCHITECTURES: ${{ inputs.architectures }}
+                    ALMA_VERSIONS: ${{ inputs.alma_versions }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                run: |
+                    python3 .github/actions/shared-libraries/workflow.py setup --type=rpm \
+                        --architectures "$ARCHITECTURES" --alma-versions "$ALMA_VERSIONS" \
+                        --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
 
-    build-libs-gcc:
+    resolve-builders:
+        name: Resolve builder (${{ matrix.target }})
         needs: setup-matrix
-        if: ${{ needs.setup-matrix.outputs.gcc-needed == 'true' }}
-        name: Build libs gcc (alma${{ matrix.alma }} ${{ matrix.arch }})
-        runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            packages: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Pin target builder image
+                env:
+                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    ACTOR: ${{ github.actor }}
+                    ARCH: ${{ matrix.arch }}
+                    ALMA: ${{ matrix.alma }}
+                run: |
+                    set -euo pipefail
+                    echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    python3 .github/actions/shared-libraries/workflow.py setup --type=rpm \
+                        --architectures "$ARCH" --alma-versions "$ALMA" --resolve-images > "$RUNNER_TEMP/builder-output"
+                    sed -n 's/^matrix=//p' "$RUNNER_TEMP/builder-output" | jq '.include[0]' > target.json
+            -   name: Stage pinned builder
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-builders-rpm-${{ matrix.target }}
+                    path: target.json
+                    retention-days: 1
+
+    compute-libs-matrix:
+        needs: [setup-matrix, resolve-builders]
+        if: ${{ !cancelled() }}
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            actions: read
+        outputs:
+            matrix: ${{ steps.filter.outputs.matrix }}
+            any: ${{ steps.filter.outputs.any }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download pinned builders
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                continue-on-error: true
+                with:
+                    pattern: shared-builders-rpm-*
+                    path: builders
+            -   name: Filter successful builder targets
+                id: filter
+                env:
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                run: |
+                    set -euo pipefail
+                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Resolve builder \\("))) | .name' \
+                        | sed -E 's/^Resolve builder \(([^)]+)\)$/\1/' | sort -u)
+                    python3 .github/actions/shared-libraries/workflow.py targets --directory builders \
+                        --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
+
+    build-libs:
+        name: Build libs shared (${{ matrix.target }})
+        needs: [setup-matrix, compute-libs-matrix]
+        if: ${{ !cancelled() && needs.compute-libs-matrix.outputs.any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         container:
-            image: ghcr.io/static-php/packages-builder-rhel-${{ matrix.alma }}:latest
+            image: ${{ matrix.image }}
         permissions:
             contents: write
             packages: read
@@ -112,504 +179,48 @@ jobs:
                 shell: bash
         strategy:
             fail-fast: false
-            matrix: ${{ fromJson(needs.setup-matrix.outputs.libs-pairs) }}
+            matrix: ${{ fromJson(needs.compute-libs-matrix.outputs.matrix) }}
         env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            BASH_ENV: /tmp/gha-bashenv
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-
-            -   name: Set architecture variables
-                run: |
-                    if [[ "${MATRIX_ARCH}" == "arm64" ]]; then
-                      echo "RPM_ARCH=aarch64" >> $GITHUB_ENV
-                    else
-                      echo "RPM_ARCH=x86_64" >> $GITHUB_ENV
-                    fi
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-
-            -   name: Compute buildroot cache key
-                id: cache-key
-                run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-rpm-alma${{ matrix.alma }}-${{ matrix.arch }}-gcc-${WEEK}" >> $GITHUB_OUTPUT
-
-            -   name: Restore buildroot cache
-                id: cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-
-            -   name: Download artifact from spc-download.yml
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Prepare cache directories
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: composer config -g cache-dir
-
-            -   name: Cache Composer downloads
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Composer install
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: composer install --no-interaction --prefer-dist --no-progress
-
-            -   name: Extract with permissions
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-
-            -   name: Build libs
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: php bin/spp build --type=rpm --debuginfo --phpv=8.4 --libs-only
-
-            -   name: Pack buildroot
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: tar -cf - buildroot | zstd -o buildroot.tar.zst
-
-            -   name: Save buildroot cache
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: save
-                    key: ${{ steps.cache-key.outputs.key }}
-
-            -   name: Upload logs on failure
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: build-logs-libs-alma${{ matrix.alma }}-${{ matrix.arch }}-gcc
-                    path: log
-
-            -   name: Install tmate
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                run: |
-                    case "${MATRIX_ARCH}" in
-                      x86_64) arch="amd64" ;;
-                      arm64)  arch="arm64v8" ;;
-                    esac
-                    dir="tmate-2.4.0-static-linux-$arch"
-                    curl -L "https://github.com/tmate-io/tmate/releases/download/2.4.0/$dir.tar.xz" | tar -xJ -O "$dir/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-
-            -   name: Setup tmate session
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                with:
-                    install-dependencies: false
-                    sudo: false
-                timeout-minutes: 30
-
-    compute-build-gcc-matrix:
-        needs: [setup-matrix, build-libs-gcc]
-        runs-on: ubuntu-24.04
-        if: ${{ !cancelled() && needs.setup-matrix.outputs.gcc-needed == 'true' }}
-        permissions:
-            actions: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Filter build matrix to (alma, arch) with successful gcc libs
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    GCC_PHP: ${{ needs.setup-matrix.outputs.gcc-php-versions }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs gcc \\(alma"))) | .name' \
-                        | sed -E 's/^Build libs gcc \(alma([^ ]+) ([^)]+)\)$/\1 \2/' \
-                        | sort -u)
-                    echo "Successful gcc libs combos:"
-                    printf '%s\n' "$succeeded"
-
-                    include=$(jq -nc --arg s "$succeeded" --argjson p "$GCC_PHP" '
-                        ($s | split("\n") | map(select(length > 0) | split(" ") | {alma: .[0], arch: .[1]})) as $pairs |
-                        [ $pairs[] as $pair | $p[] as $php | $pair + {"php-version": $php} ]
-                    ')
-                    count=$(jq 'length' <<< "$include")
-                    echo "Filtered combos: $count"
-                    printf '%s\n' "$include" | jq .
-
-                    if [[ "$count" -gt 0 ]]; then
-                        echo "any=true" >> $GITHUB_OUTPUT
-                    else
-                        echo "any=false" >> $GITHUB_OUTPUT
-                    fi
-                    echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
-
-    build-gcc:
-        needs: [compute-build-gcc-matrix]
-        if: ${{ !cancelled() && needs.compute-build-gcc-matrix.outputs.any == 'true' }}
-        name: Build (alma${{ matrix.alma }} ${{ matrix.arch }} php${{ matrix.php-version }})
-        runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
-        container:
-            image: ghcr.io/static-php/packages-builder-rhel-${{ matrix.alma }}:latest
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            BASH_ENV: /tmp/gha-bashenv
+            IMAGE: ${{ matrix.image }}
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: rpm
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
+            PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            PACKAGES: ${{ inputs.packages || '' }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-gcc-matrix.outputs.matrix) }}
+            RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
-
-            -   name: Set architecture variables
-                run: |
-                    if [[ "${MATRIX_ARCH}" == "arm64" ]]; then
-                      echo "RPM_ARCH=aarch64" >> $GITHUB_ENV
-                    else
-                      echo "RPM_ARCH=x86_64" >> $GITHUB_ENV
-                    fi
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-
-            -   name: Prepare cache directories
-                run: composer config -g cache-dir
-
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Set up SSH key
-                uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
-                with:
-                    ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
-
-            -   name: Install tmate
-                run: |
-                    case "${MATRIX_ARCH}" in
-                      x86_64) arch="amd64" ;;
-                      arm64)  arch="arm64v8" ;;
-                    esac
-                    dir="tmate-2.4.0-static-linux-$arch"
-                    curl -L "https://github.com/tmate-io/tmate/releases/download/2.4.0/$dir.tar.xz" | tar -xJ -O "$dir/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-
-            -   name: Add remote host to known_hosts
-                run: |
-                    mkdir -p ~/.ssh
-                    cat >> /root/.ssh/known_hosts <<'EOF'
-                    ${{ secrets.DEB_SERVER_IP }} ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPQq0y77dDEtxECVMhCxjcqiV369goMcbInsY/d+F1yXGwqOXQ6RqIEzgaVhgq0joMJT5BiGXNXQ+OI10/KtzGI=
-                    ${{ secrets.DEB_SERVER_IP }} ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2laCc5jifgjL/2zLzgP1E/X3kouXdaZv00KtAV1DOO5umThoWzb16cswnVtjtLUEMIuo9rPLB79xX2Asa+nN3uMgJDANnr/xnhRoI++yOGLga40/O69U88j5x+5FXODscH/k4n85mfcjzm/fZLXcHlb17ibCmU20I3v46sydn95Pp4/ShDvqsHVB4gWEKJ+jStkooUz2H1UZ8ZquNtaPTlmkOeClNj6gxag74P5b9VB6M5YNac2Emi3Nm0dYkc+BL0Qv+NEtFR1lR63DLa3O/NGTALGJYGmTUkjwiv8KygegaKhd2zxESmWhV7eYIPax8zL+GE9sX1Xwwh1huS0vsuwr2dXPP1/q5slz1AQV/lx85fGdiHc0F8RUXwqXbvGxZJheTuC/Mgu0cFzp5gqO4kTP28X+9fokzScBKBCIfObDXrl7rZgTXAA8IQ5gHk1tGchaEOIcDsjdISW5HVOiwocYSwUNMHzuZ08qAulatIywtOGcWVRdvOs7TcvSgfZ0=
-                    ${{ secrets.DEB_SERVER_IP }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
-                    EOF
-                    chmod 600 /root/.ssh/known_hosts
-
-            -   name: Set target folder
-                run: |
-                    TARGET_DIR="el${MATRIX_ALMA}"
-                    echo "TARGET_DIR=${TARGET_DIR}" >> "$GITHUB_ENV"
-                env:
-                    MATRIX_ALMA: ${{ matrix.alma }}
-
-            -   name: Composer install
-                run: composer install --no-interaction --prefer-dist --no-progress
-
-            -   name: Download artifact from spc-download.yml
+            -   name: Download pinned source snapshot
                 uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
                 with:
                     workflow: spc-download.yml
                     name: downloads-tarball
                     search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Extract with permissions
+                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            -   name: Extract source snapshot
                 run: |
                     mkdir -p downloads
                     tar --no-same-owner -xzf downloads.tar.gz -C downloads
                     rm downloads.tar.gz
-
-            -   name: Compute buildroot cache key
-                id: cache-key
-                run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-rpm-alma${{ matrix.alma }}-${{ matrix.arch }}-gcc-${WEEK}" >> $GITHUB_OUTPUT
-
-            -   name: Restore buildroot cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-                    fail-on-cache-miss: true
-
-            -   name: Extract buildroot
-                run: |
-                    zstd -dc buildroot.tar.zst | tar -xf -
-                    rm buildroot.tar.zst
-
-            -   name: Build PHP
-                run: |
-                    php tests/package-versions.php --type=rpm
-                    php tests/package-iterations.php
-                    python3 tests/upgrade-guards.py
-                    PACKAGES_FLAG=""
-                    if [[ -n "${PACKAGES}" ]]; then
-                      PACKAGES_FLAG="--packages=${PACKAGES}"
-                    fi
-                    ITERATION_FLAG=""
-                    if [[ -n "${ITERATION}" ]]; then
-                      ITERATION_FLAG="--iteration=${ITERATION}"
-                    fi
-                    BUMP_FLAG=""
-                    if [[ "${BUMP}" == "true" && -z "${ITERATION}" ]]; then
-                      BUMP_FLAG="--bump"
-                    fi
-                    php bin/spp all --type=rpm --debuginfo --phpv=${MATRIX_PHP_VERSION} $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
-                env:
-                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
-
-            -   name: Test packages
-                run: |
-                    PACKAGES_FLAG=""
-                    if [[ -n "${PACKAGES}" ]]; then
-                      PACKAGES_FLAG="--packages=${PACKAGES}"
-                    fi
-                    php bin/spp test --type=rpm --phpv=${{ matrix.php-version }} $PACKAGES_FLAG
-
-            -   name: Report skipped shared extensions
-                if: ${{ !cancelled() }}
-                run: |
-                    set -uo pipefail
-                    LABEL="alma${MATRIX_ALMA} ${MATRIX_ARCH} php${MATRIX_PHP_VERSION}"
-                    MANIFEST=""
-                    for candidate in "build/${MATRIX_PHP_VERSION}/skipped-shared-extensions.json" "buildroot/skipped-shared-extensions.json"; do
-                      if [[ -f "$candidate" ]]; then
-                        MANIFEST="$candidate"
-                        break
-                      fi
-                    done
-
-                    if [[ -z "$MANIFEST" ]]; then
-                      echo "No skipped-shared-extensions manifest for ${LABEL}; nothing to report."
-                      exit 0
-                    fi
-
-                    if ! tolerant=$(jq -r 'if .allow_shared_ext_failure == true then "true" else "false" end' "$MANIFEST"); then
-                      echo "::warning::unreadable skipped-extension manifest at ${MANIFEST} (${LABEL})"
-                      exit 0
-                    fi
-
-                    entries=$(jq -r '(.skipped // [])[] | [(.extension // "?"), (.phase // "unknown"), ((.message // "") | gsub("[\r\n|]"; " "))] | @tsv' "$MANIFEST")
-                    if [[ -z "$entries" ]]; then
-                      echo "No shared extensions were skipped for ${LABEL} (allow_shared_ext_failure=${tolerant})."
-                      exit 0
-                    fi
-
-                    {
-                      echo "### Skipped shared extensions — ${LABEL}"
-                      echo ""
-                      echo "Manifest: \`${MANIFEST}\` (allow_shared_ext_failure=${tolerant})"
-                      echo ""
-                      echo "| Extension | Phase | Reason |"
-                      echo "| --- | --- | --- |"
-                    } >> "$GITHUB_STEP_SUMMARY"
-
-                    while IFS=$'\t' read -r ext phase message; do
-                      echo "| ${ext} | ${phase} | ${message} |" >> "$GITHUB_STEP_SUMMARY"
-                      echo "::warning::${LABEL}: skipped shared extension ${ext} (${phase}): ${message}"
-                    done <<< "$entries"
-                env:
-                    MATRIX_ALMA: ${{ matrix.alma }}
-                    MATRIX_ARCH: ${{ matrix.arch }}
-                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
-
-            -   name: Prepare rpm signing
-                run: |
-                    export GNUPGHOME="${HOME}/.gnupg"
-                    mkdir -p "${GNUPGHOME}"
-                    chmod 700 "${GNUPGHOME}"
-
-                    echo "allow-loopback-pinentry" > "${GNUPGHOME}/gpg-agent.conf"
-                    gpgconf --kill gpg-agent
-
-                    FPR=$(printf '%s' "${{ secrets.DEB_GPG_PRIVATE_KEY }}" \
-                      | gpg --batch --quiet --with-colons --import-options show-only --import 2>/dev/null \
-                      | awk -F: '/^fpr:/ {print $10; exit}')
-                    printf '%s' "${{ secrets.DEB_GPG_PRIVATE_KEY }}" | gpg --batch --yes --import
-
-                    {
-                      echo "pinentry-mode loopback"
-                      echo "default-key ${FPR}"
-                    } > "${GNUPGHOME}/gpg.conf"
-
-                    t=$(mktemp); echo warmup > "$t"
-                    gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
-                        --local-user "${FPR}" --sign --output /dev/null "$t" <<<"${{ secrets.DEB_GPG_PASSWORD }}"
-                    rm -f "$t"
-
-                    cat > ~/.rpmmacros <<EOF
-                    %_signature gpg
-                    %_gpg_path ${GNUPGHOME}
-                    %_gpg_name ${FPR}
-                    %_gpgbin /usr/bin/gpg
-                    %__gpg /usr/bin/gpg
-                    %__gpg_check_password_cmd /bin/true
-                    EOF
-
-            -   name: Sign RPM packages
-                run: |
-                    for rpm in dist/rpm/*.rpm; do
-                      rpmsign --addsign "$rpm"
-                    done
-
-            -   name: Check package upgrades
-                id: check-upgrades
-                env:
-                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
-                run: |
-                    status=0
-                    python3 bin/check-rpm-upgrades --host "github@${{ secrets.DEB_SERVER_IP }}" --remote-directory "/mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}" --php-version "$MATRIX_PHP_VERSION" --files-from "$RUNNER_TEMP/rpm-upload-files" dist/rpm || status=$?
-                    # Exit 3 means the allowlist is valid but downgrades were skipped.
-                    if [[ "$status" != "0" && "$status" != "3" ]]; then
-                        exit "$status"
-                    fi
-                    echo "status=$status" >> "$GITHUB_OUTPUT"
-
-            -   name: Upload packages
-                run: |
-                    rsync -av --ignore-existing --from0 --files-from="$RUNNER_TEMP/rpm-upload-files" dist/rpm/ github@${{ secrets.DEB_SERVER_IP }}:/mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}/
-
-            -   name: Report skipped package uploads
-                if: ${{ steps.check-upgrades.outputs.status == '3' }}
-                run: |
-                    echo "::error::Package downgrades were skipped; remaining packages were uploaded."
-                    exit 1
-
-            -   name: Upload logs
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: build-logs-${{ matrix.arch }}-el${{ matrix.alma }}-php${{ matrix.php-version }}
-                    path: log
-
-            -   name: Setup tmate session
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                with:
-                    install-dependencies: false
-                    sudo: false
-                timeout-minutes: 30
-
-    setup-update-matrix:
-        runs-on: ubuntu-24.04
-        needs: [build-gcc]
-        if: ${{ !cancelled() }}
-        permissions:
-            actions: read
-        outputs:
-            matrix: ${{ steps.set-matrix.outputs.matrix }}
-            any: ${{ steps.set-matrix.outputs.any }}
-        steps:
-            -   name: Compute matrix from successful uploads
-                id: set-matrix
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.name | test("^Build \\(alma")) | select(any(.steps[]?; .name == "Upload packages" and .conclusion == "success")) | .name' \
-                        | sed -E 's/^Build \(alma([^ ]+) ([^ ]+) php[^)]+\)$/\1 \2/' \
-                        | sort -u)
-                    echo "Successful upload combos:"
-                    printf '%s\n' "$succeeded"
-
-                    include=$(jq -cRs '
-                        split("\n")
-                        | map(select(length > 0))
-                        | map(split(" ") | {alma: .[0], arch: .[1]})
-                    ' <<< "$succeeded")
-                    count=$(jq 'length' <<< "$include")
-                    echo "Combos: $count"
-
-                    if [[ "$count" -gt 0 ]]; then
-                        echo "any=true" >> $GITHUB_OUTPUT
-                    else
-                        echo "any=false" >> $GITHUB_OUTPUT
-                    fi
-                    echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
-
-    update-repo:
-        runs-on: ubuntu-24.04
-        needs: setup-update-matrix
-        if: ${{ !cancelled() && needs.setup-update-matrix.outputs.any == 'true' }}
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.setup-update-matrix.outputs.matrix) }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-
-            -   name: Set architecture variables
-                run: |
-                    if [[ "${MATRIX_ARCH}" == "arm64" ]]; then
-                      echo "RPM_ARCH=aarch64" >> $GITHUB_ENV
-                    else
-                      echo "RPM_ARCH=x86_64" >> $GITHUB_ENV
-                    fi
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-
-            -   name: Set target folder
-                run: |
-                    TARGET_DIR="el${MATRIX_ALMA}"
-                    echo "TARGET_DIR=${TARGET_DIR}" >> "$GITHUB_ENV"
-                env:
-                    MATRIX_ALMA: ${{ matrix.alma }}
-
+                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
             -   name: Set up SSH key
                 uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
                 with:
                     ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
-
-            -   name: Add remote host to known_hosts
+            -   name: Trust repository host
                 run: |
                     mkdir -p ~/.ssh
                     cat >> ~/.ssh/known_hosts <<'EOF'
@@ -618,7 +229,324 @@ jobs:
                     ${{ secrets.DEB_SERVER_IP }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
                     EOF
                     chmod 600 ~/.ssh/known_hosts
+            -   name: Set RPM repository paths
+                run: |
+                    arch="$MATRIX_ARCH"
+                    if [[ "$arch" == arm64 ]]; then arch=aarch64; fi
+                    echo "RPM_DIRECTORY=/mnt/data/rpm/$arch/el${{ matrix.alma }}" >> "$GITHUB_ENV"
+            -   name: Prepare Composer cache
+                run: mkdir -p ~/.cache/composer
+            -   name: Cache Composer downloads
+                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    restore-keys: composer-
+            -   name: Compute source and toolchain fingerprint
+                id: fingerprint
+                run: bash .github/actions/shared-libraries/run.sh fingerprint >> "$GITHUB_OUTPUT"
+            -   name: Compute buildroot cache key
+                id: cache-key
+                env:
+                    FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
+                run: echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+            -   name: Restore buildroot cache
+                id: cache
+                uses: ./.github/actions/buildroot-cache
+                with:
+                    mode: restore
+                    key: ${{ steps.cache-key.outputs.key }}
+            -   name: Build shared libraries
+                if: steps.cache.outputs.cache-hit != 'true'
+                run: bash .github/actions/shared-libraries/run.sh libs
+            -   name: Pack buildroot
+                if: steps.cache.outputs.cache-hit != 'true'
+                run: tar -cf - buildroot | zstd -o buildroot.tar.zst
+            -   name: Save buildroot cache
+                if: steps.cache.outputs.cache-hit != 'true'
+                uses: ./.github/actions/buildroot-cache
+                with:
+                    mode: save
+                    key: ${{ steps.cache-key.outputs.key }}
+            -   name: Extract cached buildroot
+                if: steps.cache.outputs.cache-hit == 'true'
+                run: zstd -dc buildroot.tar.zst | tar -xf -
+            -   name: Classify ABI and package shared libraries
+                run: bash .github/actions/shared-libraries/run.sh classify
+            -   name: Record target and buildroot
+                env:
+                    CACHE_KEY: ${{ steps.cache-key.outputs.key }}
+                    ALMA: ${{ matrix.alma }}
+                run: bash .github/actions/shared-libraries/run.sh record
+            -   name: Stage target plan
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-plans-rpm-${{ matrix.target }}
+                    path: |
+                        stage/shared-library-plan.json
+                        stage/target.json
+                    retention-days: 1
+            -   name: Stage library packages
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-libs-rpm-${{ matrix.target }}
+                    path: stage
+                    retention-days: 1
+            -   name: Upload logs on failure
+                if: ${{ failure() }}
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: logs-libs-rpm-${{ matrix.target }}
+                    path: log
+            -   name: Install tmate on failure
+                if: ${{ failure() && inputs.debug_tmate == true }}
+                run: |
+                    arch=amd64
+                    if [[ "$MATRIX_ARCH" == arm64 ]]; then arch=arm64v8; fi
+                    directory="tmate-2.4.0-static-linux-$arch"
+                    curl -fsSL "https://github.com/tmate-io/tmate/releases/download/2.4.0/$directory.tar.xz" | tar -xJ -O "$directory/tmate" > /usr/bin/tmate
+                    chmod +x /usr/bin/tmate
+            -   name: Debug build failure
+                if: ${{ failure() && inputs.debug_tmate == true }}
+                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
+                timeout-minutes: 30
+                with:
+                    install-dependencies: false
+                    sudo: false
 
+    compute-build-matrix:
+        needs: [setup-matrix, build-libs]
+        if: ${{ !cancelled() }}
+        runs-on: ubuntu-24.04
+        permissions:
+            actions: read
+            contents: read
+        outputs:
+            matrix: ${{ steps.filter.outputs.matrix }}
+            any: ${{ steps.filter.outputs.any }}
+            publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
+            publish-any: ${{ steps.filter.outputs.publish-any }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download target plans
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                continue-on-error: true
+                with:
+                    pattern: shared-plans-rpm-*
+                    path: plans
+            -   name: Filter successful targets and select PHP consumers
+                id: filter
+                env:
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                run: |
+                    set -euo pipefail
+                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs shared \\("))) | .name' \
+                        | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
+                    python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
+                        --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
+
+    build:
+        name: Build (${{ matrix.target }} php${{ matrix.php-version }})
+        needs: [setup-matrix, compute-build-matrix]
+        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        container:
+            image: ${{ matrix.image }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        defaults:
+            run:
+                shell: bash
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.matrix) }}
+        env:
+            IMAGE: ${{ matrix.image }}
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: rpm
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages }}
+            PHPV: ${{ matrix.php-version || '' }}
+            ITERATION: ${{ inputs.iteration || '' }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+            RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download pinned source snapshot
+                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
+                with:
+                    workflow: spc-download.yml
+                    name: downloads-tarball
+                    search_artifacts: true
+                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            -   name: Extract source snapshot
+                run: |
+                    mkdir -p downloads
+                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
+                    rm downloads.tar.gz
+                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
+            -   name: Download shared library packages and plan
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    name: shared-libs-rpm-${{ matrix.target }}
+                    path: stage
+            -   name: Read buildroot key
+                id: cache-key
+                run: echo "key=$(cat stage/cache-key)" >> "$GITHUB_OUTPUT"
+            -   name: Restore exact buildroot
+                uses: ./.github/actions/buildroot-cache
+                with:
+                    mode: restore
+                    key: ${{ steps.cache-key.outputs.key }}
+                    fail-on-cache-miss: true
+            -   name: Extract buildroot
+                run: zstd -dc buildroot.tar.zst | tar -xf -
+            -   name: Prepare Composer cache
+                run: mkdir -p ~/.cache/composer
+            -   name: Cache Composer downloads
+                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    restore-keys: composer-
+            -   name: Build and test PHP packages
+                run: bash .github/actions/shared-libraries/run.sh php
+            -   name: Report skipped shared extensions
+                if: ${{ !cancelled() }}
+                env:
+                    PHPV: ${{ matrix.php-version }}
+                run: |
+                    for manifest in "build/$PHPV/skipped-shared-extensions.json" buildroot/skipped-shared-extensions.json; do
+                        if [[ -f "$manifest" ]]; then
+                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "::warning::\($target): skipped \(.extension) (\(.phase)): \(.message)"' "$manifest"
+                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "- \($target): \(.extension) (\(.phase)): \(.message | gsub("[\r\n]"; " "))"' "$manifest" >> "$GITHUB_STEP_SUMMARY"
+                            break
+                        fi
+                    done
+            -   name: Stage consumer packages
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-consumers-rpm-${{ matrix.target }}-php${{ matrix.php-version }}
+                    path: dist/rpm
+                    retention-days: 1
+            -   name: Upload logs on failure
+                if: ${{ failure() }}
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: logs-php-rpm-${{ matrix.target }}-${{ matrix.php-version }}
+                    path: log
+            -   name: Install tmate on failure
+                if: ${{ failure() && inputs.debug_tmate == true }}
+                run: |
+                    arch=amd64
+                    if [[ "$MATRIX_ARCH" == arm64 ]]; then arch=arm64v8; fi
+                    directory="tmate-2.4.0-static-linux-$arch"
+                    curl -fsSL "https://github.com/tmate-io/tmate/releases/download/2.4.0/$directory.tar.xz" | tar -xJ -O "$directory/tmate" > /usr/bin/tmate
+                    chmod +x /usr/bin/tmate
+            -   name: Debug build failure
+                if: ${{ failure() && inputs.debug_tmate == true }}
+                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
+                timeout-minutes: 30
+                with:
+                    install-dependencies: false
+                    sudo: false
+
+    publish:
+        name: Publish (${{ matrix.target }})
+        needs: [compute-build-matrix, build]
+        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        container:
+            image: ${{ matrix.image }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        defaults:
+            run:
+                shell: bash
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
+        env:
+            IMAGE: ${{ matrix.image }}
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: rpm
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
+            PHPV: ${{ matrix.php-version || '' }}
+            ITERATION: ${{ inputs.iteration || '' }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+            RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Set up SSH key
+                uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
+                with:
+                    ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
+            -   name: Trust repository host
+                run: |
+                    mkdir -p ~/.ssh
+                    cat >> ~/.ssh/known_hosts <<'EOF'
+                    ${{ secrets.DEB_SERVER_IP }} ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPQq0y77dDEtxECVMhCxjcqiV369goMcbInsY/d+F1yXGwqOXQ6RqIEzgaVhgq0joMJT5BiGXNXQ+OI10/KtzGI=
+                    ${{ secrets.DEB_SERVER_IP }} ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2laCc5jifgjL/2zLzgP1E/X3kouXdaZv00KtAV1DOO5umThoWzb16cswnVtjtLUEMIuo9rPLB79xX2Asa+nN3uMgJDANnr/xnhRoI++yOGLga40/O69U88j5x+5FXODscH/k4n85mfcjzm/fZLXcHlb17ibCmU20I3v46sydn95Pp4/ShDvqsHVB4gWEKJ+jStkooUz2H1UZ8ZquNtaPTlmkOeClNj6gxag74P5b9VB6M5YNac2Emi3Nm0dYkc+BL0Qv+NEtFR1lR63DLa3O/NGTALGJYGmTUkjwiv8KygegaKhd2zxESmWhV7eYIPax8zL+GE9sX1Xwwh1huS0vsuwr2dXPP1/q5slz1AQV/lx85fGdiHc0F8RUXwqXbvGxZJheTuC/Mgu0cFzp5gqO4kTP28X+9fokzScBKBCIfObDXrl7rZgTXAA8IQ5gHk1tGchaEOIcDsjdISW5HVOiwocYSwUNMHzuZ08qAulatIywtOGcWVRdvOs7TcvSgfZ0=
+                    ${{ secrets.DEB_SERVER_IP }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
+                    EOF
+                    chmod 600 ~/.ssh/known_hosts
+            -   name: Set RPM repository paths
+                run: |
+                    arch="$MATRIX_ARCH"
+                    if [[ "$arch" == arm64 ]]; then arch=aarch64; fi
+                    echo "RPM_DIRECTORY=/mnt/data/rpm/$arch/el${{ matrix.alma }}" >> "$GITHUB_ENV"
+            -   name: Download complete staged cohort
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    pattern: shared-*-rpm-${{ matrix.target }}*
+                    path: cohort
+            -   name: Assemble cohort packages
+                run: bash .github/actions/shared-libraries/run.sh assemble
+            -   name: Sign RPM packages
+                env:
+                    RPM_SIGNING_KEY: ${{ secrets.DEB_GPG_PRIVATE_KEY }}
+                    RPM_SIGNING_PASSWORD: ${{ secrets.DEB_GPG_PASSWORD }}
+                run: bash .github/actions/shared-libraries/sign-rpm.sh
+            -   name: Verify complete cohort and all downgrade guards
+                run: bash .github/actions/shared-libraries/run.sh publish
+            -   name: Upload complete cohort
+                run: |
+                    rsync -av --ignore-existing --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$RPM_DIRECTORY/"
             -   name: Update repository metadata
                 run: |
-                    ssh github@${{ secrets.DEB_SERVER_IP }} "cd /mnt/data/rpm/${RPM_ARCH}/${TARGET_DIR}/ && python3 - && createrepo_c --update . && modifyrepo_c --mdtype=modules modules.yaml repodata/" < bin/createrepo_static
+                    ssh "$RPM_HOST" "cd '$RPM_DIRECTORY' && python3 - && createrepo_c --update . && modifyrepo_c --mdtype=modules modules.yaml repodata/" < bin/createrepo_static

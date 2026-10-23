@@ -20,6 +20,18 @@ rpm_globals = rpm['published_packages'].__globals__
 
 
 class UpgradeGuards(unittest.TestCase):
+    def test_rpm_library_ordering_is_php_independent(self):
+        local = {'name': 'php-zts-lib-openssl', 'arch': 'x86_64', 'version': '3.0.1', 'evr': '0:3.0.1-1.el10'}
+        remote = dict(local, version='3.1.0', evr='0:3.1.0-1.el10')
+        commands = Mock(run=lambda *args, **kwargs: Mock(returncode=12, stderr=''))
+        with patch.dict(rpm_globals, {'subprocess': commands}), self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
+            rpm['verify_package'](local, [remote], '8.6')
+
+    def test_forgejo_preflight_does_not_upload(self):
+        with patch.dict(forgejo_globals, {'get_remote_packages': Mock(return_value=[]), 'verify_upload_versions': Mock(return_value=[])}), patch.object(Path, 'glob', return_value=[root / 'library.deb']), patch.object(Path, 'is_file', return_value=True), patch.object(requests, 'put') as upload, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(forgejo['check_packages']('https://example.com', 'libs', 'test', 'debian', '*.deb'), 3)
+            upload.assert_not_called()
+
     def test_forgejo_pagination(self):
         responses = [Mock(json=lambda: [{'name': 'x', 'version': '1'}]), Mock(json=lambda: [{'name': 'x', 'version': '2'}]), Mock(json=lambda: [])]
         with patch.object(requests, 'get', side_effect=responses) as get:

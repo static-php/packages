@@ -53,6 +53,9 @@ def get_remote_package_archs(host, owner, password, pkg_type, name, version, str
             for arch in ['x86_64', 'aarch64', 'amd64', 'arm64']:
                 if arch in fname:
                     archs.add(arch)
+            common = re.search(r'(?:_|\.)(all|noarch)\.(?:deb|rpm)$', fname)
+            if common:
+                archs.add(common.group(1))
     return archs
 
 def apk_metadata(fileobj):
@@ -257,6 +260,7 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
             else:
                 print(f"Upload response: {resp.status_code}")
                 print(f"Error: {resp.text}")
+                skipped += 1
                 continue
 
             link_name = name.replace('_', '-') if pkg_type == 'debian' else name
@@ -266,11 +270,23 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
             print(f"Link response: {resp.status_code}")
             if resp.status_code != 201:
                 print(f"Error: {resp.text}")
+                skipped += 1
 
     if skipped:
         print(f"::error::Skipped {skipped} package files after upgrade checks; remaining uploads completed.")
         return 3
     return 0
+
+def check_packages(host, owner, password, pkg_type, pattern):
+    if pkg_type not in ['debian', 'alpine']:
+        raise RuntimeError('Upload checks are supported for DEB and APK; use check-rpm-upgrades for RPM.')
+    packages = get_remote_packages(host, owner, password, pkg_type)
+    files = [path for path in Path('.').glob(pattern) if path.is_file()]
+    if not files:
+        raise RuntimeError('No packages to verify: ' + pattern)
+    allowed = verify_upload_versions(host, owner, password, pkg_type, files, packages)
+    print(f'Verified upgrade ordering for {len(allowed)} package files; skipped {len(files) - len(allowed)}.')
+    return 0 if len(allowed) == len(files) else 3
 
 if __name__ == "__main__":
     args = sys.argv[1:]
@@ -280,7 +296,7 @@ if __name__ == "__main__":
         args.remove("--host=2")
 
     if len(args) < 4:
-        print("Usage: script.py [--host=2] <upload|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
+        print("Usage: script.py [--host=2] <upload|check|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
         print("Examples:")
         print("  script.py upload alpine 85 pass '*.apk'")
         print("  script.py --host=2 upload rpm 85 pass '*.rpm'")
@@ -299,6 +315,9 @@ if __name__ == "__main__":
     if action == "upload":
         pattern = args[4] if len(args) > 4 else "*.apk"
         sys.exit(upload_packages(host, owner, password, pkg_type, pattern))
+    elif action == "check":
+        pattern = args[4] if len(args) > 4 else "*.apk"
+        sys.exit(check_packages(host, owner, password, pkg_type, pattern))
     elif action == "list":
         pattern = args[4] if len(args) > 4 else None
         list_packages(host, owner, password, pkg_type, pattern)

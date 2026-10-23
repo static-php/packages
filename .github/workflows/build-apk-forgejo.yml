@@ -3,35 +3,36 @@ name: Build and upload Alpine APK packages to Forgejo
 on:
     workflow_dispatch:
         inputs:
+            mode:
+                description: "Full manual build or incremental source build plan"
+                type: choice
+                options: [full, incremental]
+                default: full
+            libraries:
+                description: "Optional: shared library IDs (comma-separated)"
+                default: ""
             downloads_run_id:
-                description: "Optional: pin the spc-download run providing the source snapshot"
-                required: false
+                description: "Optional: pin the spc-download source snapshot"
                 default: ""
             iteration:
-                description: "Optional: override package iteration (integer). Leave empty for auto"
-                required: false
+                description: "Optional: override package iteration"
                 default: ""
             bump:
-                description: "Bump each package iteration to (latest published on the repo) + 1"
+                description: "Bump package revisions above published packages"
                 type: boolean
-                required: false
-                default: false
+                default: true
             php_versions:
-                description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
-                required: false
+                description: "Optional: PHP streams (comma-separated); ABI transitions include all affected streams"
                 default: ""
             architectures:
-                description: "Optional: Architectures (comma-separated, e.g., x86_64,aarch64). Leave empty for all"
-                required: false
+                description: "Optional: architectures (comma-separated)"
                 default: ""
             packages:
-                description: "Optional: override packages list. Leave empty for default"
-                required: false
+                description: "Optional: PHP package selection"
                 default: ""
             debug_tmate:
-                description: "Open tmate session on failure"
+                description: "Open tmate on failure"
                 type: boolean
-                required: false
                 default: false
     repository_dispatch:
         types: [spc-download]
@@ -40,45 +41,132 @@ permissions:
     contents: read
     packages: read
 
+concurrency:
+    group: shared-packages-apk
+    cancel-in-progress: false
+
 jobs:
     setup-matrix:
         runs-on: ubuntu-24.04
         permissions:
+            actions: read
             contents: read
         outputs:
-            libs-pairs: ${{ steps.set-matrix.outputs.libs-pairs }}
-            php-versions: ${{ steps.set-matrix.outputs.php-versions }}
+            downloads-run-id: ${{ steps.source.outputs.run-id }}
+            matrix: ${{ steps.matrix.outputs.matrix }}
+            php-versions: ${{ steps.matrix.outputs.php-versions }}
         steps:
-            -   name: Set up matrix
-                id: set-matrix
-                run: |
-                    default_php='["8.2","8.3","8.4","8.5","8.6"]'
-                    default_arch='["x86_64","aarch64"]'
-
-                    if [[ -n "${INPUTS_PHP_VERSIONS}" ]]; then
-                        php_versions=$(echo "${INPUTS_PHP_VERSIONS}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        php_versions=$default_php
-                    fi
-
-                    if [[ -n "${INPUTS_ARCHITECTURES}" ]]; then
-                        arch_versions=$(echo "${INPUTS_ARCHITECTURES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        arch_versions=$default_arch
-                    fi
-
-                    libs_pairs=$(jq -nc --argjson arch "$arch_versions" '{include: [$arch[] as $r | {arch: $r}]}')
-
-                    echo "libs-pairs=$libs_pairs" >> $GITHUB_OUTPUT
-                    echo "php-versions=$php_versions" >> $GITHUB_OUTPUT
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Resolve one source snapshot for the entire build
+                id: source
                 env:
-                    INPUTS_PHP_VERSIONS: ${{ inputs.php_versions }}
-                    INPUTS_ARCHITECTURES: ${{ inputs.architectures }}
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    REQUESTED_RUN_ID: ${{ inputs.downloads_run_id }}
+                run: |
+                    set -euo pipefail
+                    source_run="$REQUESTED_RUN_ID"
+                    if [[ -z "$source_run" ]]; then
+                        runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/spc-download.yml/runs?status=success&per_page=100" --paginate --jq '.workflow_runs[].id')
+                        for candidate in $runs; do
+                            available=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts" --paginate --jq '.artifacts[] | select(.name == "downloads-tarball" and .expired == false) | .id')
+                            if [[ -n "$available" ]]; then
+                                source_run="$candidate"
+                                break
+                            fi
+                        done
+                    fi
+                    if [[ ! "$source_run" =~ ^[0-9]+$ ]]; then
+                        echo '::error::No available spc-download source snapshot'
+                        exit 1
+                    fi
+                    echo "run-id=$source_run" >> "$GITHUB_OUTPUT"
+            -   name: Set target matrix
+                id: matrix
+                env:
+                    ARCHITECTURES: ${{ inputs.architectures }}
+                    ALMA_VERSIONS: ${{ inputs.alma_versions }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                run: |
+                    python3 .github/actions/shared-libraries/workflow.py setup --type=apk \
+                        --architectures "$ARCHITECTURES" --alma-versions "$ALMA_VERSIONS" \
+                        --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
+
+    resolve-builders:
+        name: Resolve builder (${{ matrix.target }})
+        needs: setup-matrix
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            packages: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Pin target builder image
+                env:
+                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    ACTOR: ${{ github.actor }}
+                    ARCH: ${{ matrix.arch }}
+                    ALMA: ${{ matrix.alma }}
+                run: |
+                    set -euo pipefail
+                    echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    python3 .github/actions/shared-libraries/workflow.py setup --type=apk \
+                        --architectures "$ARCH" --alma-versions "$ALMA" --resolve-images > "$RUNNER_TEMP/builder-output"
+                    sed -n 's/^matrix=//p' "$RUNNER_TEMP/builder-output" | jq '.include[0]' > target.json
+            -   name: Stage pinned builder
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-builders-apk-${{ matrix.target }}
+                    path: target.json
+                    retention-days: 1
+
+    compute-libs-matrix:
+        needs: [setup-matrix, resolve-builders]
+        if: ${{ !cancelled() }}
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            actions: read
+        outputs:
+            matrix: ${{ steps.filter.outputs.matrix }}
+            any: ${{ steps.filter.outputs.any }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download pinned builders
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                continue-on-error: true
+                with:
+                    pattern: shared-builders-apk-*
+                    path: builders
+            -   name: Filter successful builder targets
+                id: filter
+                env:
+                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                run: |
+                    set -euo pipefail
+                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Resolve builder \\("))) | .name' \
+                        | sed -E 's/^Resolve builder \(([^)]+)\)$/\1/' | sort -u)
+                    python3 .github/actions/shared-libraries/workflow.py targets --directory builders \
+                        --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
 
     build-libs:
-        needs: setup-matrix
-        name: Build libs (${{ matrix.arch }})
-        runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+        name: Build libs shared (${{ matrix.target }})
+        needs: [setup-matrix, compute-libs-matrix]
+        if: ${{ !cancelled() && needs.compute-libs-matrix.outputs.any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: write
             packages: read
@@ -88,153 +176,159 @@ jobs:
                 shell: bash
         strategy:
             fail-fast: false
-            matrix: ${{ fromJson(needs.setup-matrix.outputs.libs-pairs) }}
-        # The builder image is real Alpine (musl). A musl `container:` can't run JavaScript
-        # actions (checkout/cache/…) on arm64 — GitHub only ships a musl Node for x64 — so the
-        # job runs on the glibc host and the build itself runs in the image via `docker run`.
+            matrix: ${{ fromJson(needs.compute-libs-matrix.outputs.matrix) }}
         env:
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: apk
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
+            PHPV: ${{ matrix.php-version || '' }}
+            ITERATION: ${{ inputs.iteration || '' }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            IMAGE: ghcr.io/static-php/packages-builder-alpine:latest
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
+            IMAGE: ${{ matrix.image }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
-
+            -   name: Download pinned source snapshot
+                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
+                with:
+                    workflow: spc-download.yml
+                    name: downloads-tarball
+                    search_artifacts: true
+                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            -   name: Extract source snapshot
+                run: |
+                    mkdir -p downloads
+                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
+                    rm downloads.tar.gz
+                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
+            -   name: Log in to GHCR and pull builder
+                env:
+                    ACTOR: ${{ github.actor }}
+                run: |
+                    echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    docker pull "$IMAGE"
+            -   name: Prepare Composer cache
+                run: mkdir -p ~/.cache/composer
+            -   name: Cache Composer downloads
+                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    restore-keys: composer-
+            -   name: Compute source and toolchain fingerprint
+                id: fingerprint
+                run: bash .github/actions/shared-libraries/run.sh fingerprint >> "$GITHUB_OUTPUT"
             -   name: Compute buildroot cache key
                 id: cache-key
-                run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-apk-${{ matrix.arch }}-${WEEK}" >> $GITHUB_OUTPUT
-
+                env:
+                    FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
+                run: echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
             -   name: Restore buildroot cache
                 id: cache
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: restore
                     key: ${{ steps.cache-key.outputs.key }}
-
-            -   name: Log in to GHCR
+            -   name: Build shared libraries
                 if: steps.cache.outputs.cache-hit != 'true'
-                env:
-                    ACTOR: ${{ github.actor }}
-                run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-
-            -   name: Prepare Composer cache dir
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: mkdir -p ~/.cache/composer
-
-            -   name: Cache Composer downloads
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Download artifact from spc-download.yml
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Extract with permissions
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-
-            -   name: Build libs
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: |
-                    docker run --rm \
-                        -v "$GITHUB_WORKSPACE":/build -w /build \
-                        -v "$HOME/.cache/composer":/composer-cache \
-                        -e GITHUB_TOKEN -e COMPOSER_CACHE_DIR=/composer-cache \
-                        "$IMAGE" \
-                        bash -lc '
-                            set -e
-                            # Tarball is extracted on the host (runner uid); this build runs as
-                            # root, so git rejects the cached source repos ("dubious ownership")
-                            # and SPC re-clones every git source. Trust them.
-                            git config --global --add safe.directory "*"
-                            composer install --no-interaction --prefer-dist --no-progress
-                            bin/spp build --phpv=8.5 --type=apk --libs-only
-                        '
-
+                run: bash .github/actions/shared-libraries/run.sh libs
             -   name: Pack buildroot
                 if: steps.cache.outputs.cache-hit != 'true'
                 run: tar --zstd -cf buildroot.tar.zst buildroot
-
             -   name: Save buildroot cache
                 if: steps.cache.outputs.cache-hit != 'true'
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: save
                     key: ${{ steps.cache-key.outputs.key }}
-
+            -   name: Extract cached buildroot
+                if: steps.cache.outputs.cache-hit == 'true'
+                run: tar --zstd -xf buildroot.tar.zst
+            -   name: Classify ABI and package shared libraries
+                run: bash .github/actions/shared-libraries/run.sh classify
+            -   name: Record target and buildroot
+                env:
+                    CACHE_KEY: ${{ steps.cache-key.outputs.key }}
+                    ALMA: ${{ matrix.alma }}
+                run: bash .github/actions/shared-libraries/run.sh record
+            -   name: Stage target plan
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-plans-apk-${{ matrix.target }}
+                    path: |
+                        stage/shared-library-plan.json
+                        stage/target.json
+                    retention-days: 1
+            -   name: Stage library packages
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-libs-apk-${{ matrix.target }}
+                    path: stage
+                    retention-days: 1
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
-                    name: build-logs-libs-${{ matrix.arch }}
+                    name: logs-libs-apk-${{ matrix.target }}
                     path: log
-
-            -   name: Setup tmate session
+            -   name: Debug build failure
                 if: ${{ failure() && inputs.debug_tmate == true }}
                 uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
                 timeout-minutes: 30
 
     compute-build-matrix:
         needs: [setup-matrix, build-libs]
-        runs-on: ubuntu-24.04
         if: ${{ !cancelled() }}
+        runs-on: ubuntu-24.04
         permissions:
             actions: read
+            contents: read
         outputs:
             matrix: ${{ steps.filter.outputs.matrix }}
             any: ${{ steps.filter.outputs.any }}
+            publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
+            publish-any: ${{ steps.filter.outputs.publish-any }}
         steps:
-            -   name: Filter build matrix to arches with successful libs
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download target plans
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                continue-on-error: true
+                with:
+                    pattern: shared-plans-apk-*
+                    path: plans
+            -   name: Filter successful targets and select PHP consumers
                 id: filter
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    PHP_VERSIONS: ${{ needs.setup-matrix.outputs.php-versions }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
                 run: |
                     set -euo pipefail
                     succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs \\("))) | .name' \
-                        | sed -E 's/^Build libs \(([^)]+)\)$/\1/' \
-                        | sort -u)
-                    echo "Successful libs arches:"
-                    printf '%s\n' "$succeeded"
-
-                    include=$(jq -nc --arg s "$succeeded" --argjson p "$PHP_VERSIONS" '
-                        ($s | split("\n") | map(select(length > 0) | {arch: .})) as $arches |
-                        [ $arches[] as $a | $p[] as $php | $a + {"php-version": $php} ]
-                    ')
-                    count=$(jq 'length' <<< "$include")
-                    echo "Filtered combos: $count"
-                    printf '%s\n' "$include" | jq .
-
-                    if [[ "$count" -gt 0 ]]; then
-                        echo "any=true" >> $GITHUB_OUTPUT
-                    else
-                        echo "any=false" >> $GITHUB_OUTPUT
-                    fi
-                    echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
+                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs shared \\("))) | .name' \
+                        | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
+                    python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
+                        --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
 
     build:
-        needs: [compute-build-matrix]
+        name: Build (${{ matrix.target }} php${{ matrix.php-version }})
+        needs: [setup-matrix, compute-build-matrix]
         if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
-        name: Build for ${{ matrix.arch }} PHP ${{ matrix.php-version }}
-        runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: read
             packages: read
@@ -245,209 +339,159 @@ jobs:
         strategy:
             fail-fast: false
             matrix: ${{ fromJson(needs.compute-build-matrix.outputs.matrix) }}
-        # Real-Alpine (musl) builder: run on the glibc host and build via `docker run`, because
-        # a musl `container:` can't run JavaScript actions on arm64 (no musl arm64 Node).
         env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            IMAGE: ghcr.io/static-php/packages-builder-alpine:latest
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: apk
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages }}
+            PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            PACKAGES: ${{ inputs.packages || '' }}
-
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
+            IMAGE: ${{ matrix.image }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
-
-            -   name: Set PHP version short
-                run: |
-                    # Convert "8.5" to "85"
-                    PHP_VERSION_SHORT=$(echo "${{ matrix.php-version }}" | tr -d '.')
-                    echo "PHP_VERSION_SHORT=$PHP_VERSION_SHORT" >> $GITHUB_ENV
-
-            -   name: Log in to GHCR
-                env:
-                    ACTOR: ${{ github.actor }}
-                run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-
-            -   name: Prepare Composer cache dir
-                run: mkdir -p ~/.cache/composer
-
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Download artifact from spc-download.yml
+            -   name: Download pinned source snapshot
                 uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
                 with:
                     workflow: spc-download.yml
                     name: downloads-tarball
                     search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Extract with permissions
+                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            -   name: Extract source snapshot
                 run: |
                     mkdir -p downloads
                     tar --no-same-owner -xzf downloads.tar.gz -C downloads
                     rm downloads.tar.gz
-
-            -   name: Compute buildroot cache key
-                id: cache-key
+                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
+            -   name: Log in to GHCR and pull builder
+                env:
+                    ACTOR: ${{ github.actor }}
                 run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-apk-${{ matrix.arch }}-${WEEK}" >> $GITHUB_OUTPUT
-
-            -   name: Restore buildroot cache
+                    echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    docker pull "$IMAGE"
+            -   name: Download shared library packages and plan
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    name: shared-libs-apk-${{ matrix.target }}
+                    path: stage
+            -   name: Read buildroot key
+                id: cache-key
+                run: echo "key=$(cat stage/cache-key)" >> "$GITHUB_OUTPUT"
+            -   name: Restore exact buildroot
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: restore
                     key: ${{ steps.cache-key.outputs.key }}
                     fail-on-cache-miss: true
-
             -   name: Extract buildroot
-                run: |
-                    tar --zstd -xf buildroot.tar.zst
-                    rm buildroot.tar.zst
-
-            -   name: Build PHP packages
-                env:
-                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-                run: |
-                    docker run --rm \
-                        -v "$GITHUB_WORKSPACE":/build -w /build \
-                        -v "$HOME/.cache/composer":/composer-cache \
-                        -e GITHUB_TOKEN -e COMPOSER_CACHE_DIR=/composer-cache \
-                        -e ITERATION -e BUMP -e PACKAGES -e FORGEJO_PASSWORD \
-                        -e PHPV="${{ matrix.php-version }}" \
-                        "$IMAGE" \
-                        bash -lc '
-                            set -e
-                            # Tarball is extracted on the host (runner uid); this build runs as
-                            # root, so git rejects the cached source repos ("dubious ownership")
-                            # and SPC re-clones every git source. Trust them.
-                            git config --global --add safe.directory "*"
-                            composer install --no-interaction --prefer-dist --no-progress
-                            php tests/package-versions.php --type=apk
-                            php tests/package-iterations.php
-                            python3 tests/upgrade-guards.py
-                            PACKAGES_FLAG=""; [ -n "$PACKAGES" ] && PACKAGES_FLAG="--packages=$PACKAGES"
-                            ITERATION_FLAG=""; [ -n "$ITERATION" ] && ITERATION_FLAG="--iteration=$ITERATION"
-                            BUMP_FLAG=""; [ "$BUMP" = "true" ] && [ -z "$ITERATION" ] && BUMP_FLAG="--bump"
-                            php bin/spp all --phpv="$PHPV" --prefix=-zts --type=apk $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
-                        '
-
-            -   name: Test packages
-                run: |
-                    docker run --rm \
-                        -v "$GITHUB_WORKSPACE":/build -w /build \
-                        -e PHPV="${{ matrix.php-version }}" \
-                        -e PACKAGES \
-                        "$IMAGE" \
-                        bash -lc '
-                            PACKAGES_FLAG=""; [ -n "$PACKAGES" ] && PACKAGES_FLAG="--packages=$PACKAGES"
-                            php bin/spp test --phpv="$PHPV" --prefix=-zts --type=apk $PACKAGES_FLAG
-                        '
-
+                run: tar --zstd -xf buildroot.tar.zst
+            -   name: Prepare Composer cache
+                run: mkdir -p ~/.cache/composer
+            -   name: Cache Composer downloads
+                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    restore-keys: composer-
+            -   name: Build and test PHP packages
+                run: bash .github/actions/shared-libraries/run.sh php
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}
-                run: |
-                    set -uo pipefail
-                    LABEL="${MATRIX_ARCH} php${MATRIX_PHP_VERSION}"
-                    MANIFEST=""
-                    for candidate in "build/${MATRIX_PHP_VERSION}/skipped-shared-extensions.json" "buildroot/skipped-shared-extensions.json"; do
-                      if [[ -f "$candidate" ]]; then
-                        MANIFEST="$candidate"
-                        break
-                      fi
-                    done
-
-                    if [[ -z "$MANIFEST" ]]; then
-                      echo "No skipped-shared-extensions manifest for ${LABEL}; nothing to report."
-                      exit 0
-                    fi
-
-                    if ! tolerant=$(jq -r 'if (.allow_shared_ext_failure // false) == true then "true" else "false" end' "$MANIFEST"); then
-                      echo "::warning::unreadable skipped-extension manifest at ${MANIFEST} (${LABEL})"
-                      exit 0
-                    fi
-
-                    entries=$(jq -r '(.skipped // [])[] | [(.extension // "?"), (.phase // "unknown"), ((.message // "") | gsub("[\r\n|]"; " "))] | @tsv' "$MANIFEST")
-                    if [[ -z "$entries" ]]; then
-                      echo "No shared extensions were skipped for ${LABEL} (allow_shared_ext_failure=${tolerant})."
-                      exit 0
-                    fi
-
-                    {
-                      echo "### Skipped shared extensions — ${LABEL}"
-                      echo ""
-                      echo "Manifest: \`${MANIFEST}\` (allow_shared_ext_failure=${tolerant})"
-                      echo ""
-                      echo "| Extension | Phase | Reason |"
-                      echo "| --- | --- | --- |"
-                    } >> "$GITHUB_STEP_SUMMARY"
-
-                    while IFS=$'\t' read -r ext phase message; do
-                      echo "| ${ext} | ${phase} | ${message} |" >> "$GITHUB_STEP_SUMMARY"
-                      echo "::warning::${LABEL}: skipped shared extension ${ext} (${phase}): ${message}"
-                    done <<< "$entries"
                 env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
-
+                    PHPV: ${{ matrix.php-version }}
+                run: |
+                    for manifest in "build/$PHPV/skipped-shared-extensions.json" buildroot/skipped-shared-extensions.json; do
+                        if [[ -f "$manifest" ]]; then
+                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "::warning::\($target): skipped \(.extension) (\(.phase)): \(.message)"' "$manifest"
+                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "- \($target): \(.extension) (\(.phase)): \(.message | gsub("[\r\n]"; " "))"' "$manifest" >> "$GITHUB_STEP_SUMMARY"
+                            break
+                        fi
+                    done
+            -   name: Stage consumer packages
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-consumers-apk-${{ matrix.target }}-php${{ matrix.php-version }}
+                    path: dist/apk
+                    retention-days: 1
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
-                    name: build-logs-${{ matrix.arch }}-php${{ matrix.php-version }}
+                    name: logs-php-apk-${{ matrix.target }}-${{ matrix.php-version }}
                     path: log
-
-            -   name: Upload to Forgejo Host 1
-                id: upload-host-1
-                continue-on-error: true
-                env:
-                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-                run: |
-                    docker run --rm \
-                        -v "$GITHUB_WORKSPACE":/build -w /build/dist/apk \
-                        -e FORGEJO_PASSWORD -e PHP_VERSION_SHORT \
-                        "$IMAGE" \
-                        bash -lc '
-                            echo "listing from host 1"
-                            ../../bin/forgejo-helper list alpine "$PHP_VERSION_SHORT" "$FORGEJO_PASSWORD" "*.apk"
-                            echo "uploading to host 1"
-                            ../../bin/forgejo-helper upload alpine "$PHP_VERSION_SHORT" "$FORGEJO_PASSWORD" "*.apk"
-                        '
-
-            -   name: Upload to Forgejo Host 2
-                id: upload-host-2
-                continue-on-error: true
-                env:
-                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-                run: |
-                    docker run --rm \
-                        -v "$GITHUB_WORKSPACE":/build -w /build/dist/apk \
-                        -e FORGEJO_PASSWORD -e PHP_VERSION_SHORT \
-                        "$IMAGE" \
-                        bash -lc '
-                            echo "listing from host 2"
-                            ../../bin/forgejo-helper --host=2 list alpine "$PHP_VERSION_SHORT" "$FORGEJO_PASSWORD" "*.apk"
-                            echo "uploading to host 2"
-                            ../../bin/forgejo-helper --host=2 upload alpine "$PHP_VERSION_SHORT" "$FORGEJO_PASSWORD" "*.apk"
-                        '
-
-            -   name: Report upload failures
-                if: ${{ !cancelled() && (steps.upload-host-1.outcome == 'failure') }}
-                run: |
-                    echo "::error::Package uploads failed or were skipped; both Forgejo hosts were attempted."
-                    exit 1
-
-            -   name: Setup tmate session
+            -   name: Debug build failure
                 if: ${{ failure() && inputs.debug_tmate == true }}
                 uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
                 timeout-minutes: 30
+
+    publish:
+        name: Publish (${{ matrix.target }})
+        needs: [compute-build-matrix, build]
+        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        defaults:
+            run:
+                shell: bash
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
+        env:
+            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+            TYPE: apk
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            MODE: ${{ inputs.mode || 'full' }}
+            LIBRARIES: ${{ inputs.libraries || '' }}
+            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
+            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
+            PHPV: ${{ matrix.php-version || '' }}
+            ITERATION: ${{ inputs.iteration || '' }}
+            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
+            IMAGE: ${{ matrix.image }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Log in to GHCR and pull builder
+                env:
+                    ACTOR: ${{ github.actor }}
+                run: |
+                    echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    docker pull "$IMAGE"
+            -   name: Download complete staged cohort
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    pattern: shared-*-apk-${{ matrix.target }}*
+                    path: cohort
+            -   name: Verify complete cohort and all downgrade guards
+                run: bash .github/actions/shared-libraries/run.sh publish
+            -   name: Publish consumers then libraries on host 1
+                id: host-1
+                continue-on-error: true
+                run: bash .github/actions/shared-libraries/run.sh upload-1
+            -   name: Publish consumers then libraries on host 2
+                id: host-2
+                continue-on-error: true
+                run: bash .github/actions/shared-libraries/run.sh upload-2
+            -   name: Report publication failures
+                if: ${{ !cancelled() && (steps.host-1.outcome == 'failure' || steps.host-2.outcome == 'failure') }}
+                run: exit 1

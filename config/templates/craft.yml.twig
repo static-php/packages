@@ -85,15 +85,17 @@
 {%- endif -%}
 
 php-version: {{ php_source_version }}
-extensions: {{ extensions|join(',') }}
-shared-extensions: {{ shared_ext|join(',') }}
+extensions: {{ filter_libraries ? '' : extensions|join(',') }}
+shared-extensions: {{ filter_libraries ? '' : shared_ext|join(',') }}
 {# craft's libs-only stage only resolves extensions, not sapi targets — list frankenphp's suggests explicitly #}
-libs: {{ 'frankenphp' in sapi_list ? '[brotli, watcher]' : '[]' }}
-sapi: {{ sapi_list|join(',') }}
+libs: {{ filter_libraries ? '[' ~ filter_libraries|join(', ') ~ ']' : ('frankenphp' in sapi_list ? '[brotli, watcher]' : '[]') }}
+sapi: {{ filter_libraries ? '' : sapi_list|join(',') }}
 debug: false
 build-options:
     enable-zts: true
     with-suggests: true
+    with-shared-libs: true
+    with-shared-libdir: '{{ shared_libdir }}'
     no-strip: false
     with-added-patch: ['{{ patch_file }}']
     with-config-file-path: '/etc/{{ prefix }}'
@@ -150,6 +152,9 @@ extra-env:
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS: "{{ cflags }} -g -fno-math-errno -fPIE{{ php_optimization_flags }}"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS_LIBPHP: "-ftls-model=initial-exec"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS: "-Wl,--build-id=sha1 -pie -release {{ release_suffix }}{{ php_link_optimization_flags }}"
+{% if type == 'apk' %}    # musl uses this ELF header to size default pthread stacks.
+    SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_PROGRAM: "-Wl,-z,stack-size=0x80000"
+{% endif %}
     # SPC appends LIBPHP to EXTRA_LDFLAGS; the optimization flags above already reach libphp.
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_LIBPHP: "-Wl,-Bsymbolic-functions -Wc,-ftls-model=initial-exec"
     SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-cgi --disable-phpdbg --disable-debug --with-pic --enable-rtld-now --enable-re2c-cgoto --disable-rpath{{ use_tailcall_vm ? ' --disable-gcc-global-regs' : '' }}"

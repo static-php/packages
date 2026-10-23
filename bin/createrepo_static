@@ -40,6 +40,10 @@ def php_stream(version):
 def parse_rpm_info(filename):
     basename = os.path.basename(filename)
 
+    match_library = re.fullmatch(r'(?P<name>php-zts-lib-[a-z0-9][a-z0-9+-]*(?:-debuginfo)?)-(?P<version>[0-9][^-]*)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
+    if match_library:
+        return (*match_library.group('name', 'version', 'release', 'arch'), 'libraries')
+
     # Match standard php-zts RPMs (including debuginfo)
     # Format: php-zts-cli-8.5.1-1.el10.x86_64.rpm or php-zts-cli-debuginfo-8.5.1-1.el10.x86_64.rpm
     # Pre-releases carry a tilde suffix: php-zts-cli-8.6.0~beta1-1.el10.x86_64.rpm
@@ -112,7 +116,7 @@ def build_module_structure(rpm_map, platform, arch):
                 common_artifacts.append(f"{name}-0:{version}-{release}.{arch}")
 
     for stream, pkg_list in sorted(rpm_map.items()):
-        if stream == "common":
+        if stream in {"common", "libraries"}:
             continue
 
         artifacts = common_artifacts.copy()
@@ -134,7 +138,7 @@ def build_module_structure(rpm_map, platform, arch):
                 'context': 'local',
                 'arch': arch,
                 'summary': f'PHP {stream} (ZTS) packages',
-                'description': f'PHP {stream} (ZTS) built statically - no further dependencies',
+                'description': f'PHP {stream} (ZTS) with private shared runtime libraries',
                 'license': {
                     'module': ['MIT']
                 },
@@ -188,7 +192,7 @@ modules_yaml = build_module_structure(rpm_map, platform, arch)
 
 # Pick the default stream, i.e. the one dnf installs without being asked.
 if rpm_map:
-    streams = [s for s in rpm_map.keys() if s != "common" and s not in PRERELEASE_STREAMS]
+    streams = [s for s in rpm_map.keys() if s not in {"common", "libraries"} and s not in PRERELEASE_STREAMS]
     for s in sorted(PRERELEASE_STREAMS & rpm_map.keys(), key=stream_sort_key):
         print(f"stream {s} is pre-release, not eligible as the default", file=sys.stderr)
     if streams:

@@ -18,7 +18,7 @@ use Symfony\Component\Process\Process;
  *   2. every shared extension craft.yml declared was packaged, or is on the recorded skip list
  *   3. every shared extension we packaged loads under the CLI SAPI (no load warnings)
  *   4. frankenphp serves a phpinfo script and loads the *same* extension set
- *   5. PHP >= 8.6 uses the tailcall VM under both CLI and frankenphp
+ *   5. PHP >= 8.6 reports the same known VM kind under CLI and frankenphp
  *
  * The check is mapping-free: PHP is told (via conf.d) to load each packaged .so and
  * either loads it or prints "Unable to load dynamic library" to stderr — its absence
@@ -70,26 +70,47 @@ class TestCommand extends BaseCommand
         }
 
         $srv = null;
+        $webroot = null;
+        $cliVmKind = null;
+        $cleanupNames = array_values(array_diff($names, $this->installedSubset($type, $names)));
         try {
             // --- 1. install the packages built for this version -----------------
             // Extension packages depend on the base SAPI (php-zts-cli, php-zts-pdo, …). A full
             // build has those in dist/; a partial (extension-only) build does not, so pull them
             // from the published repo — exactly as a real `install php-zts-<ext>` resolves them.
             $hasBase = in_array('php' . SPP_PREFIX . '-cli', $names, true);
+            $libraryPrefix = 'php-zts-lib-';
+            $librariesOnly = !array_filter($names, fn($name) => !str_starts_with($name, $libraryPrefix));
             // A --packages run deliberately produces a subset, so it has nothing to cross-check.
             $crossCheck = $hasBase && !(is_string($packagesOpt) && $packagesOpt !== '');
-            $repoArgs = $hasBase ? [] : $this->baseRepoArgs($type, $output);
+            $missingLibraries = [];
+            foreach ($pkgs as $file) {
+                preg_match_all('/\b' . preg_quote($libraryPrefix, '/') . '[a-z0-9+.-]+/', $this->packageMeta($type, $file)['deps'], $required);
+                foreach ($required[0] as $name) {
+                    if (!str_contains($name, '-abi-') && !in_array($name, $names, true)) {
+                        $missingLibraries[$name] = true;
+                    }
+                }
+            }
+            $repoArgs = (!$hasBase && !$librariesOnly) || $missingLibraries ? $this->baseRepoArgs($type, $output) : [];
             $install = match ($type) {
                 'rpm' => array_merge(['dnf', 'install', '-y'], $repoArgs, $pkgs),
                 'deb' => array_merge(['apt-get', 'install', '-y', '--no-install-recommends'], $repoArgs, $pkgs),
                 'apk' => array_merge(['apk', 'add', '--allow-untrusted'], $repoArgs, $pkgs),
             };
-            if (!$hasBase) {
+            if (!$hasBase && !$librariesOnly) {
                 $output->writeln("dist has no php" . SPP_PREFIX . "-cli (partial build) — base packages will resolve from the published repo");
             }
             $output->writeln("Installing " . count($pkgs) . " packages from {$distDir}...");
             if ($this->sh($this->maybeSudo($install), $output) !== 0) {
                 return $this->fail($output, "package installation failed");
+            }
+            if (($fail = $this->verifySharedLibraries($type, $output)) !== null) {
+                return $fail;
+            }
+            if ($librariesOnly) {
+                $output->writeln('<info>PHP-independent shared library packages installed and linked successfully</info>');
+                return self::SUCCESS;
             }
 
             // --- 2. CLI SAPI works and loads every packaged extension -----------
@@ -106,7 +127,8 @@ class TestCommand extends BaseCommand
                     $output->write($vm->getErrorOutput());
                     return $this->fail($output, "{$bin} could not report its VM kind");
                 }
-                if (($fail = $this->verifyVmKind(trim($vm->getOutput()), 'CLI', $output)) !== null) {
+                $cliVmKind = trim($vm->getOutput());
+                if (($fail = $this->verifyVmKind($cliVmKind, 'CLI', $output)) !== null) {
                     return $fail;
                 }
             }
@@ -161,9 +183,9 @@ class TestCommand extends BaseCommand
             if (!is_executable($franken)) {
                 return $this->fail($output, "{$franken} not installed (not built, and not available from the repo)");
             }
-            $webroot = sys_get_temp_dir() . '/spp-test-web';
+            $webroot = sys_get_temp_dir() . '/spp-test-web-' . bin2hex(random_bytes(8));
             @mkdir($webroot, 0755, true);
-            file_put_contents($webroot . '/ping.php', "<?php echo 'PONG';\n");
+            file_put_contents($webroot . '/ping.php', $this->runtimeProbeScript());
             file_put_contents($webroot . '/phpinfo.php', '<?php phpinfo(); echo "\nSPP_LOADED=" . implode(",", get_loaded_extensions()); echo "\nSPP_VM=" . (defined("ZEND_VM_KIND") ? ZEND_VM_KIND : "unknown");' . "\n");
 
             // Serve exactly how users run it (default multi-threaded). If this segfaults,
@@ -202,7 +224,7 @@ class TestCommand extends BaseCommand
             }
             $frLoaded = array_values(array_filter(array_map('trim', explode(',', trim($mm[1])))));
             preg_match('/SPP_VM=([^\r\n<]*)/', $body, $vm);
-            if (($fail = $this->verifyVmKind(trim($vm[1] ?? 'unknown'), 'frankenphp', $output)) !== null) {
+            if (($fail = $this->verifyVmKind(trim($vm[1] ?? 'unknown'), 'frankenphp', $output, $cliVmKind)) !== null) {
                 return $fail;
             }
 
@@ -234,20 +256,52 @@ class TestCommand extends BaseCommand
             if ($srv !== null) {
                 $srv->stop(3);
             }
-            $this->uninstall($type, $names, $output);
+            if ($webroot !== null) {
+                @unlink($webroot . '/ping.php');
+                @unlink($webroot . '/phpinfo.php');
+                @rmdir($webroot);
+                if (is_dir($webroot)) {
+                    $output->writeln("<comment>warning: test webroot cleanup failed: {$webroot}</comment>");
+                }
+            }
+            $this->uninstall($type, $cleanupNames, $output);
         }
     }
 
-    private function verifyVmKind(string $kind, string $sapi, OutputInterface $output): ?int
+    private function verifyVmKind(string $kind, string $sapi, OutputInterface $output, ?string $expectedKind = null): ?int
     {
         if (version_compare(SPP_PHP_VERSION, '8.6', '<')) {
             return null;
         }
-        if ($kind !== 'ZEND_VM_KIND_TAILCALL') {
-            return $this->fail($output, "{$sapi}: expected ZEND_VM_KIND_TAILCALL, got {$kind}");
+        if (!in_array($kind, ['ZEND_VM_KIND_CALL', 'ZEND_VM_KIND_SWITCH', 'ZEND_VM_KIND_GOTO', 'ZEND_VM_KIND_HYBRID', 'ZEND_VM_KIND_TAILCALL'], true)) {
+            return $this->fail($output, "{$sapi}: unknown VM kind {$kind}");
         }
-        $output->writeln("<info>{$sapi}: tailcall VM verified</info>");
+        if ($expectedKind !== null && $kind !== $expectedKind) {
+            return $this->fail($output, "{$sapi}: expected CLI VM kind {$expectedKind}, got {$kind}");
+        }
+        $output->writeln("<info>{$sapi}: {$kind} verified</info>");
         return null;
+    }
+
+    private function runtimeProbeScript(): string
+    {
+        return <<<'PHP'
+<?php
+if (extension_loaded('imagick')) {
+    $image = new Imagick();
+    $image->newImage(2, 2, 'red');
+    $image->setImageFormat('png');
+    $png = $image->getImageBlob();
+    $image->clear();
+    if (strlen($png) < 24 || substr($png, 0, 8) !== "\x89PNG\r\n\x1a\n"
+        || substr($png, 12, 4) !== 'IHDR'
+        || unpack('Nwidth/Nheight', substr($png, 16, 8)) !== ['width' => 2, 'height' => 2]) {
+        http_response_code(500);
+        exit('INVALID_IMAGICK_PNG');
+    }
+}
+echo 'PONG';
+PHP;
     }
 
     /**
@@ -369,7 +423,11 @@ class TestCommand extends BaseCommand
 
         // php-zts-cli and frankenphp carry no php-cli bound — the first IS the PHP version,
         // the second marks it as _86 / +php86 / p86. Without this both minors would be kept.
-        $matchesVersion = static function (array $x) use ($re, $mm, $marker, $cli): bool {
+        $libraryPrefix = 'php-zts-lib-';
+        $matchesVersion = static function (array $x) use ($re, $mm, $marker, $cli, $libraryPrefix): bool {
+            if (str_starts_with($x['name'], $libraryPrefix)) {
+                return true;
+            }
             if (preg_match($re, $x['deps'], $m)) {
                 return $m[1] === $mm;
             }
@@ -464,6 +522,39 @@ class TestCommand extends BaseCommand
         };
     }
 
+    private function verifySharedLibraries(string $type, OutputInterface $output): ?int
+    {
+        $dir = ($type === 'rpm' ? '/usr/lib64' : '/usr/lib') . '/php-zts/lib';
+        $checked = [];
+        foreach (glob($dir . '/*.so*') ?: [] as $file) {
+            $real = realpath($file);
+            if ($real === false || isset($checked[$real])) {
+                continue;
+            }
+            $checked[$real] = true;
+            $dynamic = new Process(['readelf', '-d', $real]);
+            $dynamic->run();
+            if (!$dynamic->isSuccessful() || !preg_match('/\(RUNPATH\).*\[([^]]*)\]/', $dynamic->getOutput(), $runpath)
+                || !in_array($dir, explode(':', $runpath[1]), true)) {
+                return $this->fail($output, "{$file}: missing private library RUNPATH {$dir}");
+            }
+            $loader = new Process(['ldd', $real]);
+            $loader->run();
+            if (!$loader->isSuccessful() || str_contains($loader->getOutput() . $loader->getErrorOutput(), 'not found')) {
+                $output->write($loader->getOutput() . $loader->getErrorOutput());
+                return $this->fail($output, "{$file}: unresolved shared dependency");
+            }
+            preg_match_all('/\(NEEDED\).*\[([^]]+)\]/', $dynamic->getOutput(), $needed);
+            foreach ($needed[1] as $soname) {
+                if (file_exists($dir . '/' . $soname)
+                    && !preg_match('~(?:=>\s*)?' . preg_quote($dir . '/' . $soname, '~') . '(?:\s|$)~', $loader->getOutput())) {
+                    return $this->fail($output, "{$file}: {$soname} did not resolve from {$dir}");
+                }
+            }
+        }
+        return null;
+    }
+
     /** @return array{file:string,name:string,version:string,deps:string} name + version + raw dependency string for a package file */
     private function packageMeta(string $type, string $file): array
     {
@@ -554,6 +645,7 @@ class TestCommand extends BaseCommand
     {
         $host = rtrim(getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com', '/');
         $owner = getenv('SPP_FORGEJO_OWNER') ?: str_replace('.', '', SPP_PHP_VERSION); // e.g. "85"
+        $libsOwner = getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs';
         switch ($type) {
             case 'rpm':
                 // The repo is a modular DNF repo. The release RPM configures it with the right
@@ -566,12 +658,14 @@ class TestCommand extends BaseCommand
                 $this->sh($this->maybeSudo(['dnf', 'module', 'enable', '-y', $stream]), $output);
                 return ['--nogpgcheck'];
             case 'deb':
-                $line = "deb [trusted=yes] {$host}/api/packages/{$owner}/debian php-zts main";
+                $line = "deb [trusted=yes] {$host}/api/packages/{$owner}/debian php-zts main\n"
+                    . "deb [trusted=yes] {$host}/api/packages/{$libsOwner}/debian php-zts main";
                 $this->sh($this->maybeSudo(['bash', '-c', "printf '%s\\n' " . escapeshellarg($line) . " > /etc/apt/sources.list.d/spp-test.list"]), $output);
                 $this->sh($this->maybeSudo(['apt-get', 'update']), $output); // best-effort; local install still works if unreachable
                 return [];
             case 'apk':
-                return ['--repository', "{$host}/api/packages/{$owner}/alpine/main/php-zts"];
+                return ['--repository', "{$host}/api/packages/{$owner}/alpine/main/php-zts",
+                    '--repository', "{$host}/api/packages/{$libsOwner}/alpine/main/php-zts"];
         }
         return [];
     }

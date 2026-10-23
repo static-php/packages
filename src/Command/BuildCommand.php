@@ -19,7 +19,8 @@ class BuildCommand extends BaseCommand
         parent::configure();
         $this
             ->addOption('packages', null, InputOption::VALUE_REQUIRED, 'Specify which packages to build (comma-separated)')
-            ->addOption('libs-only', null, null, 'Build only the libraries (skip PHP and extension build)');
+            ->addOption('libs-only', null, null, 'Build only the libraries (skip PHP and extension build)')
+            ->addOption('libraries', null, InputOption::VALUE_REQUIRED, 'Build selected shared libraries (comma-separated; requires --libs-only)');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -28,6 +29,11 @@ class BuildCommand extends BaseCommand
         $phpVersion = $input->getOption('phpv');
         $target = $input->getOption('target');
         $libsOnly = (bool) $input->getOption('libs-only');
+        $libraries = $input->getOption('libraries');
+        $libraries = $libraries === null ? null : array_values(array_filter(array_map('trim', explode(',', $libraries))));
+        if ($libraries === []) {
+            throw new \InvalidArgumentException('--libraries must name at least one library.');
+        }
         $packagesOpt = $input->getOption('packages');
         $packages = null;
         if (is_string($packagesOpt) && $packagesOpt !== '') {
@@ -45,7 +51,7 @@ class BuildCommand extends BaseCommand
             $output->writeln("  packages: " . implode(', ', $packages));
         }
 
-        $result = RunSPC::run($debug, $phpVersion, $packages, $libsOnly);
+        $result = RunSPC::run($debug, $phpVersion, $packages, $libsOnly, $libraries);
 
         if ($result) {
             $output->writeln("Build completed successfully.");

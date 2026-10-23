@@ -1,0 +1,745 @@
+#!/usr/bin/env python3
+
+import argparse
+import copy
+import functools
+import gzip
+import hashlib
+import io
+import json
+import os
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path, PurePosixPath
+
+
+STREAMS = ['8.2', '8.3', '8.4', '8.5', '8.6']
+METADATA = 'usr/share/php-zts/libraries'
+ROOT = Path(__file__).resolve().parent
+
+
+def read_json(path):
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def write_json(path, value):
+    text = json.dumps(value, sort_keys=True, indent=2) + '\n'
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text)
+    else:
+        print(text, end='')
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def relative_path(value):
+    path = PurePosixPath(value)
+    if path.is_absolute() or '..' in path.parts or not path.parts or str(path) == '.':
+        raise RuntimeError('Unsafe relative library path: ' + str(value))
+    return path
+
+
+def rooted(root, value):
+    path = Path(root) / str(relative_path(value))
+    if os.path.commonpath([str(path.resolve()), str(Path(root).resolve())]) != str(Path(root).resolve()):
+        raise RuntimeError('Library path escapes its root: ' + str(value))
+    return path
+
+
+def validate_manifest(value, complete=True):
+    if value.get('schema') != 1 or value.get('linkage') != 'shared' or not isinstance(value.get('libraries'), dict):
+        raise RuntimeError('Expected schema 1 shared-libraries.json')
+    owned = {}
+    sonames = {}
+    for identifier, library in value['libraries'].items():
+        if not re.fullmatch('[a-z0-9][a-z0-9-]*', identifier):
+            raise RuntimeError('Invalid library ID: ' + identifier)
+        if not library.get('version') or not isinstance(library.get('elf'), dict):
+            raise RuntimeError('Missing version or ELF inventory for ' + identifier)
+        epoch = library.get('abi_epoch', 1)
+        if type(epoch) is not int or epoch < 1:
+            raise RuntimeError('Invalid ABI epoch for ' + identifier)
+        files = library.get('files', [])
+        for path in files:
+            relative_path(path)
+            if path in owned and owned[path] != identifier:
+                raise RuntimeError('Conflicting library ownership: ' + path)
+            owned[path] = identifier
+        for path, elf in library['elf'].items():
+            relative_path(path)
+            name = elf.get('soname')
+            if name:
+                if PurePosixPath(name).name != name or not re.fullmatch('[A-Za-z0-9_.+-]+', name):
+                    raise RuntimeError('Invalid SONAME: ' + name)
+                if name in sonames and sonames[name] != identifier:
+                    raise RuntimeError('Conflicting SONAME ownership: ' + name)
+                sonames[name] = identifier
+    for identifier, library in value['libraries'].items():
+        for dependency in library.get('depends', []) + library.get('dlopen_dependencies', []):
+            if complete and dependency not in value['libraries'] and dependency not in sonames:
+                raise RuntimeError('Missing private dependency {} for {}'.format(dependency, identifier))
+    return value
+
+
+def manifest(path, complete=True):
+    return validate_manifest(read_json(path), complete)
+
+
+def fingerprint(value, inputs=()):
+    stable = copy.deepcopy(value)
+    stable.pop('generated_at', None)
+    for library in stable['libraries'].values():
+        library.pop('generated_at', None)
+    extra = {}
+    for name in sorted(inputs):
+        path = Path(name)
+        if not path.is_file():
+            raise RuntimeError('Fingerprint input does not exist: ' + name)
+        extra[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digest({'manifest': stable, 'inputs': extra})
+
+
+def source_changes(old, new):
+    changes = {}
+    environment_changed = any(old.get(key) != new.get(key) for key in ['architecture', 'libc', 'runtime_libdir'])
+    for identifier in sorted(old['libraries'].keys() | new['libraries'].keys()):
+        previous = old['libraries'].get(identifier)
+        current = new['libraries'].get(identifier)
+        if previous is None:
+            changes[identifier] = 'added'
+        elif current is None:
+            changes[identifier] = 'removed'
+        elif environment_changed or any(previous.get(key) != current.get(key) for key in ['version', 'source_hash', 'build_identity', 'elf', 'files', 'file_hashes', 'license', 'license_files', 'depends', 'runtime_assets', 'dlopen_dependencies']):
+            changes[identifier] = 'changed'
+    return changes
+
+
+def soname_files(library):
+    result = {}
+    for path, elf in library['elf'].items():
+        if elf.get('soname'):
+            result.setdefault(elf['soname'], path)
+    return result
+
+
+def run(command):
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    return result
+
+
+def defined_public_symbols(path):
+    result = run(['readelf', '--wide', '--dyn-syms', str(path)])
+    if result.returncode != 0 or "Symbol table '.dynsym'" not in result.stdout:
+        raise RuntimeError('Cannot audit public ELF symbols: ' + str(path))
+    public = []
+    for line in result.stdout.splitlines():
+        if not re.match(r'^\s*\d+:', line):
+            continue
+        symbol = re.fullmatch(r'\s*\d+:\s+\S+\s+\S+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*', line)
+        if symbol is None:
+            raise RuntimeError('Cannot parse public ELF symbol: ' + line)
+        kind, binding, visibility, index, name = symbol.groups()
+        if index == 'UND' or binding == 'LOCAL' or visibility not in ['DEFAULT', 'PROTECTED']:
+            continue
+        if kind in ['NOTYPE', 'FUNC'] and name in ['_init', '_fini']:
+            continue
+        public.append(name)
+    return public
+
+
+def dump_abi(root, identifier, library):
+    dumps = {}
+    empty = []
+    for name, path in sorted(soname_files(library).items()):
+        relative = '{}/abi/{}/{}.xml'.format(METADATA, identifier, name)
+        output = rooted(root, relative)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        result = run(['abidw', '--no-corpus-path', '--no-show-locs',
+                      '--debug-info-dir', str(Path(root) / 'usr/lib/debug'),
+                      '--debug-info-dir', str(Path(root) / 'debug'),
+                      '--out-file', str(output), str(rooted(root, path))])
+        if result.returncode != 0 or not output.is_file():
+            raise RuntimeError('Cannot generate debug ABI for {} ({}): {}'.format(identifier, name, result.stderr.strip()))
+        corpus = ET.parse(output).getroot()
+        instructions = corpus.findall('abi-instr')
+        if corpus.tag != 'abi-corpus':
+            raise RuntimeError('Invalid ABI dump: ' + str(output))
+        if not any(list(instruction) for instruction in instructions):
+            exported = defined_public_symbols(rooted(root, path))
+            symbols = corpus.findall('elf-function-symbols/elf-symbol') + corpus.findall('elf-variable-symbols/elf-symbol')
+            source_exports = [symbol for symbol in symbols if symbol.get('name') not in ['_init', '_fini'] or symbol.get('type') not in ['func-type', 'no-type']]
+            if exported or source_exports:
+                raise RuntimeError('ABI dump has no type information: ' + str(output))
+            empty.append(name)
+        dumps[name] = relative
+    if not dumps:
+        raise RuntimeError('Library has no SONAME-bearing ELF output: ' + identifier)
+    library['abi_dump'] = dumps
+    library['abi_empty'] = empty
+    library['abi_dump_hashes'] = {name: hashlib.sha256(rooted(root, path).read_bytes()).hexdigest() for name, path in dumps.items()}
+
+
+def abi_difference(previous, current):
+    result = run(['abidiff', '--no-default-suppression', str(previous), str(current)])
+    if result.returncode == 0:
+        return 'compatible'
+    if result.returncode & 3 or result.returncode < 0 or result.returncode > 15:
+        raise RuntimeError('ABI comparison failed: ' + (result.stderr or result.stdout).strip())
+    if result.returncode == 12:
+        return 'breaking'
+    if result.returncode == 4:
+        additive = run(['abidiff', '--no-default-suppression', '--no-added-syms', str(previous), str(current)])
+        if additive.returncode == 0:
+            return 'compatible'
+        raise RuntimeError('Ambiguous ABI changes require review: ' + result.stdout.strip())
+    raise RuntimeError('Unrecognized abidiff result: ' + str(result.returncode))
+
+
+def compare(old, new, old_root, new_root, bootstrap=False):
+    if not old['libraries'] and not bootstrap:
+        raise RuntimeError('No published ABI baseline; initial migration requires --bootstrap')
+    for key in ['architecture', 'libc', 'runtime_libdir']:
+        if old['libraries'] and old.get(key) and new.get(key) != old[key]:
+            raise RuntimeError('ABI baseline {} differs from candidate'.format(key))
+    annotated = copy.deepcopy(new)
+    changes = {}
+    for identifier, library in sorted(annotated['libraries'].items()):
+        dump_abi(new_root, identifier, library)
+        previous = old['libraries'].get(identifier)
+        status = 'added' if previous is None else 'compatible'
+        if previous:
+            old_names = soname_files(previous)
+            new_names = soname_files(library)
+            if old_names.keys() - new_names.keys():
+                status = 'breaking'
+            for name in sorted(old_names.keys() & new_names.keys()):
+                old_dump = previous.get('abi_dump', {}).get(name)
+                if not old_dump:
+                    raise RuntimeError('Published library has no debug ABI: {} ({})'.format(identifier, name))
+                old_path = rooted(old_root, old_dump)
+                if not old_path.is_file():
+                    raise RuntimeError('Published ABI data is missing: ' + str(old_path))
+                if 'abi_empty' in previous and name in previous['abi_empty']:
+                    difference = 'compatible'
+                elif 'abi_empty' in previous and name in library['abi_empty']:
+                    difference = 'breaking'
+                else:
+                    difference = abi_difference(old_path, rooted(new_root, library['abi_dump'][name]))
+                if difference == 'breaking':
+                    status = 'breaking'
+        epoch = previous.get('abi_epoch', 1) if previous else 1
+        if status == 'breaking':
+            epoch += 1
+        library['abi_epoch'] = epoch
+        library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
+        library['abi_capabilities'] = [library['abi_capability']]
+        changes[identifier] = {'status': status, 'abi_epoch': epoch, 'abi_capability': library['abi_capability']}
+    for identifier in sorted(old['libraries'].keys() - annotated['libraries'].keys()):
+        changes[identifier] = {'status': 'removed'}
+    return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
+                       'bootstrap': not bool(old['libraries']), 'libraries': changes}
+
+
+def reverse_closure(value, initial):
+    selected = set(initial)
+    owners = {name: identifier for identifier, library in value['libraries'].items() for name in soname_files(library)}
+    while True:
+        added = {identifier for identifier, library in value['libraries'].items()
+                 if selected.intersection(owners.get(dependency, dependency) for dependency in library.get('depends', []) + library.get('dlopen_dependencies', []))}
+        if added.issubset(selected):
+            return sorted(selected)
+        selected.update(added)
+
+
+def empty_manifest():
+    return {'schema': 1, 'linkage': 'shared', 'libraries': {}}
+
+
+def merge_baselines(baselines, kind, destination):
+    merged = empty_manifest()
+    divergent = set()
+    for value, _ in baselines:
+        for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']:
+            if value.get(key):
+                if key in ['architecture', 'libc', 'runtime_libdir'] and merged.get(key) and merged[key] != value[key]:
+                    raise RuntimeError('Published hosts disagree on ' + key)
+                merged[key] = value[key]
+    identifiers = set().union(*(set(value['libraries']) for value, _ in baselines))
+    for identifier in sorted(identifiers):
+        candidates = [(value['libraries'].get(identifier), root) for value, root in baselines]
+        available = [(library, root) for library, root in candidates if library is not None]
+        selected, source = available[0]
+        identities = {digest({key: library.get(key) for key in ['version', 'source_hash', 'abi_epoch', 'published_version', 'abi_dump_hashes']}) if library is not None else 'missing'
+                      for library, _ in candidates}
+        if len(identities) > 1:
+            divergent.add(identifier)
+        for candidate, candidate_root in available[1:]:
+            left, right = candidate.get('published_version'), selected.get('published_version')
+            if not left or not right:
+                if digest(candidate) != digest(selected):
+                    raise RuntimeError('Cannot reconcile hosts without native package versions: ' + identifier)
+            else:
+                ordering = native_compare(kind, left, right)
+                if ordering == 0 and (candidate.get('source_hash'), candidate.get('abi_epoch')) != (selected.get('source_hash'), selected.get('abi_epoch')):
+                    raise RuntimeError('Published hosts have conflicting ABI metadata for the same package version: ' + identifier)
+                if ordering > 0:
+                    selected, source = candidate, candidate_root
+        if selected.get('abi_epoch', 1) < max(library.get('abi_epoch', 1) for library, _ in available):
+            raise RuntimeError('Published ABI generation moved backwards: ' + identifier)
+        merged['libraries'][identifier] = copy.deepcopy(selected)
+        for relative in selected.get('abi_dump', {}).values():
+            output = rooted(destination, relative)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(rooted(source, relative), output)
+    merged['consumers'] = {stream: sorted(set().union(*(set(value.get('consumers', {}).get(stream, [])) for value, _ in baselines))) for stream in STREAMS}
+    merged['consumer_versions'] = {stream: {} for stream in STREAMS}
+    for value, _ in baselines:
+        for stream, packages in value.get('consumer_versions', {}).items():
+            for name, version in packages.items():
+                versions = merged['consumer_versions'].setdefault(stream, {})
+                if name not in versions or native_compare(kind, version, versions[name]) > 0:
+                    versions[name] = version
+    return merged, divergent
+
+
+def prepare(args):
+    current = manifest(args.manifest)
+    baseline_path = Path(args.baseline) / 'shared-libraries.json'
+    baselines = [(manifest(baseline_path, False) if baseline_path.is_file() else empty_manifest(), args.baseline)]
+    if getattr(args, 'peer_baseline', None):
+        peer = Path(args.peer_baseline) / 'shared-libraries.json'
+        if not peer.is_file():
+            raise RuntimeError('Missing peer baseline manifest: ' + str(peer))
+        baselines.append((manifest(peer, False), args.peer_baseline))
+    request = read_json(args.request) if args.request else {}
+    requested = request.get('requests', {})
+    bootstrap = args.bootstrap
+    if bootstrap and args.mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
+        raise RuntimeError('Bootstrap requires full mode or a full migration request for every PHP stream')
+    with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
+        old, divergent = merge_baselines(baselines, args.type, temporary)
+        annotated, comparison = compare(old, current, temporary, args.root, bootstrap)
+    for identifier, library in annotated['libraries'].items():
+        published = old['libraries'].get(identifier, {}).get('published_version')
+        versions = library.setdefault('package_versions', {})
+        if published:
+            versions[args.type] = published
+        else:
+            versions.pop(args.type, None)
+    comparison['candidate_fingerprint'] = fingerprint(annotated)
+    sources = source_changes(old, current)
+    specified = [name.strip() for name in (args.libraries or '').split(',') if name.strip()]
+    unknown = set(specified) - current['libraries'].keys()
+    if unknown:
+        raise RuntimeError('Unknown selected libraries: ' + ', '.join(sorted(unknown)))
+    selected = set(current['libraries']) if args.mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | set(specified)
+    selected.update(divergent)
+    selected.update(identifier for identifier, change in comparison['libraries'].items() if change['status'] == 'breaking')
+    selected = reverse_closure(current, selected)
+    breaking = bool(divergent) or any(item['status'] in ['breaking', 'removed'] for item in comparison['libraries'].values())
+    force_all = comparison['bootstrap'] or breaking
+    streams = set(name.strip() for name in (args.php_versions or ','.join(STREAMS)).split(',') if name.strip())
+    if streams - set(STREAMS):
+        raise RuntimeError('Unknown PHP streams: ' + ', '.join(sorted(streams - set(STREAMS))))
+    package_filter = sorted(set(name.strip() for name in (args.packages or '').split(',') if name.strip()))
+    php = {}
+    for stream in STREAMS:
+        if force_all:
+            php[stream] = {'full': True, 'packages': []}
+        elif stream not in streams:
+            php[stream] = {'full': False, 'packages': []}
+        elif args.mode == 'full':
+            php[stream] = {'full': not bool(package_filter), 'packages': package_filter}
+        else:
+            entry = requested.get(stream, {})
+            php[stream] = {'full': bool(entry.get('full')) and not bool(package_filter),
+                           'packages': package_filter or sorted(set(entry.get('packages', [])))}
+    selected = [identifier for identifier in selected if identifier in current['libraries']]
+    plan = {'schema': 1, 'type': args.type, 'libraries': selected, 'removed_libraries': sorted(set(old['libraries']) - set(current['libraries'])),
+            'abi_break': breaking, 'bootstrap': comparison['bootstrap'], 'baseline_fingerprint': fingerprint(baselines[0][0]),
+            'baseline_fingerprints': sorted(set(fingerprint(value) for value, _ in baselines)),
+            'divergent_libraries': sorted(divergent),
+            'candidate_fingerprint': comparison['candidate_fingerprint'], 'php_requests': php,
+            'expected_members': ['php-zts-lib-' + identifier for identifier in selected],
+            'expected_consumers': {stream: old.get('consumers', {}).get(stream, []) for stream in STREAMS} if force_all else {},
+            'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes', 'abi_empty']} for identifier in selected},
+            'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
+            'published_consumers': old.get('consumer_versions', {}) if force_all else {},
+            'comparison': comparison['libraries']}
+    if plan['removed_libraries']:
+        raise RuntimeError('Library removal requires an explicit package migration: ' + ', '.join(plan['removed_libraries']))
+    write_json(args.manifest_output, annotated)
+    write_json(args.output, plan)
+
+
+def metadata_entries(archive):
+    with tarfile.open(fileobj=archive, mode='r|*', ignore_zeros=True) as data:
+        for member in data:
+            name = member.name[2:] if member.name.startswith('./') else member.name
+            name = name.lstrip('/')
+            if not name.startswith(METADATA + '/'):
+                continue
+            relative_path(name)
+            if member.isfile():
+                yield name, data.extractfile(member).read()
+
+
+def cpio_entries(data):
+    offset = 0
+    while offset + 110 <= len(data):
+        header = data[offset:offset + 110]
+        if header[:6] not in [b'070701', b'070702']:
+            raise RuntimeError('Unsupported RPM cpio archive')
+        size = int(header[54:62], 16)
+        namesize = int(header[94:102], 16)
+        start = offset + 110
+        name = data[start:start + namesize - 1].decode()
+        name = (name[2:] if name.startswith('./') else name).lstrip('/')
+        start = (start + namesize + 3) & ~3
+        if name == 'TRAILER!!!':
+            return
+        if start + size > len(data):
+            raise RuntimeError('Truncated RPM cpio archive')
+        if name.startswith(METADATA + '/'):
+            relative_path(name)
+            mode = int(header[14:22], 16)
+            if mode & 0o170000 == 0o100000:
+                yield name, data[start:start + size]
+        offset = (start + size + 3) & ~3
+
+
+def extract_metadata(path, kind, destination):
+    if kind == 'rpm':
+        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]))
+    elif kind == 'deb':
+        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])))
+    else:
+        entries = metadata_entries(gzip.GzipFile(filename=str(path)))
+    found = False
+    for name, content in entries:
+        output = rooted(destination, name)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.exists() and output.read_bytes() != content:
+            raise RuntimeError('Conflicting published library metadata: ' + name)
+        output.write_bytes(content)
+        found = True
+    return found
+
+
+def package_provides(path, kind):
+    if kind == 'rpm':
+        output = subprocess.check_output(['rpm', '-qp', '--nosignature', '--qf', '[%{PROVIDENAME}\n]', str(path)], universal_newlines=True)
+        return set(output.splitlines())
+    if kind == 'deb':
+        output = subprocess.check_output(['dpkg-deb', '-f', str(path), 'Provides'], universal_newlines=True)
+        return {part.strip().split(' ', 1)[0] for part in output.split(',') if part.strip()}
+    with gzip.GzipFile(filename=str(path)) as stream, tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
+        for member in archive:
+            if member.name in ['.PKGINFO', './.PKGINFO']:
+                fields = archive.extractfile(member).read().decode()
+                return set(re.findall(r'^provides\s*=\s*([^\s=]+)', fields, re.M))
+    raise RuntimeError('APK archive has no .PKGINFO metadata: ' + str(path))
+
+
+def native_compare(kind, left, right):
+    if kind == 'rpm':
+        result = run(['rpmdev-vercmp', left, right])
+        if result.returncode not in [0, 11, 12]:
+            raise RuntimeError('Cannot compare published RPM versions: ' + result.stderr)
+        return {0: 0, 11: 1, 12: -1}[result.returncode]
+    helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+    native = helper['version_is_newer']
+    package_type = 'debian' if kind == 'deb' else 'alpine'
+    return 1 if native(package_type, left, right) else -1 if native(package_type, right, left) else 0
+
+
+def normalized_arch(arch, kind):
+    if arch in ['arm64', 'aarch64']:
+        return 'arm64' if kind == 'deb' else 'aarch64'
+    if arch in ['amd64', 'x86_64']:
+        return 'amd64' if kind == 'deb' else 'x86_64'
+    return arch
+
+
+def published_consumers(helper, host, owner, password, kind, architecture):
+    package_type = 'debian' if kind == 'deb' else 'alpine'
+    packages = helper['get_remote_packages'](host, owner, password, package_type)
+    result = {}
+    names = {package['name'] for package in packages if not package['name'].endswith('-debuginfo')}
+    for name in sorted(names):
+        candidates = [package for package in packages if package['name'] == name]
+        candidates.sort(key=functools.cmp_to_key(lambda a, b: native_compare(kind, a['version'], b['version'])), reverse=True)
+        for candidate in candidates:
+            archs = helper['get_remote_package_archs'](host, owner, password, package_type, name, candidate['version'], strict=True)
+            if not archs:
+                raise RuntimeError('Cannot determine published consumer architectures: ' + name)
+            if architecture in archs or archs.intersection({'all', 'noarch'}):
+                result[name] = candidate['version']
+                break
+    return result
+
+
+def baseline(args):
+    destination = Path(args.output)
+    destination.mkdir(parents=True, exist_ok=True)
+    if any(destination.iterdir()):
+        raise RuntimeError('Baseline output must be empty: ' + str(destination))
+    architecture = normalized_arch(args.arch, args.type)
+    selected = {}
+    consumers = {stream: set() for stream in STREAMS}
+    consumer_versions = {stream: {} for stream in STREAMS}
+    with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
+        temporary = Path(temporary)
+        if args.type == 'rpm':
+            if not args.remote_directory:
+                raise RuntimeError('RPM baseline requires --remote-directory')
+            rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+            reader = lambda location, missing_ok=False: rpm['read_remote_file'](args.host, args.remote_directory, location, missing_ok)
+            packages = rpm['published_packages'](reader)
+            for package in packages:
+                if package['arch'] == architecture and not package['name'].startswith('php-zts-lib-'):
+                    stream = rpm['php_stream'](package['version'])
+                    if stream in consumers:
+                        consumers[stream].add(package['name'])
+                        versions = consumer_versions[stream]
+                        if package['name'] not in versions or native_compare('rpm', package['evr'], versions[package['name']]) > 0:
+                            versions[package['name']] = package['evr']
+            for package in packages:
+                name = package['name']
+                if not name.startswith('php-zts-lib-') or name.endswith('-debuginfo') or package['arch'] != architecture:
+                    continue
+                if name not in selected or native_compare('rpm', package['evr'], selected[name]['evr']) > 0:
+                    selected[name] = package
+            for index, package in enumerate(selected.values()):
+                path = temporary / (str(index) + '.rpm')
+                if not package.get('location'):
+                    raise RuntimeError('Published RPM has no location')
+                path.write_bytes(reader(package['location']))
+                if not extract_metadata(path, 'rpm', destination):
+                    raise RuntimeError('Published library has no ABI metadata: ' + package['name'])
+        else:
+            import requests
+            helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+            package_type = 'debian' if args.type == 'deb' else 'alpine'
+            password = os.environ.get(args.password_env, '') if args.password_env else ''
+            consumer_password = os.environ.get(args.consumer_password_env, '') if args.consumer_password_env else password
+            auth = (args.owner, password)
+            packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
+            for stream in STREAMS:
+                owner = stream.replace('.', '')
+                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture)
+                consumers[stream].update(versions)
+                consumer_versions[stream].update(versions)
+            names = {item['name'] for item in packages if item['name'].startswith('php-zts-lib-') and not item['name'].endswith('-debuginfo')}
+            for name in sorted(names):
+                versions = [item for item in packages if item['name'] == name]
+                versions.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, a['version'], b['version'])), reverse=True)
+                for item in versions:
+                    url = '{}/api/v1/packages/{}/{}/{}/{}/files'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'])
+                    response = requests.get(url, auth=auth, timeout=30)
+                    response.raise_for_status()
+                    matched = False
+                    for file in response.json():
+                        if args.type == 'deb' and architecture not in file.get('name', ''):
+                            continue
+                        url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'], file['id'])
+                        path = temporary / ('package.' + args.type)
+                        with requests.get(url, auth=auth, timeout=60, stream=True) as download:
+                            download.raise_for_status()
+                            with path.open('wb') as output:
+                                for chunk in download.iter_content(1024 * 1024):
+                                    output.write(chunk)
+                        actual_name, actual_version, actual_arch = helper['package_metadata'](path, package_type)
+                        if actual_name != name or actual_version != item['version']:
+                            raise RuntimeError('Published package headers do not match registry')
+                        if actual_arch != architecture:
+                            continue
+                        if not extract_metadata(path, args.type, destination):
+                            raise RuntimeError('Published library has no ABI metadata: ' + name)
+                        selected[name] = item
+                        matched = True
+                        break
+                    if matched:
+                        break
+    aggregate = empty_manifest()
+    aggregate['consumers'] = {stream: sorted(names) for stream, names in consumers.items()}
+    aggregate['consumer_versions'] = consumer_versions
+    metadata = destination / METADATA
+    if metadata.exists():
+        for path in sorted(metadata.glob('*.json')):
+            library = read_json(path)
+            identifier = library.pop('id', path.stem)
+            if identifier in aggregate['libraries']:
+                raise RuntimeError('Duplicate published library: ' + identifier)
+            for key in ['runtime_libdir', 'architecture', 'libc']:
+                value = library.pop(key, None)
+                if value:
+                    if aggregate.get(key) and aggregate[key] != value:
+                        raise RuntimeError('Inconsistent published library ' + key)
+                    aggregate[key] = value
+            aggregate['libraries'][identifier] = library
+            package = selected.get('php-zts-lib-' + identifier)
+            if not package:
+                raise RuntimeError('Published metadata has no matching package: ' + identifier)
+            library['published_version'] = package.get('evr', package.get('version'))
+            hashes = {name: hashlib.sha256(rooted(destination, relative).read_bytes()).hexdigest() for name, relative in library.get('abi_dump', {}).items()}
+            if library.get('abi_dump_hashes', hashes) != hashes:
+                raise RuntimeError('Published ABI data checksum mismatch: ' + identifier)
+            library['abi_dump_hashes'] = hashes
+    validate_manifest(aggregate, False)
+    write_json(destination / 'shared-libraries.json', aggregate)
+
+
+def cohort(args):
+    plan = read_json(args.plan)
+    if plan.get('schema') != 1:
+        raise RuntimeError('Invalid shared-library plan')
+    known_baselines = plan.get('baseline_fingerprints', [plan['baseline_fingerprint']])
+    if args.baseline_manifest and fingerprint(manifest(args.baseline_manifest, False)) not in known_baselines:
+        raise RuntimeError('Published library baseline changed during the build; prepare a new cohort')
+    members = set()
+    streams = set()
+    consumer_members = {stream: set() for stream in STREAMS}
+    files = []
+    helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+    rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+    for path in sorted(Path(args.artifacts).rglob('*.' + args.type)):
+        if args.type == 'rpm':
+            package = rpm['local_package'](path)
+            name, version, architecture = package['name'], package['version'], package['arch']
+            stream = None if name.startswith('php-zts-lib-') else rpm['php_stream'](version)
+        else:
+            name, version, architecture = helper['package_metadata'](path, 'debian' if args.type == 'deb' else 'alpine')
+            tag = re.search(r'(?:\+php|p)(\d)(\d+)[._]', version)
+            stream = '{}.{}'.format(*tag.groups()) if tag else re.match(r'\d+\.\d+', version).group() if re.match(r'\d+\.\d+', version) else None
+        members.add(name)
+        previous_consumer = plan.get('published_consumers', {}).get(stream, {}).get(name)
+        if previous_consumer and native_compare(args.type, package['evr'] if args.type == 'rpm' else version, previous_consumer) <= 0:
+            raise RuntimeError('ABI transition consumer must have a new package revision: ' + name)
+        if name.startswith('php-zts-lib-') and not name.endswith('-debuginfo'):
+            identifier = name[len('php-zts-lib-'):]
+            expected = plan.get('expected_libraries', {}).get(identifier)
+            if expected:
+                previous_version = plan.get('published_versions', {}).get(identifier)
+                candidate_version = package['evr'] if args.type == 'rpm' else version
+                if previous_version and native_compare(args.type, candidate_version, previous_version) <= 0:
+                    raise RuntimeError('Selected library must have a new package revision: ' + name)
+                with tempfile.TemporaryDirectory(prefix='shared-library-cohort-') as temporary:
+                    if not extract_metadata(path, args.type, temporary):
+                        raise RuntimeError('Candidate library has no ABI metadata: ' + str(path))
+                    data = read_json(Path(temporary) / METADATA / (identifier + '.json'))
+                    if any(data.get(key) != value for key, value in expected.items()):
+                        raise RuntimeError('Candidate library does not match prepared ABI plan: ' + name)
+                    floor = data.get('package_versions', {}).get(args.type)
+                    if not floor or native_compare(args.type, candidate_version, floor) != 0:
+                        raise RuntimeError('Candidate library has no matching native package-version floor: ' + name)
+                    if expected['abi_capability'] not in package_provides(path, args.type):
+                        raise RuntimeError('Candidate library does not provide its private ABI capability: ' + name)
+                    for abi in data.get('abi_dump', {}).values():
+                        if not rooted(temporary, abi).is_file():
+                            raise RuntimeError('Candidate library is missing persisted ABI data: ' + abi)
+                    hashes = {soname: hashlib.sha256(rooted(temporary, abi).read_bytes()).hexdigest() for soname, abi in data.get('abi_dump', {}).items()}
+                    if data.get('abi_dump_hashes', hashes) != hashes:
+                        raise RuntimeError('Candidate library ABI data checksum mismatch: ' + name)
+        if stream in consumer_members and not name.startswith('php-zts-lib-'):
+            consumer_members[stream].add(name)
+        if name == 'php-zts-cli' and stream:
+            streams.add(stream)
+        files.append({'name': name, 'version': version, 'architecture': architecture, 'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+    missing = set(plan.get('expected_members', [])) - members
+    missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full')} - streams
+    missing_consumers = {stream: sorted(set(names) - consumer_members[stream]) for stream, names in plan.get('expected_consumers', {}).items()
+                         if set(names) - consumer_members[stream]}
+    if missing or missing_streams or missing_consumers:
+        raise RuntimeError('Incomplete shared-library cohort; missing packages {}, full PHP streams {}, consumers {}'.format(', '.join(sorted(missing)), ', '.join(sorted(missing_streams)), json.dumps(missing_consumers, sort_keys=True)))
+    write_json(args.output, {'schema': 1, 'plan_fingerprint': digest(plan), 'baseline_fingerprint': plan['baseline_fingerprint'], 'files': files})
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Plan private shared-library builds and ABI-safe publication cohorts.')
+    commands = parser.add_subparsers(dest='command')
+    commands.required = True
+    command = commands.add_parser('fingerprint')
+    command.add_argument('manifest')
+    command.add_argument('--input', action='append', default=[])
+    command = commands.add_parser('changes')
+    command.add_argument('--old', required=True)
+    command.add_argument('--new', required=True)
+    command.add_argument('--output')
+    command = commands.add_parser('compare')
+    command.add_argument('--old')
+    command.add_argument('--new', required=True)
+    command.add_argument('--old-root', required=True)
+    command.add_argument('--new-root', required=True)
+    command.add_argument('--bootstrap', action='store_true')
+    command.add_argument('--manifest-output', required=True)
+    command.add_argument('--output')
+    command = commands.add_parser('closure')
+    command.add_argument('--manifest', required=True)
+    command.add_argument('--changes', required=True)
+    command.add_argument('--output')
+    command = commands.add_parser('baseline')
+    command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
+    command.add_argument('--arch', required=True)
+    command.add_argument('--host', required=True)
+    command.add_argument('--remote-directory')
+    command.add_argument('--owner', default='libs')
+    command.add_argument('--password-env')
+    command.add_argument('--consumer-password-env', default='FORGEJO_PASSWORD')
+    command.add_argument('--output', required=True)
+    command = commands.add_parser('prepare')
+    command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
+    command.add_argument('--manifest', required=True)
+    command.add_argument('--root', required=True)
+    command.add_argument('--baseline', required=True)
+    command.add_argument('--peer-baseline')
+    command.add_argument('--mode', choices=['full', 'incremental'], default='full')
+    command.add_argument('--request')
+    command.add_argument('--libraries')
+    command.add_argument('--php-versions')
+    command.add_argument('--packages')
+    command.add_argument('--bootstrap', action='store_true')
+    command.add_argument('--manifest-output', required=True)
+    command.add_argument('--output', required=True)
+    command = commands.add_parser('cohort')
+    command.add_argument('--plan', required=True)
+    command.add_argument('--artifacts', required=True)
+    command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
+    command.add_argument('--baseline-manifest')
+    command.add_argument('--output')
+    args = parser.parse_args()
+    if args.command == 'fingerprint':
+        print(fingerprint(manifest(args.manifest), args.input))
+    elif args.command == 'changes':
+        write_json(args.output, {'schema': 1, 'libraries': source_changes(manifest(args.old), manifest(args.new))})
+    elif args.command == 'compare':
+        updated, result = compare(manifest(args.old, False) if args.old else empty_manifest(), manifest(args.new), args.old_root, args.new_root, args.bootstrap)
+        write_json(args.manifest_output, updated)
+        write_json(args.output, result)
+    elif args.command == 'closure':
+        changes = read_json(args.changes)['libraries']
+        write_json(args.output, {'schema': 1, 'libraries': reverse_closure(manifest(args.manifest), changes)})
+    elif args.command == 'prepare':
+        prepare(args)
+    elif args.command == 'baseline':
+        baseline(args)
+    elif args.command == 'cohort':
+        cohort(args)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, KeyError, ET.ParseError, subprocess.CalledProcessError) as error:
+        print('shared-library-plan: ' + str(error), file=sys.stderr)
+        sys.exit(1)

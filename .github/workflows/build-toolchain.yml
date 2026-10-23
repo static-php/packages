@@ -62,10 +62,18 @@ jobs:
                         -t toolchain-build .
                     rm -f /tmp/github_token
 
+            -   name: Verify runtime debug information and licenses
+                env:
+                    GCC_VERSION: ${{ inputs.gcc_version }}
+                run: |
+                    docker run --rm --env GCC_VERSION="$GCC_VERSION" toolchain-build \
+                        /usr/local/bin/build-gcc-runtime --check
+
             -   name: Extract toolchain blob
                 env:
                     GCC_VERSION: ${{ inputs.gcc_version }}
                 run: |
+                    set -euo pipefail
                     BLOB="gcc-${GCC_VERSION}-${{ matrix.family.name }}-${{ matrix.platform.arch }}.tar.zst"
                     docker run --rm toolchain-build tar -C / -cf - opt/gcc \
                         | zstd -12 -T0 -o "$BLOB"
@@ -81,5 +89,5 @@ jobs:
                     gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
                         gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --latest=false \
                             --title "Toolchain: GCC ${GCC_VERSION}" \
-                            --notes "Prebuilt GCC toolchains targeting the system glibc."
+                            --notes "Prebuilt native GCC toolchains with runtime DWARF and GCC runtime licenses."
                     gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$BLOB"

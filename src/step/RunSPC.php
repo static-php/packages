@@ -9,8 +9,11 @@ use staticphp\util\TwigRenderer;
 
 class RunSPC
 {
-    public static function run(bool $debug = false, string $phpVersion = '8.4', ?array $packages = null, bool $libsOnly = false): bool
+    public static function run(bool $debug = false, string $phpVersion = '8.4', ?array $packages = null, bool $libsOnly = false, ?array $libraries = null): bool
     {
+        if ($libraries !== null && !$libsOnly) {
+            throw new \InvalidArgumentException('--libraries requires --libs-only.');
+        }
         $craftYmlDest = BASE_PATH . '/craft.yml';
 
         try {
@@ -27,7 +30,7 @@ class RunSPC
                 }
             }
             echo "Selected PHP release: {$sourceVersion}\n";
-            $craftYml = TwigRenderer::renderCraftTemplate($phpVersion, null, $packages, $sourceVersion);
+            $craftYml = TwigRenderer::renderCraftTemplate($phpVersion, null, $packages, $sourceVersion, $libraries);
 
             // Write the rendered craft.yml to the destination
             if (!file_put_contents($craftYmlDest, $craftYml)) {
@@ -40,7 +43,7 @@ class RunSPC
         }
 
         // Build the command arguments
-        $args = ['vendor/bin/spc', 'craft'];
+        $args = [getenv('SPP_SPC_BINARY') ?: 'vendor/bin/spc', 'craft'];
         if ($debug) {
             $args[] = '--debug';
         }
@@ -60,7 +63,7 @@ class RunSPC
                 echo $buffer;
             });
             if ($exitCode === 0 && !$libsOnly) {
-                $versionProcess = new Process([BASE_PATH . '/buildroot/bin/php', '-n', '-r', 'echo PHP_VERSION;']);
+                $versionProcess = new Process([BASE_PATH . '/buildroot/bin/php', '-n', '-r', 'echo PHP_VERSION;'], env: ['LD_LIBRARY_PATH' => BASE_PATH . '/buildroot/lib']);
                 $versionProcess->mustRun();
                 $actual = trim($versionProcess->getOutput());
                 $matches = preg_match('/^\d+\.\d+$/', $sourceVersion)
@@ -82,7 +85,6 @@ class RunSPC
 
         echo "Static PHP CLI build completed successfully.\n";
 
-        // Copy the built files to our build directory (only when we actually built PHP)
         if (!$libsOnly) {
             self::copyBuiltFiles($phpVersion);
         }
@@ -139,12 +141,12 @@ class RunSPC
 
         // Globs miss dotfiles, so spc's .build.json never arrives and stale ones never leave;
         // cp -a also preserves the <ext>.so -> <ext>-zts-NN.so symlinks that cp -r dereferences.
-        exec('rm -rf ' . escapeshellarg($buildDir));
+        (new Process(['rm', '-rf', $buildDir]))->mustRun();
         if (!is_dir($buildDir) && !mkdir($buildDir, 0755, true) && !is_dir($buildDir)) {
             echo "Failed to create directory: {$buildDir}\n";
             return;
         }
-        exec('cp -a ' . escapeshellarg($sourceDir) . '/. ' . escapeshellarg($buildDir) . '/');
+        (new Process(['cp', '-a', $sourceDir . '/.', $buildDir . '/']))->mustRun();
 
         echo "Copied PHP {$phpVersion} files to {$buildDir}\n";
     }

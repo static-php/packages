@@ -7,6 +7,7 @@ on:
             - Dockerfile.debian
             - Dockerfile.alpine
             - Dockerfile.rhel
+            - bin/build-gcc-runtime
             - .github/workflows/build-images.yml
     workflow_dispatch:
 

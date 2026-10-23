@@ -19,7 +19,7 @@ RUN sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|
     apt-get update && \
     apt-get install -y ruby build-essential jq curl gzip sudo git gnupg tar zstd xz-utils python3 python3-requests \
         bison re2c flex autoconf automake autopoint libtool pkg-config nasm \
-        zlib1g-dev && \
+        zlib1g-dev patchelf abigail-tools && \
     apt-get upgrade -y && \
     gem install --no-document fpm
 
@@ -68,19 +68,21 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
             --enable-checking=release --enable-languages=c,c++ --with-system-zlib \
             --with-as=/opt/gcc/bin/as --with-ld=/opt/gcc/bin/ld \
             --enable-default-pie --enable-multiarch --with-pkgversion="static-php GCC" && \
-        make -j"$(nproc)" && \
+        make -j"$(nproc)" CFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' CXXFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' LIBGCC2_DEBUG_CFLAGS='-g -gdwarf-4' && \
         make install-strip && \
+        make install-target && \
+        install -Dm644 ../COPYING3 /opt/gcc/share/licenses/gcc/COPYING3 && \
+        install -m644 ../COPYING.RUNTIME /opt/gcc/share/licenses/gcc/COPYING.RUNTIME && \
         cd / && rm -rf /tmp/gcc-${GCC_VERSION}; \
     fi
 
-# libstdc++.so dev-symlink becomes a linker script INPUT(libstdc++.a) so -lstdc++ links
-# gcc 16's C++ runtime statically: shipped artifacts then depend only on the system
-# glibc/libgcc_s (built on the oldest glibc, so no too-new symbol versions can leak in).
-# The assertions fail the image build if the toolchain regresses.
+COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
+RUN GCC_VERSION="${GCC_VERSION}" /usr/local/bin/build-gcc-runtime
+
+# Older toolchain archives contain a static-only linker script here.
 RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.a" ]; then \
-            rm -f "$d/libstdc++.so" && \
-            printf 'INPUT(libstdc++.a)\n' > "$d/libstdc++.so"; \
+        if [ -e "$d/libstdc++.so.6" ]; then \
+            ln -sf libstdc++.so.6 "$d/libstdc++.so"; \
         fi; \
     done && \
     ln -sf gcc /opt/gcc/bin/cc && \
@@ -92,8 +94,10 @@ RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
     gcc /tmp/cc-check.c -o /tmp/cc-check && /tmp/cc-check && \
     ! readelf -ld /tmp/cc-check | grep -qE 'linuxbrew|/opt/gcc' && \
     printf '#include <string>\nint main(){ return std::string("x").size() != 1; }\n' > /tmp/cxx-check.cpp && \
-    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && /tmp/cxx-check && \
-    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc|libstdc\+\+' && \
+    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && \
+    LD_LIBRARY_PATH="$(dirname "$(g++ -print-file-name=libstdc++.so.6)")" /tmp/cxx-check && \
+    readelf -d /tmp/cxx-check | grep -q 'libstdc++' && \
+    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc' && \
     rm -f /tmp/cc-check* /tmp/cxx-check*
 
 # Pre-install SPC's go-xcaddy package so workflows don't redownload it.

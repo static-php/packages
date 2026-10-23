@@ -7,6 +7,8 @@ use staticphp\extension;
 use staticphp\package;
 use staticphp\util\ExtMeta;
 use staticphp\util\SkippedExtensions;
+use staticphp\util\SharedLibraries;
+use staticphp\package\library;
 use Symfony\Component\Process\Process;
 use staticphp\CraftConfig;
 
@@ -28,9 +30,30 @@ class CreatePackages
     private static array $resolvedIterations = [];
     private static string $prefix = '-zts';
     private static bool $debuginfo = false;
+    private static ?SharedLibraries $sharedLibraries = null;
+    private static array $consumerManifest = [];
 
-    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null): true
+    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null, bool $libsOnly = false, ?array $libraries = null): true
     {
+        self::$prefix = defined('SPP_PREFIX') ? SPP_PREFIX : '-zts';
+        self::$packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
+        self::$iterationOverride = $iteration !== null && $iteration !== '' ? $iteration : null;
+        self::$bump = $bump ?? self::$bump;
+        self::$debuginfo = $debuginfo ?? self::$debuginfo;
+        self::$resolvedIterations = [];
+        self::$versionArch = [];
+        self::$consumerManifest = [];
+        $manifestRoot = $libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH;
+        $shared = CraftConfig::getInstance()->getRawConfig()['build-options']['with-shared-libs'] ?? false;
+        self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, getLibdir() . '/php-zts/lib');
+        if ($libsOnly) {
+            self::createLibraryPackages($libraries);
+            echo "Library package creation completed.\n";
+            return true;
+        }
+        if ($libraries !== null) {
+            throw new \InvalidArgumentException('--libraries requires --libs-only.');
+        }
         // Skip propagation reads extension metadata, so the package configs must be registered first.
         self::bootstrapSpcGlobals();
         self::loadConfig();
@@ -42,15 +65,7 @@ class CreatePackages
             @mkdir(DOWNLOAD_PATH, 0755, true);
         }
         $phpBinary = BUILD_BIN_PATH . '/php';
-        self::$binaryDependencies = self::getBinaryDependencies($phpBinary);
-
-        // Use values from constants set by BaseCommand
-        self::$prefix = defined('SPP_PREFIX') ? SPP_PREFIX : '-zts';
-        self::$packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
-        self::$iterationOverride = $iteration !== null && $iteration !== '' ? $iteration : null;
-        if ($bump !== null) {
-            self::$bump = $bump;
-        }
+        self::$binaryDependencies = self::$sharedLibraries === null ? self::getBinaryDependencies($phpBinary) : [];
 
         // Verify that we're not trying to package a glibc binary as APK
         //if (self::$packageType === 'apk' && file_exists($phpBinary) && self::isGlibcBinary($phpBinary)) {
@@ -60,11 +75,6 @@ class CreatePackages
         //        "Please rebuild with musl libc or use a different package type (rpm/deb)."
         //    );
         //}
-
-        // Set debuginfo flag from parameter
-        if ($debuginfo !== null) {
-            self::$debuginfo = $debuginfo;
-        }
 
         if ($packageNames !== null) {
             if (is_string($packageNames)) {
@@ -107,6 +117,38 @@ class CreatePackages
 
         echo "Package creation completed.\n";
         return true;
+    }
+
+    private static function createLibraryPackages(?array $ids): void
+    {
+        $manifest = self::$sharedLibraries;
+        if ($manifest === null) {
+            throw new RuntimeException('Library packaging requires shared-libraries.json.');
+        }
+        $ids ??= $manifest->libraryIds();
+        $packages = [];
+        $architecture = $manifest->architecture();
+        $packageArchitecture = self::$packageType === 'deb' ? match ($architecture) {
+            'x86_64' => 'amd64',
+            'aarch64' => 'arm64',
+            default => $architecture,
+        } : $architecture;
+        foreach ($ids as $id) {
+            $package = new library($manifest, $id);
+            $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
+            $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
+            $dist = self::$packageType === 'rpm' ? self::getDistVersion() : '';
+            $release = $iteration . ($dist === '' ? '' : '.' . $dist);
+            $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $release);
+            $packages[] = $package;
+        }
+        foreach ($packages as $package) {
+            self::createPackageWithFpm($package, $package->getVersion(), $architecture);
+            if (self::$debuginfo && !empty($package->getDebuginfoFpmConfig()['files'])) {
+                self::createPackageWithFpm($package, $package->getVersion(), $architecture, true);
+            }
+        }
+        $manifest->persist();
     }
 
     /**
@@ -203,7 +245,10 @@ class CreatePackages
         // FrankenPHP has a special package creation flow
         if ($sapi === 'frankenphp') {
             $package = new $packageClass();
-            $package->createPackages(self::$packageType, self::$binaryDependencies, self::$iterationOverride, self::$debuginfo, self::$bump);
+            $files = [BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/frankenphp'];
+            $dependencies = self::$sharedLibraries === null ? self::$binaryDependencies : self::getPayloadBinaryDependencies($files);
+            $package->createPackages(self::$packageType, $dependencies, self::$iterationOverride, self::$debuginfo, self::$bump);
+            self::recordConsumer($package->getName(), $files);
             return;
         }
 
@@ -410,7 +455,7 @@ class CreatePackages
             return;
         }
         $done = true;
-        $spcRoot = BASE_PATH . '/vendor/crazywhalecc/static-php-cli';
+        $spcRoot = getenv('SPP_SPC_ROOT') ?: BASE_PATH . '/vendor/crazywhalecc/static-php-cli';
         require_once $spcRoot . '/src/globals/internal-env.php';
         foreach (['lib', 'target', 'ext'] as $kind) {
             \StaticPHP\Config\PackageConfig::loadFromDir($spcRoot . "/config/pkg/{$kind}", 'core');
@@ -465,17 +510,107 @@ class CreatePackages
         }
     }
 
+    private static function packageConfig(package $package, bool $isDebuginfo): array
+    {
+        $config = $isDebuginfo ? $package->getDebuginfoFpmConfig() : $package->getFpmConfig();
+        if (self::$sharedLibraries === null) {
+            return $config;
+        }
+        self::$binaryDependencies = $isDebuginfo ? [] : self::getPayloadBinaryDependencies($config['files'] ?? []);
+        if (!$isDebuginfo) {
+            $id = $package instanceof library ? $package->getLibraryId() : null;
+            $config['depends'] = array_values(array_unique([
+                ...($config['depends'] ?? []),
+                ...self::$sharedLibraries->dependenciesForPackage($config['files'] ?? [], self::$packageType, $id, $config['dlopen_dependencies'] ?? []),
+            ]));
+            self::recordConsumer($package->getName(), $config['files'] ?? [], $id, $config['dlopen_dependencies'] ?? []);
+        }
+        return $config;
+    }
+
+    public static function getSharedLibraryDependencies(array $files, string $type, array $dlopen = []): array
+    {
+        return self::$sharedLibraries?->dependenciesForPackage($files, $type, null, $dlopen) ?? [];
+    }
+
+    public static function getPayloadBinaryDependencies(array $files): array
+    {
+        $owners = self::$sharedLibraries?->getSonameOwners() ?? [];
+        $result = [];
+        foreach (self::payloadFiles($files) as $file) {
+            if (!is_file($file) || file_get_contents($file, false, null, 0, 4) !== "\x7fELF") {
+                continue;
+            }
+            $dynamic = new Process(['readelf', '--wide', '--dynamic', $file]);
+            $dynamic->mustRun();
+            preg_match_all('/\(NEEDED\).*\[([^\]]+)\]/', $dynamic->getOutput(), $needed);
+            foreach ($needed[1] as $soname) {
+                if (!isset($owners[$soname]) && !preg_match('/^libphp(?:-[a-zA-Z0-9.-]+)?\.so$/', $soname)) {
+                    $result[$soname] ??= '0';
+                }
+            }
+            $process = new Process(['readelf', '--wide', '--version-info', $file]);
+            $process->mustRun();
+            $library = null;
+            foreach (explode("\n", $process->getOutput()) as $line) {
+                if (preg_match('/File:\s+(\S+)/', $line, $m)) {
+                    $library = $m[1];
+                }
+                if ($library === null || isset($owners[$library]) || !preg_match('/Name:\s+((?:GLIBC|GLIBCXX|CXXABI|GCC)_[0-9.]+)/', $line, $m)) {
+                    continue;
+                }
+                $key = $library . '(' . $m[1] . ')';
+                $result[$key] = $m[1];
+                unset($result[$library]);
+            }
+        }
+        return $result;
+    }
+
+    private static function payloadFiles(array $files): array
+    {
+        $result = [];
+        foreach (array_keys($files) as $source) {
+            if (is_dir($source)) {
+                foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS)) as $file) {
+                    if ($file->isFile()) {
+                        $result[] = $file->getPathname();
+                    }
+                }
+            } else {
+                $result[] = $source;
+            }
+        }
+        return $result;
+    }
+
+    public static function recordConsumer(string $name, array $files, ?string $id = null, array $dlopen = []): void
+    {
+        if (self::$sharedLibraries === null) {
+            return;
+        }
+        $dependencies = self::$sharedLibraries->dependenciesForFiles($files, $id, $dlopen);
+        self::$consumerManifest[$name] = [
+            'php_version' => $id === null ? (defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : null) : null,
+            'architecture' => self::$sharedLibraries->architecture(),
+            'libraries' => array_column($dependencies, 'id'),
+            'files' => $files,
+        ];
+        $path = DIST_PATH . '/' . self::$packageType . '/shared-library-consumers.json';
+        file_put_contents($path, json_encode(['schema' => 1, 'consumers' => self::$consumerManifest], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+    }
+
     private static function createRpmPackage(package $package, string $phpVersion, string $architecture, bool $isDebuginfo = false): void
     {
         $name = $isDebuginfo ? $package->getName() . '-debuginfo' : $package->getName();
-        $config = $isDebuginfo ? $package->getDebuginfoFpmConfig() : $package->getFpmConfig();
+        $config = self::packageConfig($package, $isDebuginfo);
         $extraArgs = $isDebuginfo ? [] : $package->getFpmExtraArgs();
 
         echo "Creating RPM package for {$name}...\n";
 
         // For RPM packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
-        [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
+        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $rpmVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
@@ -496,6 +631,7 @@ class CreatePackages
             'fpm',
             '-s', 'dir',
             '-t', 'rpm',
+            '--no-rpm-autoreqprov',
             '--rpm-compression', 'xz',
             '-p', $packageFile,  // Full path with phpSuffix and distVersion in filename
             '--name', $name,
@@ -510,7 +646,7 @@ class CreatePackages
         ], ...$extraArgs];
 
         // Ensure non-CLI packages depend on the same PHP major.minor as php-zts-cli (ignore iteration/patch)
-        if ($name !== self::getPrefix() . '-cli') {
+        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -544,6 +680,11 @@ class CreatePackages
             }
         }
 
+        foreach ($config['provides_unversioned'] ?? [] as $provide) {
+            $fpmArgs[] = '--provides';
+            $fpmArgs[] = $provide;
+        }
+
         if (isset($config['replaces']) && is_array($config['replaces'])) {
             foreach ($config['replaces'] as $replace) {
                 $fpmArgs[] = '--replaces';
@@ -567,7 +708,7 @@ class CreatePackages
 
         foreach ($consolidatedDeps as $lib => $version) {
             $fpmArgs[] = '--depends';
-            $fpmArgs[] = "{$lib}({$version})(64bit)";
+            $fpmArgs[] = str_contains($lib, '(') ? "{$lib}(64bit)" : ($version === '0' ? "{$lib}()(64bit)" : "{$lib}({$version})(64bit)");
         }
         if (isset($config['depends']) && is_array($config['depends'])) {
             foreach ($config['depends'] as $depend) {
@@ -652,7 +793,7 @@ class CreatePackages
     ): void
     {
         $name = $isDebuginfo ? $package->getName() . '-debuginfo' : $package->getName();
-        $config = $isDebuginfo ? $package->getDebuginfoFpmConfig() : $package->getFpmConfig();
+        $config = self::packageConfig($package, $isDebuginfo);
         $extraArgs = $isDebuginfo ? [] : (method_exists($package, 'getDebExtraArgs') ? $package->getDebExtraArgs() : $package->getFpmExtraArgs());
 
         echo "Creating DEB package for {$name}...\n";
@@ -667,7 +808,7 @@ class CreatePackages
         // For DEB packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
         // e.g., redis 6.0.2+php85 is higher than redis 6.0.2+php83
-        [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
+        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $debVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
@@ -706,7 +847,7 @@ class CreatePackages
 
         // Ensure non-CLI packages depend on the same PHP major.minor as php-zts-cli (ignore iteration/patch)
         // IMPORTANT: Use the actual PHP runtime version, not the package's own version (extensions have their own versioning)
-        if ($name !== self::getPrefix() . '-cli') {
+        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -734,6 +875,11 @@ class CreatePackages
                 $fpmArgs[] = '--provides';
                 $fpmArgs[] = "{$provide} (= {$fullVersion})";
             }
+        }
+
+        foreach ($config['provides_unversioned'] ?? [] as $provide) {
+            $fpmArgs[] = '--provides';
+            $fpmArgs[] = $provide;
         }
 
         if (isset($config['replaces']) && is_array($config['replaces'])) {
@@ -766,6 +912,7 @@ class CreatePackages
 
         $consolidatedDeps = [];
         foreach (self::$binaryDependencies as $lib => $version) {
+            $lib = preg_replace('/\(.*/', '', $lib);
             if (isset($systemLibraryMap[$lib])) {
                 // Use mapped name for system libraries
                 $packageName = $systemLibraryMap[$lib];
@@ -857,14 +1004,14 @@ class CreatePackages
     private static function createApkPackage(package $package, string $phpVersion, string $architecture, bool $isDebuginfo = false): void
     {
         $name = $isDebuginfo ? $package->getName() . '-debuginfo' : $package->getName();
-        $config = $isDebuginfo ? $package->getDebuginfoFpmConfig() : $package->getFpmConfig();
+        $config = self::packageConfig($package, $isDebuginfo);
         $extraArgs = $isDebuginfo ? [] : $package->getFpmExtraArgs();
 
         echo "Creating APK package for {$name} using nfpm...\n";
 
         // For APK packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
-        [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
+        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $apkVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
@@ -893,6 +1040,7 @@ class CreatePackages
             'arch' => $architecture,
             'platform' => 'linux',
             'version' => $phpVersion,
+            'version_schema' => 'none',
             'release' => $iteration,
             'section' => 'default',
             'priority' => 'optional',
@@ -939,7 +1087,7 @@ class CreatePackages
         $depends = [];
 
         // Ensure non-CLI packages depend on the same PHP major.minor
-        if ($name !== self::getPrefix() . '-cli') {
+        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -974,7 +1122,11 @@ class CreatePackages
 
         $consolidatedDeps = [];
         foreach (self::$binaryDependencies as $lib => $version) {
+            $lib = preg_replace('/\(.*/', '', $lib);
             $packageName = preg_replace('/\.so(\.\d+)*$/', '', $lib);
+            if (str_starts_with($packageName, 'libc.musl-') || str_starts_with($packageName, 'ld-musl-')) {
+                $packageName = 'musl';
+            }
             if (isset($alpineLibMap[$packageName])) {
                 $packageName = $alpineLibMap[$packageName];
             }
@@ -1005,7 +1157,10 @@ class CreatePackages
                 $provides = array_values(array_filter($provides, fn($p) => $p !== self::getPrefix()));
                 $provides = array_values($provides);
             }
-            $nfpmConfig['provides'] = $provides;
+            $nfpmConfig['provides'] = array_values(array_unique([...$provides, ...($config['provides_unversioned'] ?? [])]));
+        }
+        if (!empty($config['provides_unversioned'])) {
+            $nfpmConfig['provides'] = array_values(array_unique([...($nfpmConfig['provides'] ?? []), ...$config['provides_unversioned']]));
         }
         if (isset($config['replaces']) && is_array($config['replaces'])) {
             $nfpmConfig['replaces'] = $config['replaces'];
@@ -1116,7 +1271,7 @@ class CreatePackages
         if (!file_exists($phpBinary)) {
             throw new RuntimeException("Warning: PHP binary not found at {$phpBinary}, using base PHP version: {$basePhpVersion}");
         }
-        $versionProcess = new Process([$phpBinary, '-r', 'echo PHP_VERSION;']);
+        $versionProcess = new Process([$phpBinary, '-n', '-r', 'echo PHP_VERSION;'], env: ['LD_LIBRARY_PATH' => BUILD_LIB_PATH]);
         $versionProcess->run();
         $detectedVersion = trim($versionProcess->getOutput());
 
@@ -1488,10 +1643,21 @@ class CreatePackages
             return $maxIteration + 1;
         }
 
-        // deb / apk live in the Forgejo package registry
-        $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
-        $owner = self::getForgejoOwner();
+        $hosts = str_starts_with($name, 'php-zts-lib-')
+            ? array_values(array_filter(array_map('trim', explode(',', getenv('SPP_FORGEJO_HOSTS') ?: $host . ',https://git.static-php.dev'))))
+            : [$host];
+        foreach (array_unique($hosts) as $forgejoHost) {
+            $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $forgejoHost) - 1);
+        }
+        return $maxIteration + 1;
+    }
+
+    private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host): int
+    {
+        $maxIteration = $packageType === 'apk' ? -1 : 0;
+        $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
+        $owner = self::getForgejoOwner($name);
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {
@@ -1545,8 +1711,11 @@ class CreatePackages
      * Forgejo owner is the PHP major.minor with the dot stripped (e.g. 8.4 -> "84").
      * Overridable via SPP_FORGEJO_OWNER.
      */
-    private static function getForgejoOwner(): string
+    private static function getForgejoOwner(?string $name = null): string
     {
+        if ($name !== null && str_starts_with($name, 'php-zts-lib-')) {
+            return getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs';
+        }
         $override = getenv('SPP_FORGEJO_OWNER');
         if ($override !== false && $override !== '') {
             return $override;
@@ -1574,10 +1743,14 @@ class CreatePackages
         // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
         // both payloads, so the same regex extracts iterations either way.
         $arguments = ['curl', '-sSL', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
-        $forgejoHost = rtrim(getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com', '/');
-        $password = getenv('FORGEJO_PASSWORD') ?: '';
-        if ($password !== '' && str_starts_with($url, $forgejoHost . '/api/v1/packages/')) {
-            $arguments = [...$arguments, '--user', self::getForgejoOwner() . ':' . $password];
+        if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
+            $owner = rawurldecode($m[1]);
+            $password = $owner === (getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs')
+                ? (getenv('FORGEJO_LIBS_PASSWORD') ?: getenv('FORGEJO_PASSWORD') ?: '')
+                : (getenv('FORGEJO_PASSWORD') ?: '');
+            if ($password !== '') {
+                $arguments = [...$arguments, '--user', $owner . ':' . $password];
+            }
         }
         $process = new Process([...$arguments, $url]);
         $process->run();

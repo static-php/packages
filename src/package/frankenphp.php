@@ -50,6 +50,11 @@ class frankenphp implements package
         return 'FrankenPHP - The Modern PHP Webserver';
     }
 
+    private function sharedDependencies(string $type): array
+    {
+        return CreatePackages::getSharedLibraryDependencies([BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/frankenphp'], $type);
+    }
+
     /**
      * Get list of versioned frankenphp packages to conflict/replace with
      * Returns empty array - versioned FrankenPHP packages can coexist
@@ -135,6 +140,7 @@ class frankenphp implements package
             'fpm',
             '-s', 'dir',
             '-t', 'rpm',
+            '--no-rpm-autoreqprov',
             '--rpm-compression', 'xz',
             '-p', $packageFile,  // Full path with distVersion in filename
             '-n', $name,
@@ -161,7 +167,11 @@ class frankenphp implements package
 
         foreach ($consolidatedDeps as $lib => $dependencyVersion) {
             $fpmArgs[] = '--depends';
-            $fpmArgs[] = "$lib({$dependencyVersion})(64bit)";
+            $fpmArgs[] = str_contains($lib, '(') ? "{$lib}(64bit)" : ($dependencyVersion === '0' ? "{$lib}()(64bit)" : "{$lib}({$dependencyVersion})(64bit)");
+        }
+        foreach ($this->sharedDependencies('rpm') as $dependency) {
+            $fpmArgs[] = '--depends';
+            $fpmArgs[] = $dependency;
         }
 
         if (!is_dir("{$packageFolder}/empty/") && !mkdir("{$packageFolder}/empty/", 0755, true) && !is_dir("{$packageFolder}/empty/")) {
@@ -198,6 +208,9 @@ class frankenphp implements package
         $rpmProcess->run(function ($type, $buffer) {
             echo $buffer;
         });
+        if (!$rpmProcess->isSuccessful()) {
+            throw new RuntimeException('FrankenPHP RPM package creation failed: ' . $rpmProcess->getErrorOutput());
+        }
 
         echo "RPM package created: {$packageFile}\n";
 
@@ -312,6 +325,7 @@ class frankenphp implements package
 
         $consolidatedDeps = [];
         foreach ($binaryDependencies as $lib => $ver) {
+            $lib = preg_replace('/\(.*/', '', $lib);
             if (isset($systemLibraryMap[$lib])) {
                 // Use mapped name for system libraries
                 $packageName = $systemLibraryMap[$lib];
@@ -330,6 +344,10 @@ class frankenphp implements package
         foreach ($consolidatedDeps as $packageName => $numericVersion) {
             $fpmArgs[] = '--depends';
             $fpmArgs[] = "{$packageName} (>= {$numericVersion})";
+        }
+        foreach ($this->sharedDependencies('deb') as $dependency) {
+            $fpmArgs[] = '--depends';
+            $fpmArgs[] = $dependency;
         }
 
         if (!is_dir("{$packageFolder}/empty/") && !mkdir("{$packageFolder}/empty/", 0755, true) && !is_dir("{$packageFolder}/empty/")) {
@@ -369,6 +387,9 @@ class frankenphp implements package
             echo $buffer;
         });
 
+        if (!$rpmProcess->isSuccessful()) {
+            throw new RuntimeException('FrankenPHP DEB package creation failed: ' . $rpmProcess->getErrorOutput());
+        }
         echo "DEB package created: {$packageFile}\n";
 
         // Create FrankenPHP debuginfo package if debug file exists (only if --debuginfo flag set for DEB)
@@ -474,6 +495,10 @@ class frankenphp implements package
 
         $consolidatedDeps = [];
         foreach ($binaryDependencies as $lib => $ver) {
+            $lib = preg_replace('/\(.*/', '', $lib);
+            if (str_starts_with($lib, 'libc.musl-') || str_starts_with($lib, 'ld-musl-')) {
+                $lib = 'libc.so.6';
+            }
             if (isset($alpineLibMap[$lib])) {
                 $packageName = $alpineLibMap[$lib];
             } else {
@@ -489,7 +514,7 @@ class frankenphp implements package
             $depends[] = "{$packageName}>={$numericVersion}";
         }
 
-        $nfpmConfig['depends'] = $depends;
+        $nfpmConfig['depends'] = array_values(array_unique([...$depends, ...$this->sharedDependencies('apk')]));
         $nfpmConfig['provides'] = [$this->getName() !== 'frankenphp' ? 'frankenphp' : ''];
         $nfpmConfig['replaces'] = $versionedConflicts;
         $nfpmConfig['conflicts'] = $versionedConflicts;
@@ -692,7 +717,7 @@ class frankenphp implements package
         if (!file_exists($phpBinary)) {
             throw new RuntimeException("Warning: PHP binary not found at {$phpBinary}, using base PHP version: {$basePhpVersion}");
         }
-        $versionProcess = new Process([$phpBinary, '-r', 'echo PHP_VERSION;']);
+        $versionProcess = new Process([$phpBinary, '-n', '-r', 'echo PHP_VERSION;'], env: ['LD_LIBRARY_PATH' => BUILD_LIB_PATH]);
         $versionProcess->run();
         $detectedVersion = trim($versionProcess->getOutput());
 
