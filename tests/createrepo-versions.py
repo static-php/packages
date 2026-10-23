@@ -29,7 +29,7 @@ class PackageVersions(unittest.TestCase):
 
     def test_tagged_packages(self):
         for name in ["php-zts-xdebug", "php-zts-xdebug-debuginfo", "pie-zts", "pie-zts-debuginfo", "frankenphp", "frankenphp-debuginfo"]:
-            for version in ["3.6.0~dev_86~beta2", "3.6.0_86.0~rc3+ext~alpha1", "3.6.0_86.0~rc3+ext~~dev", "3.6.0_86.0+ext~alpha1", "3.6.0_86.0+ext", "3.6.0_86.0", "3.6.0~alpha1_86.0", "3.6.0~~dev_86.0", "3.6.0_86.0~rc3", "3.6.0~alpha1_86.0~rc3", "3.6.0~~dev_86.0~rc3", "3.6.0~~dev_86.0~~dev"]:
+            for version in ["3.6.0~dev_86~beta2", "3.6.0_86.0~rc3+ext~alpha1", "3.6.0_86.0~rc3+ext~~dev", "3.6.0_86.0+ext~alpha1", "3.6.0_86.0+ext", "3.6.0_86.0", "3.6.0~alpha1_86.0", "3.6.0~~dev_86.0", "3.6.0_86.0~rc3", "3.6.0~alpha1_86.0~rc3", "3.6.0~~dev_86.0~rc3", "3.6.0~~dev_86.0~~dev", "3.6.0~alpha2~~dev0_86.0~rc4", "3.6.0~beta2~~dev10_86.0~rc4~~dev0", "3.6.0~rc2~~dev9_86.0", "3.6.0_86.0~rc4~~dev0+ext~alpha2~~dev10"]:
                 with self.subTest(name=name, version=version):
                     filename = f"{name}-{version}-1.el10.x86_64.rpm"
                     info = repo["parse_rpm_info"](filename)
@@ -38,8 +38,10 @@ class PackageVersions(unittest.TestCase):
                     self.assertEqual(module["data"]["artifacts"]["rpms"], [f"{name}-0:{version}-1.el10.x86_64"])
 
     def test_dev_runtime(self):
-        filename = "php-zts-cli-8.6.0~~dev-1.el10.x86_64.rpm"
-        self.assertEqual(repo["parse_rpm_info"](filename), ("php-zts-cli", "8.6.0~~dev", "1.el10", "x86_64", "8.6"))
+        for version in ["8.6.0~~dev", "8.6.0~alpha2~~dev0", "8.6.0~beta3~~dev10", "8.6.0~rc4~~dev9"]:
+            with self.subTest(version=version):
+                filename = f"php-zts-cli-{version}-1.el10.x86_64.rpm"
+                self.assertEqual(repo["parse_rpm_info"](filename), ("php-zts-cli", version, "1.el10", "x86_64", "8.6"))
 
     def test_stable_packages(self):
         for name, version in [("frankenphp", "1.13.1_82.35"), ("pie-zts", "1.3.4_82.35"), ("php-zts-clickhouse", "0.13.0_82.35")]:
@@ -50,7 +52,7 @@ class PackageVersions(unittest.TestCase):
     def test_stream_tags(self):
         for tag, stream in [("85", "8.5"), ("86", "8.6"), ("90", "9.0"), ("99", "9.9"), ("100", "10.0")]:
             with self.subTest(tag=tag):
-                for suffix in ["~rc3+ext~alpha1", "~rc3", ""]:
+                for suffix in ["~rc3+ext~alpha1", "~rc3~~dev0+ext~alpha2~~dev10", "~rc3~~dev0", "~rc3", ""]:
                     self.assertEqual(repo["php_stream"](f"3.6.0_{tag}.10{suffix}"), stream)
 
 

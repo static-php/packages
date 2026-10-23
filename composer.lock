@@ -86,12 +86,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/crazywhalecc/static-php-cli.git",
-                "reference": "d910c62cf4dbda527688038705449513ad7c0046"
+                "reference": "da5761b87b0d38559eda429c258545ab6ac7fc44"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/d910c62cf4dbda527688038705449513ad7c0046",
-                "reference": "d910c62cf4dbda527688038705449513ad7c0046",
+                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/da5761b87b0d38559eda429c258545ab6ac7fc44",
+                "reference": "da5761b87b0d38559eda429c258545ab6ac7fc44",
                 "shasum": ""
             },
             "require": {

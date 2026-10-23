@@ -375,10 +375,7 @@ class CreatePackages
             $rawExtensionVersion = self::detectExtensionVersionFromSource($extension);
         }
 
-        $extensionVersion = null;
-        if (preg_match('/\d+\.\d+(?:\.\d+)?(?:[.-]?(?:alpha|beta|rc|dev)\d*)?/i', $rawExtensionVersion, $m)) {
-            $extensionVersion = self::normalizeVersion($m[0]);
-        }
+        $extensionVersion = self::parseExtensionVersion($rawExtensionVersion);
 
         if (empty($extensionVersion)) {
             throw new RuntimeException("Warning: Could not detect version for extension {$extension}");
@@ -387,6 +384,14 @@ class CreatePackages
         echo "Detected version for extension {$extension}: {$extensionVersion}\n";
 
         return $extensionVersion;
+    }
+
+    private static function parseExtensionVersion(string $raw): ?string
+    {
+        if (!preg_match('/\d+\.\d+(?:\.\d+)?(?:(?:[.-]|~{1,2})?(?:alpha|beta|rc)\d*)?(?:(?:[.-]|~{1,2})?dev\d*)?/i', $raw, $m)) {
+            return null;
+        }
+        return self::normalizeVersion($m[0]);
     }
 
     /**
@@ -398,10 +403,11 @@ class CreatePackages
      */
     public static function normalizeVersion(string $raw): string
     {
-        if (preg_match('/^(\d+\.\d+(?:\.\d+)?)(?:(?:[.-]|~{1,2})?((?:alpha|beta|rc|dev)\d*))?$/i', trim($raw), $m)) {
-            $marker = strtolower($m[2] ?? '');
+        if (preg_match('/^(\d+\.\d+(?:\.\d+)?)(?:(?:[.-]|~{1,2})?((?:alpha|beta|rc)\d*))?(?:(?:[.-]|~{1,2})?(dev\d*))?$/i', trim($raw), $m)) {
+            $phase = strtolower($m[2] ?? '');
+            $development = strtolower($m[3] ?? '');
             // dev must precede alpha; a single tilde leaves these labels in lexical order.
-            return $m[1] . ($marker === '' ? '' : (str_starts_with($marker, 'dev') ? '~~' : '~') . $marker);
+            return $m[1] . ($phase === '' ? '' : '~' . $phase) . ($development === '' ? '' : '~~' . $development);
         }
         return trim($raw);
     }

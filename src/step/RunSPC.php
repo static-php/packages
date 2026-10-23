@@ -49,6 +49,8 @@ class RunSPC
         }
         if ($libsOnly) {
             $args[] = '--libs-only';
+        } else {
+            $args[] = '--use-existing-libraries';
         }
 
         $env = getenv('GITHUB_ACTIONS') ? ['CI' => true] : [];

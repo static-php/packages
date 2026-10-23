@@ -19,6 +19,21 @@ $command = (new ReflectionClass(TestCommand::class))->newInstanceWithoutConstruc
 $compare = new ReflectionMethod(TestCommand::class, 'comparePackageVersions');
 $checks = 0;
 $matrices = [];
+$parseExtensionVersion = new ReflectionMethod(CreatePackages::class, 'parseExtensionVersion');
+foreach ([
+    '3.6.0alpha2-dev' => '3.6.0~alpha2~~dev',
+    '3.6.0-beta1-dev2' => '3.6.0~beta1~~dev2',
+    '3.6.0.RC10.dev9' => '3.6.0~rc10~~dev9',
+    '3.6.0RC10dev10' => '3.6.0~rc10~~dev10',
+    '5.1.29-dev' => '5.1.29~~dev',
+    '1.1.4dev' => '1.1.4~~dev',
+] as $raw => $normalized) {
+    if ($parseExtensionVersion->invoke(null, 'version: ' . $raw) !== $normalized
+        || CreatePackages::normalizeVersion($raw) !== $normalized
+        || CreatePackages::normalizeVersion($normalized) !== $normalized) {
+        throw new RuntimeException("Incorrect extension version normalization: {$raw}");
+    }
+}
 
 $version = static function (string $type, string $extension, string $php) use ($runtime): string {
     static $versions = [];
@@ -46,8 +61,8 @@ $less = static function (string $type, string $older, string $newer) use ($compa
 };
 
 $expected = ['rpm' => '3.6.0~alpha1_86.0~rc3', 'deb' => '3.6.0~alpha1+php86.0~rc3', 'apk' => '3.6.0_alpha1_p86_p0_rc3'];
-$phpStages = ['8.6.0-dev', '8.6.0alpha0', '8.6.0alpha1', '8.6.0alpha2', '8.6.0beta1', '8.6.0beta2', '8.6.0beta3', '8.6.0RC1', '8.6.0RC2', '8.6.0RC3', '8.6.0'];
-$extensionStages = ['3.6.0dev', '3.6.0dev2', '3.6.0alpha0', '3.6.0alpha1', '3.6.0alpha2', '3.6.0beta1', '3.6.0RC1', '3.6.0RC2', '3.6.0'];
+$phpStages = ['8.6.0-dev', '8.6.0alpha0', '8.6.0alpha1', '8.6.0alpha2-dev', '8.6.0alpha2', '8.6.0beta1-dev2', '8.6.0beta1', '8.6.0beta2', '8.6.0beta3', '8.6.0RC1-dev', '8.6.0RC1', '8.6.0RC2', '8.6.0RC3', '8.6.0'];
+$extensionStages = ['3.6.0dev', '3.6.0dev2', '3.6.0alpha0', '3.6.0alpha1', '3.6.0alpha2-dev', '3.6.0alpha2-dev2', '3.6.0alpha2', '3.6.0beta1-dev', '3.6.0beta1', '3.6.0RC1-dev', '3.6.0RC1', '3.6.0RC2', '3.6.0'];
 $legacyXdebug = [
     'rpm' => ['3.6.0~dev_86~beta1', '3.6.0~dev_86~beta2', '3.6.0~alpha2_86~beta3', '3.6.0~alpha1_86~rc2', '3.6.0~alpha1_86~rc3'],
     'deb' => ['3.6.0~dev+php86~beta1-1', '3.6.0~dev+php86~beta2-1', '3.6.0~alpha2+php86~beta3-1', '3.6.0~alpha1+php86~rc2-1', '3.6.0~alpha1+php86~rc2-2', '3.6.0~alpha1+php86~rc3-1'],
@@ -71,6 +86,15 @@ foreach ($types as $type) {
     $latest = $version($type, '3.6.0alpha1', '8.6.0RC3');
     if ($latest !== $expected[$type]) {
         throw new RuntimeException("Unexpected {$type} version: {$latest}");
+    }
+    $developmentExpected = match ($type) {
+        'rpm' => '3.6.0~alpha2~~dev0_86.0~rc4',
+        'deb' => '3.6.0~alpha2~~dev0+php86.0~rc4',
+        'apk' => '3.6.0_alpha2_alpha0_alpha00_p86_p0_rc4',
+    };
+    $development = $version($type, '3.6.0alpha2-dev', '8.6.0RC4');
+    if ($development !== $developmentExpected) {
+        throw new RuntimeException("Unexpected development {$type} version: {$development}");
     }
     $release = $version($type, '3.6.0', '8.6.0RC3');
     foreach ($legacyXdebug[$type] as $older) {
@@ -134,6 +158,10 @@ foreach ($types as $type) {
     foreach (['alpha', 'beta', 'RC'] as $phase) {
         $less($type, $version($type, '3.6.0' . $phase . '9', '8.6.0RC3'), $version($type, '3.6.0' . $phase . '10', '8.6.0RC3'));
         $less($type, $version($type, '3.6.0dev', '8.6.0' . $phase . '9'), $version($type, '3.6.0dev', '8.6.0' . $phase . '10'));
+        $less($type, $version($type, '3.6.0' . $phase . '1', '9.9.9'), $version($type, '3.6.0' . $phase . '2-dev', '8.6.0RC4'));
+        $less($type, $version($type, '3.6.0' . $phase . '2-dev', '9.9.9'), $version($type, '3.6.0' . $phase . '2-dev2', '8.6.0RC4'));
+        $less($type, $version($type, '3.6.0' . $phase . '2-dev9', '9.9.9'), $version($type, '3.6.0' . $phase . '2-dev10', '8.6.0RC4'));
+        $less($type, $version($type, '3.6.0' . $phase . '2-dev10', '9.9.9'), $version($type, '3.6.0' . $phase . '2', '8.6.0RC4'));
     }
 }
 

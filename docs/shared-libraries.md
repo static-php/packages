@@ -75,6 +75,12 @@ omitting it selects the configured library set. Packaging consumes the mandatory
 `buildroot/shared-libraries.json` manifest, which records library ownership, source
 versions, runtime files, SONAMEs, dependencies, and build identity.
 
+PHP and extension builds consume the library buildroot produced by that stage.
+`bin/spp` automatically runs SPC with `--use-existing-libraries` for those builds,
+so missing or incompatible library inputs fail instead of rebuilding libraries.
+Keep the complete buildroot, including headers, linker metadata and ownership
+manifests, when reusing a library set for another PHP stream.
+
 Builder images require real DWARF4 information in GCC's `libgcc_s`, `libstdc++`, and
 available optional runtimes such as `libatomic` and `libgomp`, plus `COPYING3` and
 `COPYING.RUNTIME` under `/opt/gcc/share/licenses/gcc`. Source toolchain builds retain
@@ -93,7 +99,7 @@ change builds its library packages without selecting every PHP stream; an ABI br
 adds affected consumers to the build. A full run retains the normal complete build.
 
 The prepared Composer lock pins SPC revision
-`d910c62cf4dbda527688038705449513ad7c0046`. This revision has been committed locally;
+`da5761b87b0d38559eda429c258545ab6ac7fc44`. This revision has been committed locally;
 CI cannot fetch it until it is published to the configured SPC remote. That
 publication requires separate authorization and has not been performed. Local
 validation selects the checkout through `SPP_SPC_ROOT` and `SPP_SPC_BINARY`.

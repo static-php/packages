@@ -35,7 +35,11 @@ STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 CUSTOM_MASTERS = {
     'ext-apcu': 'https://github.com/krakjoe/apcu.git',
     'ext-ast': 'https://github.com/nikic/php-ast.git',
+    'ext-igbinary': 'https://github.com/igbinary/igbinary.git',
     'ext-memcached': 'https://github.com/php-memcached-dev/php-memcached.git',
+    'ext-msgpack': 'https://github.com/msgpack/msgpack-php.git',
+    'ext-xdebug': 'https://github.com/xdebug/xdebug.git',
+    'ext-xlswriter': 'https://github.com/viest/php-ext-xlswriter.git',
 }
 STATE = {'build', 'buildroot', 'source', 'downloads', 'log', 'logs', 'pkgroot', 'dist', 'locale'}
 PRIVATE = {'.git', '.aws', '.agents', '.codex', '.claude', '.docker-home', '.idea', '__pycache__', '.cache'}
@@ -85,7 +89,8 @@ def freeze_custom_master_sources(project):
         if head != revision or dirty:
             raise StageFailure('freeze source snapshot', 'Dirty or mismatched compatibility snapshot: ' + name)
         pattern = r"(?m)^[ \t]*- '" + re.escape(name + ':master:' + url) + r"'\r?\n"
-        content, count = re.subn(pattern, '', content)
+        replacement = "        - '" + name + ':' + revision + ':' + url + "'\n"
+        content, count = re.subn(pattern, replacement, content)
         if count != 1:
             raise StageFailure('freeze source snapshot', 'Expected one compatibility master recipe: ' + name)
         commits[name] = revision
