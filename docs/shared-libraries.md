@@ -99,7 +99,7 @@ change builds its library packages without selecting every PHP stream; an ABI br
 adds affected consumers to the build. A full run retains the normal complete build.
 
 The prepared Composer lock pins SPC revision
-`da5761b87b0d38559eda429c258545ab6ac7fc44`. This revision has been committed locally;
+`4c7bcbd6da79dfc47ae425128a0c1c74b6ccdb67`. This revision has been committed locally;
 CI cannot fetch it until it is published to the configured SPC remote. That
 publication requires separate authorization and has not been performed. Local
 validation selects the checkout through `SPP_SPC_ROOT` and `SPP_SPC_BINARY`.
