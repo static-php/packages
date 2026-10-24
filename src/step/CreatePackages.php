@@ -691,6 +691,11 @@ class CreatePackages
             $fpmArgs[] = $provide;
         }
 
+        foreach ($config['recommends'] ?? [] as $recommend) {
+            $fpmArgs[] = '--rpm-tag';
+            $fpmArgs[] = 'Recommends: ' . $recommend;
+        }
+
         if (isset($config['replaces']) && is_array($config['replaces'])) {
             foreach ($config['replaces'] as $replace) {
                 $fpmArgs[] = '--replaces';
@@ -886,6 +891,11 @@ class CreatePackages
         foreach ($config['provides_unversioned'] ?? [] as $provide) {
             $fpmArgs[] = '--provides';
             $fpmArgs[] = $provide;
+        }
+
+        foreach ($config['recommends'] ?? [] as $recommend) {
+            $fpmArgs[] = '--deb-recommends';
+            $fpmArgs[] = $recommend;
         }
 
         if (isset($config['replaces']) && is_array($config['replaces'])) {

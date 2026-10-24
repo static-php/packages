@@ -11,6 +11,10 @@ directory in their ELF runtime search path. These files do not replace the syste
 libraries. Headers and linker metadata stay in the buildroot; runtime assets such as
 providers and plugins are included with the library that needs them.
 
+Fileinfo ships as a shared extension. RPM and DEB CLI packages recommend the
+matching Fileinfo package without requiring it. APK has no equivalent weak
+recommendation; install its Fileinfo package explicitly when needed.
+
 ## Configure repositories and migrate
 
 Existing Debian/Ubuntu and Alpine installations need the common library repository

@@ -123,6 +123,7 @@ class cli implements package
                 getVarLibdir() . '/opcache' => ['mode' => '0770', 'owner' => 'root', 'group' => 'frankenphp'],
             ],
             'provides' => $provides,
+            'recommends' => [$prefix . '-fileinfo'],
             'replaces' => $replaces,
             'conflicts' => $conflicts,
             'files' => $files
