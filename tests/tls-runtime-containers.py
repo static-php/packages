@@ -107,7 +107,7 @@ class Harness(services.Harness):
     def __init__(self, args):
         super().__init__(args)
         self.report = {'schema': 1, 'type': args.type, 'architecture': None, 'php_stream': args.php_stream,
-                       'scope': 'One native trust/profile check per package format and architecture, using default PHP stream/cURL and FrankenPHP Go TLS trust.',
+                       'scope': 'One trust/profile check per package format and architecture, using default PHP stream/cURL and FrankenPHP Go TLS trust; execution mode is recorded.',
                        'commands': [], 'complete': False, 'public_changes': False, 'environment_overrides': False}
 
     def execute(self, container, *arguments, **kwargs):
@@ -286,6 +286,8 @@ def main():
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--key', type=Path)
     parser.add_argument('--image')
+    parser.add_argument('--arch', choices=['x86_64', 'arm64'])
+    parser.add_argument('--allow-emulation', action='store_true', help='Allow explicitly labeled local QEMU validation; CI requires a native engine')
     parser.add_argument('--deb-distribution', default='./')
     parser.add_argument('--php-stream', default='8.6')
     parser.add_argument('--prefix', default='php-zts')

@@ -27,6 +27,7 @@ import uuid
 
 
 HERE = Path(__file__).resolve().parent
+ARCHITECTURE = runpy.run_path(str(HERE / 'container-architecture.py'))
 RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'alma9': ('rpm', 'almalinux:9'),
             'alma10': ('rpm', 'almalinux:10'), 'debian': ('deb', 'debian:11'),
             'alpine': ('apk', 'alpine:3.21')}
@@ -150,6 +151,7 @@ def apk_alias_proofs(stream, packages, aliases=None):
         if (logical not in package.get('provides', [])
                 or any(value.startswith(logical + '=') for value in package.get('provides', []))
                 or logical not in package.get('replaces', [])
+                or package.get('provider_priority') != ['100']
                 or conflict not in requirements or conflict not in core_requirements or not shared):
             raise RuntimeError('APK runtime alias lacks its versionless identity/core-conflict proof: ' + physical)
         result[logical] = {'real_name': physical, 'shared_core_capabilities': sorted(shared),
@@ -239,19 +241,27 @@ def candidate_only_profiles(baseline, inventory):
 
 
 class Docker:
-    def __init__(self, scratch, arch):
+    def __init__(self, scratch, arch, allow_emulation=False):
         self.scratch = Path(scratch)
         self.arch = architecture(arch)
         self.token = 'spp-migration-' + uuid.uuid4().hex[:12]
         self.containers, self.images = [], []
         self.network = None
+        self.allow_emulation = allow_emulation
+        self.execution = None
+        self.runtime_evidence = []
+        self.bounds = {role: ARCHITECTURE['resource_limits'](role) for role in ('repo', 'client')}
 
     def check_native(self):
-        actual = architecture(run(['docker', 'info', '--format', '{{.Architecture}}']).stdout.strip())
-        if actual != self.arch:
-            raise RuntimeError('Native {} validation requires a native {} Docker engine; found {}'.format(self.arch, self.arch, actual))
+        identity = ARCHITECTURE['engine_identity'](run, self.arch, self.allow_emulation)
+        if self.execution is not None and identity != self.execution:
+            raise PreparedInputError('Docker engine/execution mode changed after preparing the mirror')
+        self.execution = identity
+        return identity
 
     def start(self, image, role):
+        if self.execution is None:
+            self.check_native()
         if self.network is None:
             self.network = self.token
             run(['docker', 'network', 'create', self.network])
@@ -259,12 +269,14 @@ class Docker:
             self.images.append(image)
         name = self.token + '-' + role
         self.containers.append(name)
-        command = ['docker', 'run', '-d', '--name', name, '--platform',
-                   'linux/amd64' if self.arch == 'x86_64' else 'linux/arm64',
+        limits = self.bounds['repo' if role == 'repo' else 'client']
+        command = ['docker', 'run', '-d', '--name', name, *ARCHITECTURE['container_options'](self.execution),
+                   *ARCHITECTURE['resource_options'](limits),
                    '--network', self.network, '--mount', 'type=bind,src={},dst=/spp'.format(self.scratch)]
         if role == 'repo':
             command += ['--network-alias', 'repo']
         run(command + [image, 'sh', '-c', 'while :; do sleep 60; done'])
+        self.runtime_evidence.append(dict(ARCHITECTURE['container_identity'](run, name, self.execution, limits), role=role))
         return name
 
     def exec(self, name, command, **kwargs):
@@ -318,7 +330,8 @@ def inspect_package(kind, path):
         data = dict(re.findall(r'^(pkgname|pkgver|arch)\s*=\s*(\S+)', text, re.M))
         name, version, arch = data['pkgname'], data['pkgver'], data['arch']
         details = {key: re.findall(r'^' + field + r'\s*=\s*(.+)$', text, re.M)
-                   for key, field in [('requires', 'depend'), ('provides', 'provides'), ('replaces', 'replaces')]}
+                   for key, field in [('requires', 'depend'), ('provides', 'provides'), ('replaces', 'replaces'),
+                                      ('provider_priority', 'provider_priority')]}
     return dict(details, name=name, version=version.strip(), architecture=architecture(arch.strip()), path=str(path))
 
 
@@ -435,6 +448,24 @@ def copy_historical(old, new):
             if not destination.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.link(source, destination)
+
+
+def stage_library_generation(kind, current, incoming, directory):
+    directory = Path(directory)
+    directory.mkdir()
+    replacements = {package['name'] for package in incoming}
+    for package in current:
+        if package['name'] in replacements:
+            continue
+        source = Path(package['path'])
+        destination = directory / source.name
+        if kind in ('apk', 'deb'):
+            os.link(source, destination)
+        else:
+            shutil.copy2(source, destination)
+    for package in incoming:
+        source = Path(package['path'])
+        shutil.copy2(source, directory / source.name)
 
 
 def configure_client(kind, stream, arch, runtime):
@@ -640,11 +671,7 @@ def inside(args):
             if not any(name.startswith('php-zts-lib-') for name in changed_library):
                 raise RuntimeError('Service lifecycle needs a genuine higher library package revision')
             directory = Path('/spp/repository/generations/library')
-            directory.mkdir()
-            replacements = {p['name'] for p in incoming_library}
-            for package in [p for p in new if p['name'] not in replacements] + incoming_library:
-                source = Path(package['path'])
-                shutil.copy2(source, directory / source.name)
+            stage_library_generation(kind, new, incoming_library, directory)
             library = index_generation(kind, 'library', args.php, args.arch)
             if any(p['architecture'] not in (architecture(args.arch), 'all') for p in library):
                 raise RuntimeError('Service library generation has the wrong architecture')
@@ -837,7 +864,10 @@ def hook_repository(scratch, kind, generation, arch):
 def lifetime_hooks(args, scratch, result):
     scratch = Path(scratch)
     key = scratch / 'public-key' / ('spp-migration.rsa.pub' if args.type == 'apk' else 'repository.asc')
-    common = ['--type', args.type, '--php-stream', args.php, '--image', RUNTIMES[args.runtime][1], '--key', str(key)]
+    common = ['--type', args.type, '--php-stream', args.php, '--arch', args.arch,
+              '--image', RUNTIMES[args.runtime][1], '--key', str(key)]
+    if getattr(args, 'allow_emulation', False):
+        common.append('--allow-emulation')
     repository = hook_repository(scratch, args.type, 'new', args.arch)
     hooks = []
     if args.tls:
@@ -860,7 +890,7 @@ def lifetime_hooks(args, scratch, result):
 
 
 def options(args):
-    for name in ('library_only', 'partial_consumers', 'allow_unaffected_profile', 'tls', 'services'):
+    for name in ('library_only', 'partial_consumers', 'allow_unaffected_profile', 'tls', 'services', 'allow_emulation'):
         if not hasattr(args, name):
             setattr(args, name, False)
     for name in ('disabled_extension', 'library_artifacts', 'fresh_package'):
@@ -891,11 +921,12 @@ class PreparedMirror:
         self.baseline = baseline if baseline is not None else load_baseline(args.baseline_dir, args.type, args.php, args.arch)
         self.scratch = Path(tempfile.mkdtemp(prefix='spp-migration-upgrade-'))
         self.scratch.chmod(0o755)
-        self.resources = Docker(self.scratch, args.arch)
+        self.resources = Docker(self.scratch, args.arch, allow_emulation=self.args.allow_emulation)
         self.ready = False
         self.closed = False
         self.report = {'native_tool_bootstraps': 0, 'sign_index_runs': 0,
-                       'clean_runtime_bootstraps': 0, 'clean_runtime_commits': 0, 'profiles_started': 0}
+                       'clean_runtime_bootstraps': 0, 'clean_runtime_commits': 0, 'profiles_started': 0,
+                       'runtime_evidence': self.resources.runtime_evidence}
 
     def command(self, args):
         value = ['python3', '/spp/migration-upgrade-containers.py', '--type', args.type,
@@ -923,9 +954,13 @@ class PreparedMirror:
         for item in self.baseline['packages']:
             records.append({'role': 'baseline', 'name': Path(item['source']).name,
                             'path': item['source'], 'sha256': item['sha256']})
-        helpers = [Path(__file__), HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py']
+        helpers = [Path(__file__), HERE / 'container-architecture.py', HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py']
         if args.type == 'apk':
             helpers.append(apk_alias_config())
+        if args.tls:
+            helpers.append(HERE / 'tls-runtime-containers.py')
+        if args.tls or args.services:
+            helpers.append(HERE / 'runtime-service-containers.py')
         for role, paths in [('candidate', candidates), ('library', library), ('helper', helpers)]:
             for path in paths:
                 records.append({'role': role, 'name': path.name, 'path': str(path.resolve()), 'sha256': sha256(path)})
@@ -936,7 +971,10 @@ class PreparedMirror:
         self.library = library
         self.report['ledger'] = {'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                                  'runtime': args.runtime, 'library_only': args.library_only,
-                                 'partial_consumers': args.partial_consumers, 'files': records}
+                                 'partial_consumers': args.partial_consumers,
+                                 'allow_emulation': args.allow_emulation,
+                                 'execution': self.resources.execution,
+                                 'container_limits': json.loads(json.dumps(self.resources.bounds)), 'files': records}
         self.report['ledger_sha256'] = hashlib.sha256(json.dumps(self.report['ledger'], sort_keys=True).encode()).hexdigest()
 
     def copy_checked(self, source, destination):
@@ -951,8 +989,10 @@ class PreparedMirror:
         args, baseline, scratch, resources = self.args, self.baseline, self.scratch, self.resources
         old_by_name = {item['name']: item for item in baseline['packages']}
         resources.check_native()
+        self.report.update(execution=resources.execution, native=resources.execution['native'], emulated=resources.execution['emulated'])
         self.ledger()
         self.copy_checked(__file__, scratch / 'migration-upgrade-containers.py')
+        self.copy_checked(HERE / 'container-architecture.py', scratch / 'container-architecture.py')
         self.copy_checked(HERE / 'shared-runtime.php', scratch / 'shared-runtime.php')
         self.copy_checked(HERE / 'shared-runtime-containers.py', scratch / 'shared-runtime-containers.py')
         if args.type == 'apk':
@@ -1046,7 +1086,7 @@ class PreparedMirror:
         # Each client sees sealed generation files; only the current-generation pointer changes.
         self.staged = {str(p): source_token(p, include_ctime=False)
                        for p in (scratch / 'repository/generations').rglob('*') if p.is_file()}
-        for name in ('migration-upgrade-containers.py', 'shared-runtime.php', 'shared-runtime-containers.py',
+        for name in ('migration-upgrade-containers.py', 'container-architecture.py', 'shared-runtime.php', 'shared-runtime-containers.py',
                      'inventory.json', 'published-names.json'):
             self.staged[str(scratch / name)] = source_token(scratch / name, include_ctime=False)
         if args.type == 'apk':
@@ -1055,9 +1095,14 @@ class PreparedMirror:
         self.ready = True
 
     def assert_bound(self, args):
-        for name in ('type', 'php', 'arch', 'runtime', 'library_only', 'partial_consumers'):
+        for name in ('type', 'php', 'arch', 'runtime', 'library_only', 'partial_consumers', 'allow_emulation'):
             if getattr(args, name) != getattr(self.args, name):
                 raise PreparedInputError('Prepared mirror mode/runtime does not match: ' + name)
+        if self.resources.execution is not None:
+            if self.resources.check_native() != self.report['ledger']['execution']:
+                raise PreparedInputError('Prepared mirror Docker engine/execution mode changed')
+        if self.resources.bounds != self.report['ledger']['container_limits']:
+            raise PreparedInputError('Prepared mirror container resource bounds changed')
         for name in ('baseline_dir', 'artifacts', 'library_artifacts'):
             actual, expected = getattr(args, name), getattr(self.args, name)
             if (Path(actual).resolve() if actual else None) != (Path(expected).resolve() if expected else None):
@@ -1093,6 +1138,8 @@ class PreparedMirror:
         result = {'schema': 1, 'ok': False, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'runtime': args.runtime, 'baseline_origin': baseline['origin'], 'profile': names,
                   'library_only': args.library_only, 'partial_consumers': args.partial_consumers,
+                  'execution': resources.execution, 'native': resources.execution['native'],
+                  'emulated': resources.execution['emulated'],
                   'signing_scope': 'Disposable signed local mirror; test key trusted before old installation. Published archive SHA256 verified; production signing/server behavior is not asserted.'}
         client = None
         try:
@@ -1116,6 +1163,7 @@ class PreparedMirror:
             self.report['profiles_started'] += 1
             result['prepared_mirror'] = {'ledger_sha256': self.report['ledger_sha256'], 'profile_number': self.report['profiles_started']}
             client = resources.start(self.client_image, 'client-' + str(self.report['profiles_started']))
+            result['runtime_evidence'] = resources.runtime_evidence[-1]
             common = self.command(args)
             if args.fresh_package:
                 checked = resources.exec(client, common + ['--inside', 'fresh'])
@@ -1134,6 +1182,13 @@ class PreparedMirror:
             checked = resources.exec(client, common + ['--inside', 'new'])
             result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
             if args.tls or args.services:
+                self.assert_bound(args)
+                removed = run(['docker', 'rm', '-f', client], check=False)
+                if removed.returncode and 'No such container' not in removed.stderr:
+                    raise RuntimeError('Cannot remove upgrade client before lifecycle checks: ' + removed.stderr)
+                if client in resources.containers:
+                    resources.containers.remove(client)
+                client = None
                 lifetime_hooks(args, scratch, result)
         except BaseException as error:
             result.update(ok=False, error=str(error), interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)),
@@ -1179,6 +1234,7 @@ def cell(args, prepared=None):
         cleanup = mirror.close()
         if result is not None:
             result['prepared_mirror'] = mirror.report
+            result.update({name: mirror.report[name] for name in ('execution', 'native', 'emulated') if name in mirror.report})
             result['cleanup'] = cleanup
             if not cleanup['complete']:
                 result['ok'] = False
@@ -1218,6 +1274,7 @@ def suite(args, baseline, profiles):
     finally:
         cleanup = mirror.close()
         result['prepared_mirror'] = mirror.report
+        result.update({name: mirror.report[name] for name in ('execution', 'native', 'emulated') if name in mirror.report})
         result['cleanup'] = cleanup
         if not cleanup['complete']:
             result['ok'] = False
@@ -1229,6 +1286,7 @@ def main():
     parser.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
     parser.add_argument('--php', choices=('8.2', '8.3', '8.4', '8.5', '8.6'), required=True)
     parser.add_argument('--arch', choices=('x86_64', 'arm64'), required=True)
+    parser.add_argument('--allow-emulation', action='store_true', help='Allow local cross-architecture QEMU validation and label its receipts as emulated; CI remains native only')
     parser.add_argument('--artifacts', type=Path)
     parser.add_argument('--baseline-dir', type=Path)
     parser.add_argument('--report', type=Path)

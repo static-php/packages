@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "state": "restart_ready",
+  "state": "resumed_local_validation_in_progress",
   "merge_ready": false,
   "objective": "Finish the EL8 shared-library migration locally: one glibc build per architecture, identical common RPM/DEB ELFs, native musl SDK, automatic existing-client upgrades, and validation before any separately authorized publication.",
   "repository": "/home/m/packages",
@@ -28,7 +28,9 @@
     "bump_default": false,
     "source_archives": "Use the verified fresh PHP archives and frozen consumer cohort; never select the old PHP source tarball.",
     "shell": "Use exec_command shell=/bin/sh, login=false. Bash startup triggers Oh My Posh cached init-script writes; do not edit user startup files.",
-    "cleanup": "Preserve existing user containers, files, caches and sessions. Remove only task-owned disposable resources."
+    "cleanup": "Preserve existing user containers, files, caches and sessions. Remove only task-owned disposable resources.",
+    "disk_budget_bytes": 120000000000,
+    "disk_budget_scope": "Migration working files plus task-created Docker storage. Preserve unrelated user data and containers."
   },
   "artifact_root": "/home/m/packages/dist/migration-implementation-2026-10-25",
   "component_checkpoints": {
@@ -47,19 +49,21 @@
     "alpine_sdk": "67 ordinary libraries plus GCC runtime, finalized and archived; PHP builds reuse all providers.",
     "destination_specific_builds": "OpenSSL only: Debian /etc/ssl and RPM /etc/pki/tls. Other glibc libraries share the EL8 binaries. Alpine is a separate musl build.",
     "library_packages": "137 each for x86_64 RPM, DEB and APK. RPM/DEB common ELF/debug identity verified; only OpenSSL profile files differ.",
-    "gnu_php86": "Sealed PHP8.6.0RC4, FrankenPHP1.13.3 and74 shared modules; original7 known unsupported extensions only. All337 core files and351 protected raw ELFs unchanged during selected refresh.",
-    "alpine_php82": "Sealed PHP8.2.35, FrankenPHP1.13.3 and79 shared extensions, zero skips; no static C++ runtime contamination.",
+    "gnu_php86": "RPM and DEB consumer candidates ready:297 archives per format including reused libraries;158 consumer ELF/debug files identical across formats. Only approved OpenSSL library profiles differ.",
+    "alpine_php82": "314 immutable APK candidates ready,137 library archives reused;82 shared module DSOs verified. Swoole repaired by relinking retained objects; new thin cache verified with original compilation provenance.",
     "glibc_php82": "Core/all original modules sealed, but needs selected17-consumer refresh to current source versions and FrankenPHP1.13.3. No core or library rebuild is needed.",
     "metadata_and_tools": "Producer/payload/source/ABI caches, frozen sources, exact typed ABI cache, revision floors, canonical RPM repo aliases, service and disabled-INI preservation are implemented with focused tests.",
-    "alpine_php86": "CLI, CGI, FPM and embed/libphp completed. Six shared modules completed; interrupted ClickHouse make/source/objects preserved. Resume via saved core checkpoint, do not rebuild libraries or discard completed core targets."
+    "alpine_php86": "CLI, CGI, FPM and embed/libphp completed. Six shared modules completed; interrupted ClickHouse make/source/objects preserved. Resume via saved core checkpoint, do not rebuild libraries or discard completed core targets.",
+    "apk_aliases": "Physical amqp/igbinary aliases, archive-bound publication/freezer/cohort handling and source rollback guards implemented. Genuine historical native fixtures pass. Actual full shared-package upgrades remain pending.",
+    "qemu_harness": "Explicit local --allow-emulation mode implemented;native CI guard retained,engine/guest/image/binfmt identities bound. Actual ARM builds remain pending."
   },
   "not_complete": [
-    "Finish Alpine8.6 from safe recorded boundary without throwing away cached source/objects or rebuilding libraries.",
-    "Refresh only17 selected GNU8.2 consumer actors using the preserved verified core and newest partial-build safeguards.",
-    "Finish and validate APK physical aliases for amqp and igbinary, including publisher cutoff/cohort/baseline and freezer integration.",
-    "Generate real consumer packages and run actual static-to-shared ordinary upgrades for8.2/8.6 in RPM/DEB/APK; TLS/services and focusedEL9/10 checks.",
-    "Implement explicit local QEMU/emulation opt-in in harness while keeping default/native CI enforcement; build/test aarch64 EL8+Alpine SDKs and PHP8.2/8.6 under QEMU.",
-    "Final source/workflow checks and independent review; local completion commit. No public actions."
+    "Finish budget reductions and remeasure before starting one heavy build;reserve room for its transient output and bounded test containers.",
+    "Compile only17 selected GNU8.2 consumers from the preserved core and SDK;prepared script and Swoole hook are ready.",
+    "Resume Alpine8.6 completed-core checkpoint,remaining modules and FrankenPHP without discarding objects or rebuilding libraries.",
+    "Run real ordinary static-to-shared upgrades for8.2/8.6 RPM,DEB,APK;TLS/services once per unique format/architecture and focusedEL9/EL10 compatibility.",
+    "Prepare repaired ARM64 toolchain and build/test EL8+Alpine SDK/PHP8.2+8.6 under explicit QEMU mode,one heavy build at a time.",
+    "Final verification and local completion commit;no push or public repository/package update authorized."
   ],
   "apk_transition": {
     "physical_names": [
@@ -74,7 +78,7 @@
     "central_config": "config/apk-runtime-aliases.json",
     "proof": "dist/migration-implementation-2026-10-25/validation/historical-apk-direct-core-conflict.json",
     "proof_scope": "All9 genuine historical installed/fresh/absent/world/add/delete/future/no-op controls passed using unchanged payloads. This is metadata mechanics, not a completed real shared-cohort migration.",
-    "pending": "Native package fixture still has synthetic99 values; replace with genuine historical cases and also test actual valid old8.2 packages. Publisher header-bound replacement/cutoff/cohort and effective baseline/freezer integration remains incomplete."
+    "pending": "Implementation and metadata/native fixtures complete. Real shared APK package upgrade, disabled-module, TLS and service checks remain pending."
   },
   "source_notes": {
     "fresh_cohort": "dist/migration-implementation-2026-10-25/frozen-consumer-refresh/source-records.json",
@@ -112,7 +116,8 @@
     "note": "No new compilers/tests launched for checkpoint. Full package/runtime/QEMU verification remains pending.",
     "literal_c_indentation": "Ev.php intentionally embeds upstream tab-indented C in PHP nowdocs. Checkpoint whitespace check disables only space-before-tab, without editing Git configuration."
   },
-  "checkpoint_receipt_sha256": {
+  "initial_checkpoint_commit": "a0494245167cd93c781944639afddfd8e74acdba",
+  "initial_checkpoint_receipt_sha256": {
     "dist/migration-implementation-2026-10-25/resume/glibc-packaging.json": "468ef62171fb5ae4d6c72ebf8db7f6d4aa724c111f265127122fbdbf0a4e1bd4",
     "dist/migration-implementation-2026-10-25/resume/glibc-stable.json": "faf7c12dada4c5322c3a8ae66f1d17054fff6633551b52c6c7059456767c0bcf",
     "dist/migration-implementation-2026-10-25/resume/el8-migration.json": "bd96859afc0f69f8ff1ea613e98b2b0e3c9d9799f3f43e8d1abb9953bad1b96f",
@@ -122,5 +127,24 @@
     "dist/migration-implementation-2026-10-25/resume/source-plan.json": "dc0bab49951af0f9f1db29e1fd6272bfdf3b9421eb82b856687c45ad03072578",
     "dist/migration-implementation-2026-10-25/resume/upgrade-harness.json": "df38152672196c0743c86a38e3f794dcf7180c15678256c3f11b891f9655f62d",
     "dist/migration-implementation-2026-10-25/resume/alias-review.json": "3c79cc0c5839d75b6b47b175f118e9cd48e42e090aa8a98e35272f461e493b3e"
+  },
+  "resume_progress": {
+    "updated_at": "2026-10-25T21:02:36.140058+00:00",
+    "disk_last_actual_bytes": 133913423872,
+    "disk_last_actual_at": "2026-10-25T20:57:40Z",
+    "disk_last_actual_note": "Before subsequent SDK/buildroot/worker retirements; remeasure once they finish.",
+    "disk_receipt": "dist/migration-implementation-2026-10-25/resume/disk-actual-after-tranches.json",
+    "archive_receipts": "dist/migration-implementation-2026-10-25/resume/retained-out-of-scope/",
+    "candidate_ready": [
+      "packages/rpm/x86_64/8.6/ready.json",
+      "packages/deb/x86_64/8.6/ready.json",
+      "packages/apk/x86_64/8.2/ready.json"
+    ],
+    "native_commands": "dist/migration-implementation-2026-10-25/validation/native-run-plan.json",
+    "gnu82_next": "python3 dist/migration-implementation-2026-10-25/resume/gnu82-refresh.py build",
+    "alpine86_recovery": "dist/migration-implementation-2026-10-25/resume/alpine/resume86.py",
+    "arm64_preparation": "dist/migration-implementation-2026-10-25/resume/arm64/el8-commands.json",
+    "no_public_changes": true,
+    "active_heavy_compiler": null
   }
 }

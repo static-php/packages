@@ -127,12 +127,13 @@ class MigrationUpgradeHarness(unittest.TestCase):
         capability = 'php-zts-shared-runtime-82-abi20220829-1'
         core = {'name': 'php-zts-cli', 'provides': [capability], 'requires': ['!' + logical + '>0']}
         module = {'name': physical, 'provides': [logical], 'replaces': [logical],
-                  'requires': ['!' + logical + '>0', capability]}
+                  'requires': ['!' + logical + '>0', capability], 'provider_priority': ['100']}
         aliases = {logical: physical}
         proofs = harness['apk_alias_proofs']('8.2', [core, module], aliases)
         self.assertEqual(proofs[logical]['real_name'], physical)
         for entry, field, value in [(core, 'requires', []), (module, 'provides', [logical + '=1']),
-                                    (module, 'replaces', []), (module, 'requires', [capability])]:
+                                    (module, 'replaces', []), (module, 'requires', [capability]),
+                                    (module, 'provider_priority', [])]:
             old = entry[field]
             entry[field] = value
             with self.assertRaisesRegex(RuntimeError, 'identity/core-conflict proof'):
@@ -180,11 +181,15 @@ class MigrationUpgradeHarness(unittest.TestCase):
             try:
                 mirror.ledger()
                 mirror.assert_bound(args)
-                for name, value in [('runtime', 'alma9'), ('php', '8.5'), ('partial_consumers', True)]:
+                for name, value in [('runtime', 'alma9'), ('php', '8.5'), ('partial_consumers', True), ('allow_emulation', True)]:
                     other = SimpleNamespace(**vars(args))
                     setattr(other, name, value)
                     with self.assertRaises(harness['PreparedInputError']):
                         mirror.assert_bound(other)
+                mirror.resources.bounds['client']['memory_mib'] = 1024
+                with self.assertRaisesRegex(harness['PreparedInputError'], 'resource bounds changed'):
+                    mirror.assert_bound(args)
+                mirror.resources.bounds['client']['memory_mib'] = 768
                 extra = candidates / 'new.rpm'
                 extra.write_bytes(b'new archive')
                 with self.assertRaisesRegex(harness['PreparedInputError'], 'archive set changed'):
@@ -221,6 +226,36 @@ class MigrationUpgradeHarness(unittest.TestCase):
         self.assertTrue(all(p[1] == args.library_artifacts for p in calls['profiles']))
         self.assertFalse(result['ok'])
         self.assertFalse(result['cleanup']['complete'])
+
+    def test_prepared_mirror_binds_engine_identity_and_execution_mode(self):
+        with tempfile.TemporaryDirectory(prefix='spp-prepared-engine-') as directory:
+            root = Path(directory)
+            self.baseline(root)
+            candidates = root / 'candidates'
+            candidates.mkdir()
+            (candidates / 'candidate.rpm').write_bytes(b'candidate')
+            args = harness['options'](SimpleNamespace(type='rpm', php='8.6', arch='arm64', runtime='alma8',
+                                      profile='cli', baseline_dir=root, artifacts=candidates, allow_emulation=True))
+            baseline = json.loads((root / 'baseline.json').read_text())
+            baseline['architecture'] = 'arm64'
+            (root / 'baseline.json').write_text(json.dumps(baseline))
+            engine = {'id': 'first-engine'}
+            def command(arguments, **kwargs):
+                value = 'x86_64' if arguments[-1] == '{{.Architecture}}' else engine['id']
+                return subprocess.CompletedProcess(arguments, 0, value, '')
+            mirror = harness['PreparedMirror'](args)
+            try:
+                with patch.dict(scope, {'run': command}), patch.dict('os.environ', {'GITHUB_ACTIONS': 'false'}):
+                    mirror.resources.check_native()
+                    mirror.ledger()
+                    mirror.assert_bound(args)
+                    self.assertFalse(mirror.report['ledger']['execution']['native'])
+                    self.assertTrue(mirror.report['ledger']['execution']['emulated'])
+                    engine['id'] = 'replacement-engine'
+                    with self.assertRaisesRegex(harness['PreparedInputError'], 'engine/execution mode changed'):
+                        mirror.assert_bound(args)
+            finally:
+                self.assertTrue(mirror.close()['complete'])
 
     def test_failed_client_cleanup_stops_profile_reuse_until_shared_cleanup(self):
         calls = []
@@ -428,6 +463,29 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual((new / 'repodata/oldhash.xml').read_bytes(), b'cached old metadata')
             self.assertEqual((new / 'repodata/repomd.xml').read_bytes(), b'new root')
 
+    def test_library_generation_reuses_only_finalized_apk_and_deb_archives(self):
+        for kind in ('apk', 'deb', 'rpm'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix='spp-library-generation-') as directory:
+                root = Path(directory)
+                current = root / 'current'
+                current.mkdir()
+                incoming = root / 'incoming'
+                incoming.mkdir()
+                common = current / ('php-zts-cli.' + kind)
+                old_library = current / ('old-zlib.' + kind)
+                new_library = incoming / ('new-zlib.' + kind)
+                for path in (common, old_library, new_library):
+                    path.write_bytes(path.name.encode())
+                generation = root / 'library'
+                harness['stage_library_generation'](kind,
+                    [{'name': 'php-zts-cli', 'path': common}, {'name': 'php-zts-lib-zlib', 'path': old_library}],
+                    [{'name': 'php-zts-lib-zlib', 'path': new_library}], generation)
+                self.assertEqual((generation / common.name).read_bytes(), common.read_bytes())
+                self.assertEqual((generation / common.name).stat().st_ino == common.stat().st_ino, kind in ('apk', 'deb'))
+                self.assertFalse((generation / old_library.name).exists())
+                self.assertEqual((generation / new_library.name).read_bytes(), new_library.read_bytes())
+                self.assertNotEqual((generation / new_library.name).stat().st_ino, new_library.stat().st_ino)
+
     def test_tls_and_service_hooks_share_signed_generations_and_fail_closed(self):
         with tempfile.TemporaryDirectory(prefix='spp-migration-hooks-') as directory:
             root = Path(directory)
@@ -435,7 +493,8 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 (root / 'repository/generations' / name).mkdir(parents=True)
             (root / 'public-key').mkdir()
             (root / 'public-key/repository.asc').write_text('public test key')
-            args = SimpleNamespace(type='rpm', php='8.6', arch='x86_64', runtime='alma8', tls=True, services=True)
+            args = SimpleNamespace(type='rpm', php='8.6', arch='arm64', runtime='alma8', tls=True, services=True,
+                                   allow_emulation=True)
             calls = []
             def checked(command, **kwargs):
                 calls.append(command)
@@ -446,6 +505,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 harness['lifetime_hooks'](args, root, result)
             self.assertEqual([r['state'] for r in result.values()], ['passed', 'passed'])
             self.assertIn(str(root / 'repository/generations/library'), calls[1])
+            for command in calls:
+                self.assertIn('--allow-emulation', command)
+                self.assertEqual(command[command.index('--arch') + 1], 'arm64')
             def failed(command, **kwargs):
                 Path(command[-1]).write_text(json.dumps({'state': 'failed'}))
                 return subprocess.CompletedProcess(command, 1, 'native trust failed', '')
@@ -460,15 +522,21 @@ class MigrationUpgradeHarness(unittest.TestCase):
             candidates = root / 'candidates'
             candidates.mkdir()
             (candidates / 'new.rpm').write_bytes(b'candidate fixture')
+            instances = []
             class FakeDocker:
-                def __init__(self, directory, arch):
+                def __init__(self, directory, arch, allow_emulation=False):
                     self.directory = Path(directory)
                     self.token = 'own-fixture'
                     self.images, self.containers = [], []
+                    self.execution = {'native': True, 'emulated': False}
+                    self.runtime_evidence = []
+                    self.bounds = {'repo': {}, 'client': {}}
+                    instances.append(self)
                 def check_native(self):
-                    pass
+                    return self.execution
                 def start(self, image, role):
                     self.containers.append(role)
+                    self.runtime_evidence.append({'role': role})
                     return role
                 def exec(self, name, command, **kwargs):
                     if '--inside' in command:
@@ -487,9 +555,12 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     return []
             args = SimpleNamespace(type='rpm', php='8.6', arch='x86_64', runtime='alma8', profile='cli',
                                    baseline_dir=root, artifacts=candidates, tls=True, services=False)
+            def failed_hook(*arguments):
+                self.assertFalse(any(name.startswith('client-') for name in instances[0].containers))
+                raise RuntimeError('native TLS failure')
             with patch.dict(scope, {'Docker': FakeDocker, 'prepare': lambda *args, **kwargs: None,
                                    'run': lambda *args, **kwargs: subprocess.CompletedProcess([], 0, 'sha256:' + 'a' * 64, ''),
-                                   'lifetime_hooks': lambda *args: (_ for _ in ()).throw(RuntimeError('native TLS failure'))}):
+                                   'lifetime_hooks': failed_hook}):
                 result = harness['cell'](args)
             self.assertFalse(result['ok'])
             self.assertIn('native TLS failure', result['error'])

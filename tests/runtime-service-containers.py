@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import runpy
 import subprocess
 import tempfile
 import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ARCHITECTURE = runpy.run_path(str(ROOT / 'tests/container-architecture.py'))
 BOOTSTRAP = {
     'rpm': 'dnf -y install systemd python3 curl shadow-utils ca-certificates',
     'deb': ". /etc/os-release; if [ \"$VERSION_CODENAME\" = bullseye ]; then printf 'deb http://archive.debian.org/debian bullseye main\\ndeb http://archive.debian.org/debian-security bullseye-security main\\n' > /etc/apt/sources.list; fi; rm -rf /var/lib/apt/lists/*; apt-get -o Acquire::Check-Valid-Until=false update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd-sysv python3 curl ca-certificates; rm -f /usr/sbin/policy-rc.d",
@@ -57,6 +59,8 @@ class Harness:
         self.containers = []
         self.images = []
         self.network = None
+        self.execution = None
+        self.runtime_evidence = []
         self.report = {'schema': 1, 'type': args.type, 'php_stream': args.php_stream, 'scenarios': [], 'commands': [], 'real_service_manager': True, 'probe_only': args.probe_only, 'scope': 'Real service lifecycle; local signed repository URL. Production URL migration is validated separately.', 'host_cgroup_bind': False, 'public_changes': False, 'complete': False}
 
     def command(self, command, check=True, timeout=1800):
@@ -67,7 +71,21 @@ class Harness:
         return result
 
     def docker(self, *arguments, **kwargs):
-        return self.command(['docker', *arguments], **kwargs)
+        resource_role = kwargs.pop('resource_role', 'client')
+        if arguments[0] != 'run':
+            return self.command(['docker', *arguments], **kwargs)
+        identity = ARCHITECTURE['engine_identity'](self.command, getattr(self.args, 'arch', None),
+                                                  getattr(self.args, 'allow_emulation', False))
+        if self.execution is not None and identity != self.execution:
+            raise RuntimeError('Docker engine/execution mode changed during runtime validation')
+        self.execution = identity
+        self.report.update(execution=identity, native=identity['native'], emulated=identity['emulated'],
+                           runtime_evidence=self.runtime_evidence)
+        limits = ARCHITECTURE['resource_limits'](resource_role)
+        result = self.command(['docker', 'run', *ARCHITECTURE['container_options'](identity),
+                               *ARCHITECTURE['resource_options'](limits), *arguments[1:]], **kwargs)
+        self.runtime_evidence.append(ARCHITECTURE['container_identity'](self.command, result.stdout.strip(), identity, limits))
+        return result
 
     def execute(self, container, *arguments, **kwargs):
         return self.docker('exec', container, 'env', '-u', 'LD_LIBRARY_PATH', '-u', 'PHPRC', '-u', 'PHP_INI_SCAN_DIR', *arguments, **kwargs)
@@ -81,7 +99,7 @@ class Harness:
     def bootstrap(self):
         name = 'spp-services-bootstrap-' + self.token
         self.containers.append(name)
-        self.docker('run', '-d', '--name', name, self.args.image, 'sleep', 'infinity')
+        self.docker('run', '-d', '--name', name, self.args.image, 'sleep', 'infinity', resource_role='repo')
         self.execute(name, 'sh', '-ec', BOOTSTRAP[self.args.type])
         image = 'spp-services-' + self.token + ':init'
         self.images.append(image)
@@ -123,7 +141,7 @@ class Harness:
         arguments = ['run', '-d', '--name', name, '--network', self.network, '--network-alias', 'repo', '-v', str(state) + ':/state:ro']
         for profile, directory in [('old', self.args.old_repo), ('candidate', self.args.candidate_repo), ('library', self.args.library_repo)]:
             arguments += ['-v', str(directory.resolve()) + ':/sources/' + profile + ':ro']
-        self.docker(*arguments, image, 'python3', '/state/server.py')
+        self.docker(*arguments, image, 'python3', '/state/server.py', resource_role='repo')
         self.server_state = state / 'current'
 
     def select(self, profile):
@@ -364,6 +382,8 @@ def main():
     parser = argparse.ArgumentParser(description='Real init-system PHP service upgrade validation; never mounts host cgroups or changes host services.')
     parser.add_argument('--type', choices=['rpm', 'deb', 'apk'], required=True)
     parser.add_argument('--image')
+    parser.add_argument('--arch', choices=['x86_64', 'arm64'])
+    parser.add_argument('--allow-emulation', action='store_true', help='Allow explicitly labeled local QEMU validation; CI requires a native engine')
     parser.add_argument('--old-repo', type=Path)
     parser.add_argument('--candidate-repo', type=Path)
     parser.add_argument('--library-repo', type=Path)

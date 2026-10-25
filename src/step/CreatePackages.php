@@ -462,6 +462,10 @@ class CreatePackages
             $php = self::migrationPhase($parts[5], true);
             return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) $parts[4] . $php];
         }
+        if (preg_match('/^' . $number . '(_(?:alpha|beta|rc|pre)\d*)_p(\d{2,})$/D', $version, $parts)) {
+            $upstream = self::migrationPhase($parts[2], true);
+            return $upstream === null ? null : [$parts[1] . $upstream, $parts[3] . '.0'];
+        }
         if (preg_match('/^' . $number . 'p(\d{2,})\.(\d+)' . $phase . '(?:_p0' . $phase . ')?$/D', $version, $parts)) {
             $upstream = self::migrationPhase($parts[5] ?? '', true);
             $php = self::migrationPhase($parts[4], true);
@@ -1851,9 +1855,11 @@ class CreatePackages
                         basename($source) !== basename($dest)) {
                         $source = self::fixBinaryDebugLink($source, $dest);
                     }
-                    $contentItem = ['src' => $source, 'dst' => $dest];
+                    $contentItem = is_link($source)
+                        ? ['src' => readlink($source), 'dst' => $dest, 'type' => 'symlink']
+                        : ['src' => $source, 'dst' => $dest];
                     // Mark config files
-                    if (isset($config['config-files']) && in_array($dest, $config['config-files'])) {
+                    if (!is_link($source) && isset($config['config-files']) && in_array($dest, $config['config-files'])) {
                         $contentItem['type'] = 'config';
                     }
                     $contents[] = $contentItem;

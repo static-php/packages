@@ -212,19 +212,22 @@ function preflightConsumerVersions(array $options): array
             $record['logical_name'] = $logicalName;
             $record['published_source_versions'] = [];
             foreach (array_unique([$logicalName, $name]) as $sourceName) {
-                $highest = preflightHighestVersion(array_keys($published[$stream][$sourceName] ?? []), $compare);
+                $sourceVersions = array_keys($published[$stream][$sourceName] ?? []);
+                $highest = preflightHighestVersion($sourceVersions, $compare);
                 if ($highest === null) {
                     continue;
                 }
                 $record['published_source_versions'][$sourceName] = $highest;
-                $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($highest));
-                $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $highest);
                 $currentUpstream = CreatePackages::migrationUpstreamVersion($type, $base) ?? $upstream;
-                $phase = $oldUpstream === null ? 0 : $compare(CreatePackages::toApkVersion($currentUpstream), CreatePackages::toApkVersion($oldUpstream));
-                if ($numeric < 0 || $phase < 0) {
-                    $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'logical_name' => $logicalName,
-                        'candidate' => $version, 'published' => $highest,
-                        'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'upstream-phase-rollback'];
+                foreach ($sourceVersions as $old) {
+                    $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($old));
+                    $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $old);
+                    $phase = $oldUpstream === null ? 0 : $compare(CreatePackages::toApkVersion($currentUpstream), CreatePackages::toApkVersion($oldUpstream));
+                    if ($numeric < 0 || $phase < 0) {
+                        $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'logical_name' => $logicalName,
+                            'candidate' => $version, 'published' => $old,
+                            'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'upstream-phase-rollback'];
+                    }
                 }
             }
         }

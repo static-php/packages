@@ -201,6 +201,37 @@ class ConsumerVersionPreflight(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(receipt['candidates'][0]['version'], '3.2.17_rc1_p82_p35-r6')
 
+    def test_apk_provider_checks_each_legacy_source_phase_when_native_versions_compare_equal(self):
+        packages = [self.package('php-zts-igbinary', '3.2.17~rc1_82-r1'),
+                    self.package('php-zts-igbinary', '3.2.17~rc2_82-r1')]
+        result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary',
+                                                                  upstream='3.2.17RC1', php='8.2.35')],
+                                            packages, php_stream='8.2')
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(receipt['rejected'][0]['reason'], 'upstream-phase-rollback')
+        self.assertEqual(receipt['rejected'][0]['published'], '3.2.17~rc2_82-r1')
+
+    def test_apk_provider_valid_legacy_source_phase_cannot_roll_back(self):
+        for old, upstream in [('3.2.17_rc1_p82-r0', '3.2.17alpha1'),
+                              ('3.2.17_rc2_p82-r0', '3.2.17RC1')]:
+            with self.subTest(old=old, upstream=upstream):
+                result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary',
+                                                                          upstream=upstream, php='8.2.35')],
+                                                    [self.package('php-zts-igbinary', old)], php_stream='8.2')
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertEqual(receipt['rejected'][0]['reason'], 'upstream-phase-rollback')
+                self.assertEqual(receipt['rejected'][0]['published'], old)
+
+    def test_apk_provider_valid_legacy_source_phase_can_stay_or_advance(self):
+        for upstream in ['3.2.17RC1', '3.2.17RC2', '3.2.17']:
+            with self.subTest(upstream=upstream):
+                result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary',
+                                                                          upstream=upstream, php='8.2.35')],
+                                                    [self.package('php-zts-igbinary', '3.2.17_rc1_p82-r0')],
+                                                    php_stream='8.2')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(receipt['passed'])
+
 
 if __name__ == '__main__':
     unittest.main()

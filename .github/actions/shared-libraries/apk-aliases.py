@@ -60,7 +60,8 @@ def archive_evidence(path):
                         fields.setdefault(key, []).append(value)
                 result = {'name': fields.get('pkgname', [None])[0], 'version': fields.get('pkgver', [None])[0],
                           'arch': fields.get('arch', [None])[0], 'depends': fields.get('depend', []),
-                          'provides': fields.get('provides', []), 'replaces': fields.get('replaces', [])}
+                          'provides': fields.get('provides', []), 'replaces': fields.get('replaces', []),
+                          'provider_priority': fields.get('provider_priority', [])}
                 extension = extension_name(result['name']) if isinstance(result['name'], str) else None
                 if extension is None or logical_name(result['name']) == result['name'] or result['name'].endswith('-debuginfo'):
                     return result
@@ -88,6 +89,7 @@ def verify_alias(evidence, metadata=None, core=None):
             or any(value.startswith(logical + '=') for value in evidence.get('provides', []))
             or '!' + logical + '>0' not in evidence.get('depends', [])
             or logical not in evidence.get('replaces', [])
+            or evidence.get('provider_priority') != ['100']
             or not re.fullmatch('[a-f0-9]{64}', evidence.get('module_sha256', ''))):
         raise RuntimeError('APK runtime alias lacks native replacement relationships or module bytes')
     capabilities = [value for value in evidence.get('depends', []) if re.fullmatch(r'php-[a-z0-9-]+-shared-runtime-\d+-abi\d+-\d+', value)]
@@ -97,7 +99,9 @@ def verify_alias(evidence, metadata=None, core=None):
                                  or metadata.get('extension') != extension_name(physical)
                                  or metadata.get('module_sha256') != evidence['module_sha256']):
         raise RuntimeError('APK runtime alias metadata differs from its compiled module')
-    if core is not None and ('!' + logical + '>0' not in core.get('depends', []) or capabilities[0] not in core.get('provides', [])):
+    if core is not None and (core.get('name') != 'php-zts-cli' or core.get('arch') != evidence.get('arch')
+                             or '!' + logical + '>0' not in core.get('depends', [])
+                             or capabilities[0] not in core.get('provides', [])):
         raise RuntimeError('APK shared CLI does not enforce the runtime alias replacement')
     return {'logical_name': logical, 'name': physical, 'core_capability': capabilities[0],
             'module_sha256': evidence['module_sha256']}

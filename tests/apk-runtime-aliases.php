@@ -53,11 +53,25 @@ final class AliasFixturePackage implements package
     public function getDescription(): string { return 'APK alias regression fixture'; }
 }
 
-$options = getopt('', ['type:', 'native']);
+$options = getopt('', ['type:', 'native', 'php-stream:']);
+if (isset($options['native']) && !isset($options['php-stream']) && ($options['type'] ?? 'apk') === 'apk') {
+    if (!isset($options['type'])) {
+        echo aliasCommand([PHP_BINARY, '-d', 'memory_limit=384M', __FILE__]);
+    }
+    foreach (['8.2', '8.5'] as $stream) {
+        echo aliasCommand([PHP_BINARY, '-d', 'memory_limit=384M', __FILE__, '--type=apk', '--native', '--php-stream=' . $stream]);
+    }
+    exit;
+}
+$stream = $options['php-stream'] ?? '8.6';
+aliasCheck(in_array($stream, ['8.2', '8.5', '8.6'], true), 'Unknown fixture PHP stream');
+aliasCheck(!isset($options['native']) || in_array($stream, ['8.2', '8.5'], true), 'Native fixtures cover historical PHP8.2 and8.5');
+$fullPhpVersion = ['8.2' => '8.2.35', '8.5' => '8.5.12', '8.6' => '8.6.0'][$stream];
 if (!isset($options['type'])) {
     foreach (['rpm', 'deb', 'apk'] as $type) {
         echo aliasCommand([PHP_BINARY, '-d', 'memory_limit=384M', __FILE__, '--type=' . $type,
-            ...(isset($options['native']) && $type === 'apk' ? ['--native'] : [])]);
+            ...(isset($options['native']) && $type === 'apk' ? ['--native'] : []),
+            ...(isset($options['php-stream']) ? ['--php-stream=' . $stream] : [])]);
     }
     exit;
 }
@@ -74,8 +88,8 @@ try {
     define('BASE_PATH', dirname(__DIR__));
     define('INI_PATH', BASE_PATH . '/src/ini');
     define('SPP_TYPE', $type);
-    define('SPP_PHP_VERSION', '8.6');
-    define('SPP_PREFIX', '-zts86');
+    define('SPP_PHP_VERSION', $stream);
+    define('SPP_PREFIX', isset($options['native']) ? '-zts' : '-zts86');
     define('SPP_TARGET', null);
     define('BUILD_ROOT_PATH', $root . '/buildroot');
     define('BUILD_BIN_PATH', BUILD_ROOT_PATH . '/bin');
@@ -93,16 +107,16 @@ try {
     aliasCheck(is_string($helpers), 'Cannot load package path helpers');
     eval('use staticphp\\step\\CreatePackages;' . $helpers);
     (new ReflectionProperty(CreatePackages::class, 'prefix'))->setValue(null, SPP_PREFIX);
-    (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, ['8.6.0', 'x86_64']);
+    (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, [$fullPhpVersion, 'x86_64']);
     (new ReflectionProperty(CreatePackages::class, 'packageType'))->setValue(null, $type);
     CreatePackages::bootstrapSpcGlobals();
     $prefix = CreatePackages::getPrefix();
     aliasCheck(array_keys(ApkRuntimeAliases::extensions()) === ['amqp', 'igbinary'], 'Unexpected APK alias scope');
-    foreach (['82', '83', '84', '85', '86'] as $stream) {
+    foreach (['82', '83', '84', '85', '86'] as $identityStream) {
         foreach (['amqp', 'igbinary'] as $name) {
             foreach (['', '-debuginfo'] as $debug) {
-                $logical = 'php-zts' . $stream . '-' . $name . $debug;
-                $physical = 'php-zts' . $stream . '-' . $name . '-shared' . $debug;
+                $logical = 'php-zts' . $identityStream . '-' . $name . $debug;
+                $physical = 'php-zts' . $identityStream . '-' . $name . '-shared' . $debug;
                 aliasCheck(ApkRuntimeAliases::physicalName($logical) === $physical, 'Physical alias lost stream or debug identity');
                 aliasCheck(ApkRuntimeAliases::logicalName($physical) === $logical, 'Logical alias does not round-trip');
                 aliasCheck(ApkRuntimeAliases::extension($physical) === $name, 'Physical name lost extension identity');
@@ -139,6 +153,7 @@ try {
             }
         }
         if ($type === 'apk') {
+            aliasCheck(($config['apk_provider_priority'] ?? null) === 100 && empty($config['apk_install_if']), 'Runtime alias priority or activation policy is wrong');
             aliasCheck(in_array($logical, $config['provides_unversioned'] ?? [], true), 'Runtime alias lacks its versionless logical provide');
             aliasCheck(in_array($logical, $config['replaces'] ?? [], true), 'Runtime alias does not replace the old real package');
             aliasCheck(in_array($logical . '>0', $config['conflicts'] ?? [], true), 'Runtime alias permits an old real package');
@@ -153,6 +168,7 @@ try {
         file_put_contents($debugSource, 'fake ' . $name . ' debug data');
         $debugConfig = $package->getDebuginfoFpmConfig();
         if ($type === 'apk') {
+            aliasCheck(($debugConfig['apk_provider_priority'] ?? null) === 100 && empty($debugConfig['apk_install_if']), 'Debug alias priority or activation policy is wrong');
             aliasCheck(in_array($physical, $debugConfig['depends'] ?? [], true), 'Debug alias does not require its physical runtime package');
             aliasCheck(in_array($logical . '-debuginfo', $debugConfig['provides_unversioned'] ?? [], true), 'Debug alias lacks its logical provide');
             aliasCheck(in_array($logical . '-debuginfo', $debugConfig['replaces'] ?? [], true), 'Debug alias does not replace the old debug package');
@@ -181,71 +197,134 @@ try {
             return DIST_APK_PATH . '/' . $name . '-' . $version . '-r' . $revision . '.x86_64.apk';
         };
         $header = static fn (string $path): string => aliasCommand(['tar', '-xOf', '-', '.PKGINFO'], aliasCommand(['gzip', '-dc', $path]));
-        $oldCli = $archive($prefix . '-cli', '8.6.0', '1', ['files' => [BUILD_BIN_PATH . '/php' => '/usr/bin/alias-fixture-php']]);
-        $newCli = $archive($prefix . '-cli', '8.6.0', '2', ['conflicts' => $cliConfig['conflicts'], 'files' => [BUILD_BIN_PATH . '/php' => '/usr/bin/alias-fixture-php']]);
-        copy($newCli, $root . '/repo/x86_64/' . basename($newCli));
+        $oldCliRevision = $stream === '8.2' ? '1' : '2';
+        $oldCli = $archive($prefix . '-cli', $fullPhpVersion, $oldCliRevision,
+            ['files' => [BUILD_BIN_PATH . '/php' => '/usr/bin/alias-fixture-php']]);
+        $link = $root . '/libphp-fixture.so';
+        symlink('php-zts/lib/libphp-fixture.so', $link);
+        $newCli = $archive($prefix . '-cli', $fullPhpVersion, '100',
+            ['conflicts' => $cliConfig['conflicts'], 'files' => [BUILD_BIN_PATH . '/php' => '/usr/bin/alias-fixture-php',
+                $link => '/usr/lib/libphp-fixture.so']]);
+        aliasCheck(str_contains(aliasCommand(['tar', '-tvf', $newCli]), ' -> php-zts/lib/libphp-fixture.so'), 'Native APK lost the staged relative embed symlink');
+        foreach ([$oldCli, $newCli] as $path) {
+            copy($path, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($path)));
+        }
+        $historicalVersions = $stream === '8.2' ? [
+            'amqp' => ['2.2.0p82-r2', '2.2.0p82.35_p0-r0'],
+            'igbinary' => ['3.2.17~rc1_82-r1', '3.2.17~rc1p82-r0', '3.2.17_rc1_p82-r0'],
+        ] : [
+            'amqp' => ['2.2.0~dev_85-r1', '2.2.0p85-r2'],
+            'igbinary' => ['3.2.17~rc1_85-r1', '3.2.17~rc1p85-r2'],
+        ];
+        $versions = [];
         $old = [];
+        $future = [];
         foreach (['amqp', 'igbinary'] as $name) {
             $logical = $prefix . '-' . $name;
             $physical = $logical . '-shared';
+            $version = CreatePackages::getTaggedPackageVersion('apk', $name === 'amqp' ? '2.2.0' : '3.2.17~rc1');
+            $versions[$name] = $version;
             $nativeConfig = $configs[$name];
-            $nativeConfig['depends'] = [$prefix . '-cli'];
-            $new = $archive($physical, '1.0.0', '1', $nativeConfig);
-            copy($new, $root . '/repo/x86_64/' . basename($new));
+            $nativeConfig['depends'] = [$prefix . '-cli=' . $fullPhpVersion . '-r100'];
+            $new = $archive($physical, $version, '0', $nativeConfig);
+            copy($new, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($new)));
             $info = $header($new);
             aliasCheck(preg_match('/^pkgname = ' . preg_quote($physical, '/') . '$/m', $info) === 1, 'Native archive has the logical runtime name');
             aliasCheck(preg_match('/^provides = ' . preg_quote($logical, '/') . '$/m', $info) === 1, 'Native runtime provide is versioned or missing');
             aliasCheck(str_contains($info, 'replaces = ' . $logical . "\n") && str_contains($info, 'depend = !' . $logical . ">0\n"), 'Native runtime replacement/conflict headers are wrong: ' . $info);
-            $debug = $archive($physical . '-debuginfo', '1.0.0', '1', $configs[$name . '-debuginfo'], true);
+            aliasCheck(str_contains($info, "provider_priority = 100\n") && !str_contains($info, 'install_if ='), 'Native runtime priority is missing or introduces install_if');
+            $debug = $archive($physical . '-debuginfo', $version, '0', $configs[$name . '-debuginfo'], true);
+            copy($debug, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($debug)));
             $debugInfo = $header($debug);
-            aliasCheck(str_contains($debugInfo, 'depend = ' . $physical . "=1.0.0-r1\n"), 'Native debug archive does not pin its physical runtime');
+            aliasCheck(str_contains($debugInfo, 'depend = ' . $physical . '=' . $version . "-r0\n"), 'Native debug archive does not pin its physical runtime');
             aliasCheck(str_contains($debugInfo, 'provides = ' . $logical . "-debuginfo\n") && str_contains($debugInfo, 'depend = !' . $logical . "-debuginfo>0\n"), 'Native debug logical alias metadata is wrong');
-            $old[$name] = $archive($logical, '99.0.0', '1', ['files' => $configs[$name]['files'], 'config-files' => $configs[$name]['config-files']]);
+            aliasCheck(str_contains($debugInfo, "provider_priority = 100\n") && !str_contains($debugInfo, 'install_if ='), 'Native debug priority is missing or introduces install_if');
+            $future[$name] = $archive($physical, $version, '1', $nativeConfig);
+            $future[$name . '-debuginfo'] = $archive($physical . '-debuginfo', $version, '1', $configs[$name . '-debuginfo'], true);
+            foreach ($historicalVersions[$name] as $historical) {
+                preg_match('/^(.*)-r(\d+)$/D', $historical, $parts);
+                $path = $archive($logical, $parts[1], $parts[2], [
+                    'depends' => [$prefix . '-cli'],
+                    'files' => $configs[$name]['files'], 'config-files' => $configs[$name]['config-files'],
+                ]);
+                $old[$name][] = $path;
+                copy($path, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($path)));
+            }
         }
-        echo "Passed native APK runtime/debug alias headers and exact physical debug dependencies.\n";
-        $container = 'spp-apk-aliases-' . bin2hex(random_bytes(6));
-        $script = <<<'SH'
+        echo "Passed native APK {$stream} runtime/debug headers, provider priority, and exact physical debug dependencies.\n";
+        $run = static function (string $script) use ($root): void {
+            $container = 'spp-apk-aliases-' . bin2hex(random_bytes(6));
+            try {
+                aliasCommand(['docker', 'run', '--rm', '--memory', '384m', '--cpus', '1', '--network', 'none', '--name', $container,
+                    '--mount', 'type=bind,src=' . $root . ',dst=/task', 'alpine:3.21', 'sh', '-ec', $script]);
+            } finally {
+                (new Process(['docker', 'rm', '-f', $container]))->run();
+            }
+        };
+        $setup = <<<'SH'
 set -eu
 apk index --allow-untrusted -o /task/repo/x86_64/APKINDEX.tar.gz /task/repo/x86_64/*.apk >/dev/null
 printf '%s\n' /task/repo > /etc/apk/repositories
-apk add --allow-untrusted /task/dist/apk/php-zts86-cli-8.6.0-r1.x86_64.apk /task/dist/apk/php-zts86-amqp-99.0.0-r1.x86_64.apk /task/dist/apk/php-zts86-igbinary-99.0.0-r1.x86_64.apk
-sed -i 's/^\(php-zts86-[a-z-]*\).*/\1/' /etc/apk/world
-apk upgrade --allow-untrusted
-apk info -e php-zts86-amqp-shared
-apk info -e php-zts86-igbinary-shared
-! apk info -e php-zts86-amqp
-! apk info -e php-zts86-igbinary
-apk info -v php-zts86-cli | grep -qx php-zts86-cli-8.6.0-r2
-apk upgrade --allow-untrusted
-apk del php-zts86-amqp-shared php-zts86-igbinary-shared
-apk add --allow-untrusted php-zts86-amqp php-zts86-igbinary
-apk info -e php-zts86-amqp-shared
-apk info -e php-zts86-igbinary-shared
+tar -xOf /task/repo/x86_64/APKINDEX.tar.gz APKINDEX | awk 'BEGIN { RS="" } /P:php-zts-(amqp|igbinary)-shared\n/ { if ($0 !~ /\nk:100\n/) exit 1; count++ } END { if (count != 2) exit 1 }'
 SH;
-        try {
-            aliasCommand(['docker', 'run', '--rm', '--memory', '384m', '--name', $container,
-                '--mount', 'type=bind,src=' . $root . ',dst=/task', 'alpine:3.21', 'sh', '-ec', $script]);
-        } finally {
-            (new Process(['docker', 'rm', '-f', $container]))->run();
-        }
-        $container = 'spp-apk-alias-hold-' . bin2hex(random_bytes(6));
-        $script = <<<'SH'
-set -eu
-printf '%s\n' /task/repo > /etc/apk/repositories
-apk add --allow-untrusted /task/dist/apk/php-zts86-cli-8.6.0-r1.x86_64.apk /task/dist/apk/php-zts86-amqp-99.0.0-r1.x86_64.apk
-sed -i -e 's/^php-zts86-cli.*/php-zts86-cli/' -e 's/^php-zts86-amqp.*/php-zts86-amqp=99.0.0-r1/' /etc/apk/world
-if apk upgrade --allow-untrusted >/tmp/held.log 2>&1; then cat /tmp/held.log; exit 1; fi
-apk info -v php-zts86-cli | grep -qx php-zts86-cli-8.6.0-r1
-apk info -e php-zts86-amqp
-! apk info -e php-zts86-amqp-shared
+        $assertAliases = <<<'SH'
+apk info -e php-zts-amqp-shared
+apk info -e php-zts-igbinary-shared
+! grep -qx 'P:php-zts-amqp' /lib/apk/db/installed
+! grep -qx 'P:php-zts-igbinary' /lib/apk/db/installed
+apk info -e php-zts-amqp
+apk info -e php-zts-igbinary
 SH;
-        try {
-            aliasCommand(['docker', 'run', '--rm', '--memory', '384m', '--name', $container,
-                '--mount', 'type=bind,src=' . $root . ',dst=/task,readonly', 'alpine:3.21', 'sh', '-ec', $script]);
-        } finally {
-            (new Process(['docker', 'rm', '-f', $container]))->run();
+        $newCliVersion = $fullPhpVersion . '-r100';
+        $cliCheck = 'apk info -v -e php-zts-cli | grep -qx ' . escapeshellarg('php-zts-cli-' . $newCliVersion) . "\n"
+            . "test \"\$(readlink /usr/lib/libphp-fixture.so)\" = php-zts/lib/libphp-fixture.so\n";
+        $cases = max(count($old['amqp']), count($old['igbinary']));
+        for ($index = 0; $index < $cases; $index++) {
+            $amqp = $old['amqp'][$index % count($old['amqp'])];
+            $igbinary = $old['igbinary'][$index % count($old['igbinary'])];
+            $initial = implode(' ', array_map(static fn (string $path): string => escapeshellarg('/task/dist/apk/' . basename($path)), [$oldCli, $amqp, $igbinary]));
+            $run($setup . "\napk add --allow-untrusted {$initial}\n"
+                . "sed -i 's/^\\(php-zts-[a-z-]*\\).*/\\1/' /etc/apk/world\n"
+                . "cp /etc/apk/world /tmp/world.before\napk upgrade --allow-untrusted\n"
+                . $assertAliases . "\n" . $cliCheck
+                . "cmp /tmp/world.before /etc/apk/world\ncp /lib/apk/db/installed /tmp/installed.before\napk upgrade --allow-untrusted\ncmp /tmp/installed.before /lib/apk/db/installed\n"
+                . "apk del php-zts-amqp php-zts-igbinary\n! apk info -e php-zts-amqp-shared\n! apk info -e php-zts-igbinary-shared\n"
+                . "apk add --allow-untrusted php-zts-amqp php-zts-igbinary\n" . $assertAliases);
         }
-        echo "Passed native Alpine ordinary upgrade, logical-name installation, repeat upgrade, and held-old-extension CLI gating.\n";
+        $run($setup . "\napk add --allow-untrusted php-zts-amqp php-zts-igbinary php-zts-amqp-debuginfo php-zts-igbinary-debuginfo\n"
+            . $assertAliases . "\n" . $cliCheck
+            . "apk info -e php-zts-amqp-shared-debuginfo\napk info -e php-zts-igbinary-shared-debuginfo\n");
+        $run($setup . "\napk add --allow-untrusted " . escapeshellarg('/task/dist/apk/' . basename($oldCli))
+            . "\nsed -i 's/^php-zts-cli.*/php-zts-cli/' /etc/apk/world\napk upgrade --allow-untrusted\n"
+            . $cliCheck . "! apk info -e php-zts-amqp-shared\n! apk info -e php-zts-igbinary-shared\n");
+        $currentIndex = 'apk index --allow-untrusted -o /task/repo/x86_64/APKINDEX.tar.gz ' . implode(' ', array_map(
+            static fn (string $path): string => escapeshellarg('/task/repo/x86_64/' . basename($path)),
+            glob($root . '/repo/x86_64/*.apk')));
+        foreach ($future as $path) {
+            copy($path, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($path)));
+        }
+        $allIndex = 'apk index --allow-untrusted -o /task/repo/x86_64/APKINDEX.tar.gz /task/repo/x86_64/*.apk';
+        $run(str_replace($allIndex, $currentIndex, $setup)
+            . "\napk add --allow-untrusted php-zts-amqp php-zts-igbinary php-zts-amqp-debuginfo php-zts-igbinary-debuginfo\n"
+            . 'apk info -v -e php-zts-amqp-shared | grep -qx ' . escapeshellarg('php-zts-amqp-shared-' . $versions['amqp'] . '-r0') . "\n"
+            . 'apk info -v -e php-zts-igbinary-shared | grep -qx ' . escapeshellarg('php-zts-igbinary-shared-' . $versions['igbinary'] . '-r0') . "\n"
+            . "{$allIndex} >/dev/null\napk update --allow-untrusted\napk upgrade --allow-untrusted\n"
+            . $assertAliases . "\n"
+            . 'apk info -v -e php-zts-amqp-shared | grep -qx ' . escapeshellarg('php-zts-amqp-shared-' . $versions['amqp'] . '-r1') . "\n"
+            . 'apk info -v -e php-zts-igbinary-shared | grep -qx ' . escapeshellarg('php-zts-igbinary-shared-' . $versions['igbinary'] . '-r1') . "\n"
+            . 'apk info -v -e php-zts-amqp-shared-debuginfo | grep -qx ' . escapeshellarg('php-zts-amqp-shared-debuginfo-' . $versions['amqp'] . '-r1') . "\n"
+            . 'apk info -v -e php-zts-igbinary-shared-debuginfo | grep -qx ' . escapeshellarg('php-zts-igbinary-shared-debuginfo-' . $versions['igbinary'] . '-r1') . "\n"
+            . "cp /lib/apk/db/installed /tmp/installed.before\napk upgrade --allow-untrusted\ncmp /tmp/installed.before /lib/apk/db/installed\n");
+        if ($stream === '8.2') {
+            $held = $old['amqp'][0];
+            $run(str_replace('if (count != 2)', 'if (count != 4)', $setup) . "\napk add --allow-untrusted " . escapeshellarg('/task/dist/apk/' . basename($oldCli)) . ' '
+                . escapeshellarg('/task/dist/apk/' . basename($held)) . "\n"
+                . "sed -i -e 's/^php-zts-cli.*/php-zts-cli/' -e 's/^php-zts-amqp.*/php-zts-amqp=2.2.0p82-r2/' /etc/apk/world\n"
+                . "apk upgrade --allow-untrusted >/tmp/held.log 2>&1 || :\n"
+                . 'apk info -v -e php-zts-cli | grep -qx ' . escapeshellarg('php-zts-cli-' . $fullPhpVersion . '-r' . $oldCliRevision) . "\n"
+                . "grep -qx 'P:php-zts-amqp' /lib/apk/db/installed\n! apk info -e php-zts-amqp-shared\n");
+        }
+        echo "Passed native Alpine {$stream} historical valid/malformed versions, ordinary upgrades, fresh/debug logical installs, absent modules and repeat upgrades. Metadata fixture only; no shared-payload runtime claim.\n";
     }
 } finally {
     $oldTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $oldTmp);
