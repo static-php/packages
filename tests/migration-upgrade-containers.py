@@ -33,6 +33,7 @@ RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'alma9': ('rpm', 'almalinux:9'),
             'alpine': ('apk', 'alpine:3.21')}
 WARNING = re.compile(r'PHP Startup:|Unable to (?:load dynamic library|initialize module)|symbol lookup error|already loaded', re.I)
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_.-]*$')
+RPM_MIRROR = Path('/spp/repository/generations')
 
 
 def run(command, *, check=True, input=None, cwd=None, env=None):
@@ -384,6 +385,8 @@ def make_keys(kind):
     public = run(['gpg', '--homedir', home, '--armor', '--export', fingerprint]).stdout
     (keys / 'repository.asc').write_text(public)
     (keys / 'fingerprint').write_text(fingerprint)
+    if kind == 'rpm':
+        run(['rpmkeys', '--import', keys / 'repository.asc'])
     return fingerprint
 
 
@@ -395,6 +398,17 @@ def sign(kind, path):
     run(args + ['--armor', '--detach-sign', path])
 
 
+def sign_rpm_for_mirror(path, fingerprint):
+    path = Path(path)
+    if (path.is_symlink() or RPM_MIRROR.resolve() not in path.resolve().parents
+            or not path.is_file() or path.stat().st_nlink != 1):
+        raise RuntimeError('RPM mirror signing requires an isolated scratch archive')
+    run(['rpmsign', '--delsign', path])
+    run(['rpmsign', '--define', '_gpg_name ' + fingerprint, '--define', '_gpg_path /spp/keys/gpg',
+         '--define', '__gpg /usr/bin/gpg', '--addsign', path])
+    return run(['rpmkeys', '--checksig', path])
+
+
 def index_generation(kind, name, stream, arch):
     directory = Path('/spp/repository/generations') / name
     packages = inspect_directory(kind, directory)
@@ -404,8 +418,7 @@ def index_generation(kind, name, stream, arch):
     if kind == 'rpm':
         fingerprint = Path('/spp/keys/fingerprint').read_text().strip()
         for package in packages:
-            run(['rpmsign', '--define', '_gpg_name ' + fingerprint, '--define', '_gpg_path /spp/keys/gpg',
-                 '--define', '__gpg /usr/bin/gpg', '--addsign', package['path']])
+            sign_rpm_for_mirror(package['path'], fingerprint)
         run(['createrepo_c', directory])
         import yaml
         artifacts = ['{}-{}.{}'.format(p['name'], p['version'], 'noarch' if p['architecture'] == 'all' else 'aarch64' if p['architecture'] == 'arm64' else 'x86_64')

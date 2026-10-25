@@ -486,6 +486,31 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 self.assertEqual((generation / new_library.name).read_bytes(), new_library.read_bytes())
                 self.assertNotEqual((generation / new_library.name).stat().st_ino, new_library.stat().st_ino)
 
+    def test_rpm_mirror_signer_rejects_originals_symlinks_and_shared_inodes(self):
+        with tempfile.TemporaryDirectory(prefix='spp-rpm-mirror-sign-') as directory:
+            root = Path(directory)
+            mirror = root / 'mirror'
+            mirror.mkdir()
+            original = root / 'original.rpm'
+            original.write_bytes(b'immutable published fixture')
+            isolated = mirror / 'isolated.rpm'
+            isolated.write_bytes(original.read_bytes())
+            shared = mirror / 'hardlink.rpm'
+            shared.hardlink_to(original)
+            symlink = mirror / 'symlink.rpm'
+            symlink.symlink_to(isolated)
+            calls = []
+            with patch.dict(scope, {'RPM_MIRROR': mirror, 'run': lambda command, **kwargs: calls.append(command)}):
+                for path in (original, shared, symlink):
+                    with self.assertRaisesRegex(RuntimeError, 'isolated scratch archive'):
+                        harness['sign_rpm_for_mirror'](path, 'test-key')
+                self.assertEqual(calls, [])
+                harness['sign_rpm_for_mirror'](isolated, 'test-key')
+            self.assertEqual(calls[0], ['rpmsign', '--delsign', isolated])
+            self.assertEqual(calls[1][-2:], ['--addsign', isolated])
+            self.assertEqual(calls[2], ['rpmkeys', '--checksig', isolated])
+            self.assertEqual(original.read_bytes(), b'immutable published fixture')
+
     def test_tls_and_service_hooks_share_signed_generations_and_fail_closed(self):
         with tempfile.TemporaryDirectory(prefix='spp-migration-hooks-') as directory:
             root = Path(directory)
