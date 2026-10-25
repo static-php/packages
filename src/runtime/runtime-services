@@ -1,0 +1,146 @@
+#!/bin/sh
+set -eu
+export LC_ALL=C
+
+root=
+if [ "${1-}" = --root ]; then
+    root=${2%/}
+    shift 2
+fi
+action=${1:-finish}
+state="$root/run/php-zts-runtime"
+descriptors="$root/usr/share/php-zts/services"
+mkdir -p "$state"
+umask 077
+
+manager() {
+    if [ -d "$root/run/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
+        printf 'systemd\n'
+    elif [ -d "$root/run/openrc" ] && command -v rc-service >/dev/null 2>&1; then
+        printf 'openrc\n'
+    fi
+}
+
+active() {
+    case "$init" in
+        systemd) systemctl --quiet is-active "$1.service" ;;
+        openrc) rc-service "$1" status >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+fingerprint() {
+    {
+        for path in "$root/usr/lib/php-zts" "$root/usr/lib64/php-zts" "$descriptors"; do
+            [ ! -e "$path" ] || find -L "$path" -type f -exec stat -c '%n|%i|%s|%y|%z' '{}' +
+        done
+        for descriptor in "$descriptors"/*; do
+            [ -f "$descriptor" ] || continue
+            IFS='|' read -r kind service executable config modules < "$descriptor"
+            for path in "$root$executable" "$root$config" \
+                "$root/usr/lib/systemd/system/$service.service" "$root/etc/init.d/$service"; do
+                [ ! -e "$path" ] || stat -c '%n|%i|%s|%y|%z' "$path"
+            done
+            case "$kind" in
+                fpm) directory=${config%/*} ;;
+                frankenphp) directory=/etc/php-zts
+                    if [ -n "$modules" ]; then directory=/etc/$(basename "$(dirname "$modules")"); fi ;;
+                *) continue ;;
+            esac
+            [ ! -d "$root$directory" ] || find "$root$directory" -type f -exec stat -c '%n|%i|%s|%y|%z' '{}' +
+            if [ -n "$modules" ] && [ -d "$root$modules" ]; then
+                find -L "$root$modules" -type f -exec stat -c '%n|%i|%s|%y|%z' '{}' +
+            fi
+        done
+    } | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1
+}
+
+validate() {
+    case "$kind" in
+        fpm) output=$("$root$executable" -tt -y "$root$config" 2>&1) || {
+            printf '%s\n' "$output" >&2
+            return 1
+        } ;;
+        frankenphp) output=$("$root$executable" validate --config "$root$config" --adapter caddyfile 2>&1) || {
+            printf '%s\n' "$output" >&2
+            return 1
+        } ;;
+        *) return 1 ;;
+    esac
+    if printf '%s\n' "$output" | grep -E 'PHP Startup|Unable to load dynamic library|Error loading shared library|PHP Fatal error' >/dev/null; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+}
+
+init=$(manager)
+case "$action" in
+    begin)
+        : > "$state/active"
+        for descriptor in "$descriptors"/*; do
+            [ -f "$descriptor" ] || continue
+            IFS='|' read -r kind service executable config modules < "$descriptor"
+            case "$service" in *[!a-zA-Z0-9_.-]*|'') exit 1 ;; esac
+            if active "$service"; then printf '%s\n' "$service" >> "$state/active"; fi
+        done
+        fingerprint > "$state/before"
+        ;;
+    finish)
+        [ -n "$init" ] || exit 0
+        if ! mkdir "$state/lock" 2>/dev/null; then exit 0; fi
+        trap 'rmdir "$state/lock"' EXIT
+        trap 'exit 1' HUP INT TERM
+        current=$(fingerprint)
+        previous=
+        if [ -f "$state/before" ]; then previous=$(cat "$state/before");
+        elif [ -f "$state/applied" ]; then previous=$(cat "$state/applied"); fi
+        queued=false
+        for pending in "$state/start"/*; do [ ! -f "$pending" ] || queued=true; done
+        if [ "$current" = "$previous" ] && [ "$queued" = false ]; then
+            rm -f "$state/before" "$state/active"
+            exit 0
+        fi
+        failed=false
+        [ "$init" != systemd ] || systemctl daemon-reload
+        for descriptor in "$descriptors"/*; do
+            [ -f "$descriptor" ] || continue
+            IFS='|' read -r kind service executable config modules < "$descriptor"
+            case "$service" in *[!a-zA-Z0-9_.-]*|'') exit 1 ;; esac
+            case "$executable:$config" in /*:/*) ;; *) exit 1 ;; esac
+            [ -x "$root$executable" ] || continue
+            running=false
+            if active "$service"; then running=true;
+            elif [ -f "$state/active" ] && grep -Fx "$service" "$state/active" >/dev/null; then running=true; fi
+            fresh=false
+            [ ! -f "$state/start/$service" ] || fresh=true
+            [ "$running" = true ] || [ "$fresh" = true ] || continue
+            if ! validate; then failed=true; continue; fi
+            operation=restart
+            if [ "$fresh" = true ] && [ "$running" = false ]; then operation=start; fi
+            if [ "$init" = systemd ]; then
+                if command -v deb-systemd-invoke >/dev/null 2>&1 && [ -f "$root/etc/debian_version" ]; then
+                    if [ "$fresh" = true ] && command -v deb-systemd-helper >/dev/null 2>&1; then
+                        deb-systemd-helper unmask "$service.service" >/dev/null || :
+                        deb-systemd-helper enable "$service.service" >/dev/null || :
+                    fi
+                    deb-systemd-invoke "$operation" "$service.service" || failed=true
+                else
+                    systemctl "$operation" "$service.service" || failed=true
+                fi
+            else
+                if [ "$fresh" = true ] && command -v rc-update >/dev/null 2>&1; then
+                    rc-update add "$service" default || failed=true
+                fi
+                rc-service "$service" "$operation" || failed=true
+            fi
+            [ "$failed" = true ] || rm -f "$state/start/$service"
+        done
+        if [ "$failed" = true ]; then
+            printf '%s\n' 'PHP runtime service refresh failed; retained the previous runtime state for retry.' >&2
+            exit 1
+        fi
+        printf '%s\n' "$current" > "$state/applied"
+        rm -f "$state/before" "$state/active"
+        ;;
+    *) printf 'Usage: %s [--root ROOT] begin|finish\n' "$0" >&2; exit 1 ;;
+esac

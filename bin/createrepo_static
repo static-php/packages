@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import re
 import sys
@@ -39,6 +40,10 @@ def php_stream(version):
 
 def parse_rpm_info(filename):
     basename = os.path.basename(filename)
+
+    layout = re.fullmatch(r"(php-zts-runtime-layout)-(\d+)-(\d+)\.(x86_64|aarch64|noarch)\.rpm", basename)
+    if layout:
+        return (*layout.groups(), "libraries")
 
     match_library = re.fullmatch(r'(?P<name>php-zts-lib-[a-z0-9][a-z0-9+-]*(?:-debuginfo)?)-(?P<version>[0-9][^-]*)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
     if match_library:
@@ -102,9 +107,15 @@ def parse_rpm_info(filename):
 
     return None
 
-def build_module_structure(rpm_map, platform, arch):
+def next_module_version(previous=0):
+    return max(int(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")), int(previous) + 1)
+
+def build_module_structure(rpm_map, platform, arch, module_version=None, metadata=None):
     documents = []
-    timestamp = int(datetime.now(timezone.utc).strftime('%Y%m%d'))
+    timestamp = next_module_version() if module_version is None else int(module_version)
+    if not 0 < timestamp < 2 ** 64:
+        raise ValueError("Module version must be a positive unsigned 64-bit integer")
+    metadata = metadata or {}
 
     # Collect common artifacts (static-php)
     common_artifacts = []
@@ -113,7 +124,8 @@ def build_module_structure(rpm_map, platform, arch):
             info = parse_rpm_info(pkg)
             if info:
                 name, version, release, arch, _ = info
-                common_artifacts.append(f"{name}-0:{version}-{release}.{arch}")
+                epoch = metadata.get(pkg, {}).get("epoch", "0")
+                common_artifacts.append(f"{name}-{epoch}:{version}-{release}.{arch}")
 
     for stream, pkg_list in sorted(rpm_map.items()):
         if stream in {"common", "libraries"}:
@@ -126,7 +138,8 @@ def build_module_structure(rpm_map, platform, arch):
             if not info:
                 continue
             name, version, release, arch, _ = info
-            artifacts.append(f"{name}-0:{version}-{release}.{arch}")
+            epoch = metadata.get(pkg, {}).get("epoch", "0")
+            artifacts.append(f"{name}-{epoch}:{version}-{release}.{arch}")
 
         doc = {
             'document': 'modulemd',
@@ -172,41 +185,38 @@ def build_defaults_document(default_stream):
         }
     }
 
-# Detect platform
-platform = detect_platform() or "el10"
-arch = detect_arch() or "x86_64"
-
-# Collect RPMs
-rpm_files = glob.glob("*.rpm")
-rpm_map = defaultdict(list)
-
-for rpm in rpm_files:
-    info = parse_rpm_info(rpm)
-    if info:
-        name, _, _, _, stream = info
-        if stream:
-            rpm_map[stream].append(rpm)
-
-# Build modules.yaml
-modules_yaml = build_module_structure(rpm_map, platform, arch)
-
-# Pick the default stream, i.e. the one dnf installs without being asked.
-if rpm_map:
-    streams = [s for s in rpm_map.keys() if s not in {"common", "libraries"} and s not in PRERELEASE_STREAMS]
-    for s in sorted(PRERELEASE_STREAMS & rpm_map.keys(), key=stream_sort_key):
-        print(f"stream {s} is pre-release, not eligible as the default", file=sys.stderr)
+def module_documents(rpm_files, platform, arch, module_version=None, metadata=None):
+    rpm_map = defaultdict(list)
+    for rpm in rpm_files:
+        info = parse_rpm_info(rpm)
+        if info:
+            rpm_map[info[-1]].append(rpm)
+    documents = build_module_structure(rpm_map, platform, arch, module_version, metadata)
+    streams = [s for s in rpm_map if s not in {"common", "libraries"} and s not in PRERELEASE_STREAMS]
     if streams:
-        default_stream = max(streams, key=stream_sort_key)
-        print(f"default stream: static-{default_stream}", file=sys.stderr)
-        modules_yaml.append(build_defaults_document(default_stream))
-    else:
-        print("no GA stream found, publishing no modulemd-defaults", file=sys.stderr)
+        documents.append(build_defaults_document(max(streams, key=stream_sort_key)))
+    return documents
 
-output_path = os.path.join(os.getcwd(), "modules.yaml")
-with open(output_path, "w") as f:
-    for doc in modules_yaml:
-        f.write('---\n')
-        yaml.dump(doc, f, sort_keys=False, default_flow_style=False)
-        f.write('...\n')
 
-print(output_path)
+def main():
+    parser = argparse.ArgumentParser(description="Generate PHP module metadata for the common RPM repository.")
+    parser.add_argument("--directory", default=".")
+    parser.add_argument("--platform", default=None)
+    parser.add_argument("--arch", default=None)
+    parser.add_argument("--version", type=int)
+    parser.add_argument("--output", default="modules.yaml")
+    args = parser.parse_args()
+    os.chdir(args.directory)
+    previous = 0
+    if os.path.isfile(args.output):
+        with open(args.output) as source:
+            previous = max((int(doc.get("data", {}).get("version", 0)) for doc in yaml.safe_load_all(source) if doc and doc.get("document") == "modulemd"), default=0)
+    version = args.version if args.version is not None else next_module_version(previous)
+    documents = module_documents(glob.glob("*.rpm"), args.platform or detect_platform() or "el8", args.arch or detect_arch() or "x86_64", version)
+    with open(args.output, "w") as output:
+        yaml.safe_dump_all(documents, output, sort_keys=False, explicit_start=True, explicit_end=True)
+    print(os.path.abspath(args.output))
+
+
+if __name__ == "__main__":
+    main()

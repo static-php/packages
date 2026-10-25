@@ -80,7 +80,7 @@ class TestCommand extends BaseCommand
             // from the published repo — exactly as a real `install php-zts-<ext>` resolves them.
             $hasBase = in_array('php' . SPP_PREFIX . '-cli', $names, true);
             $libraryPrefix = 'php-zts-lib-';
-            $librariesOnly = !array_filter($names, fn($name) => !str_starts_with($name, $libraryPrefix));
+            $librariesOnly = self::isLibraryOnly($names);
             // A --packages run deliberately produces a subset, so it has nothing to cross-check.
             $crossCheck = $hasBase && !(is_string($packagesOpt) && $packagesOpt !== '');
             $missingLibraries = [];
@@ -304,6 +304,22 @@ echo 'PONG';
 PHP;
     }
 
+    private static function isLibraryOnly(array $names): bool
+    {
+        return $names !== [] && !array_filter($names, static fn (string $name): bool => $name !== 'php-zts-runtime-layout'
+            && !str_starts_with($name, 'php-zts-lib-'));
+    }
+
+    private static function dependencyRepository(string $type, string $host, string $owner): string
+    {
+        $suffix = match ($type) {
+            'deb' => 'debian',
+            'apk' => 'alpine/main/php-zts',
+            default => throw new RuntimeException('No Forgejo dependency repository for ' . $type),
+        };
+        return rtrim($host, '/') . '/api/packages/' . $owner . '/' . $suffix;
+    }
+
     /**
      * Extensions PHP was told to load, from the installed conf.d drop-ins, as
      * [shortName => .so basename]. The .so carries the shared-library suffix
@@ -524,7 +540,7 @@ PHP;
 
     private function verifySharedLibraries(string $type, OutputInterface $output): ?int
     {
-        $dir = ($type === 'rpm' ? '/usr/lib64' : '/usr/lib') . '/php-zts/lib';
+        $dir = '/usr/lib/php-zts/lib';
         $checked = [];
         foreach (glob($dir . '/*.so*') ?: [] as $file) {
             $real = realpath($file);
@@ -645,7 +661,6 @@ PHP;
     {
         $host = rtrim(getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com', '/');
         $owner = getenv('SPP_FORGEJO_OWNER') ?: str_replace('.', '', SPP_PHP_VERSION); // e.g. "85"
-        $libsOwner = getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs';
         switch ($type) {
             case 'rpm':
                 // The repo is a modular DNF repo. The release RPM configures it with the right
@@ -658,14 +673,12 @@ PHP;
                 $this->sh($this->maybeSudo(['dnf', 'module', 'enable', '-y', $stream]), $output);
                 return ['--nogpgcheck'];
             case 'deb':
-                $line = "deb [trusted=yes] {$host}/api/packages/{$owner}/debian php-zts main\n"
-                    . "deb [trusted=yes] {$host}/api/packages/{$libsOwner}/debian php-zts main";
+                $line = 'deb [trusted=yes] ' . self::dependencyRepository($type, $host, $owner) . " php-zts main\n";
                 $this->sh($this->maybeSudo(['bash', '-c', "printf '%s\\n' " . escapeshellarg($line) . " > /etc/apt/sources.list.d/spp-test.list"]), $output);
                 $this->sh($this->maybeSudo(['apt-get', 'update']), $output); // best-effort; local install still works if unreachable
                 return [];
             case 'apk':
-                return ['--repository', "{$host}/api/packages/{$owner}/alpine/main/php-zts",
-                    '--repository', "{$host}/api/packages/{$libsOwner}/alpine/main/php-zts"];
+                return ['--repository', self::dependencyRepository($type, $host, $owner)];
         }
         return [];
     }

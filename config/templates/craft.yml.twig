@@ -1,4 +1,6 @@
 {%- set php_version_parts = php_version|split('.') -%}
+{%- set os = type == 'apk' ? os : '8' -%}
+{%- set type = type == 'apk' ? 'apk' : 'rpm' -%}
 {%- set use_php_lto = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 6) -%}
 {%- set use_tailcall_vm = use_php_lto -%}
 {%- set drop_memcache = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 5) -%}
@@ -57,8 +59,8 @@
 
 {# extensions #}
 {%- set base_sapi_str = 'cli,cgi,fpm,embed,frankenphp' -%}
-{%- set base_extensions_str = 'calendar,ctype,curl,dom,exif,filter,iconv,libxml,mbregex,mbstring,opcache,openssl,password-argon2,pcntl,phar,posix,readline,session,simplexml,sockets,sodium,tokenizer,xml,xmlreader,xmlwriter,zlib' -%}
-{%- set base_shared_str = 'amqp,apcu,ast,bcmath,brotli,bz2,clickhouse,dba,decimal,deepclone,dio,ds,ev,event,excimer,fastchart,fastjson,ffi,fileinfo,ftp,gd,gearman,gettext,gmp,gmssl,grpc,igbinary,imagick,inotify,intl,ldap,lz4,maxminddb,memcache,memcached,mongodb,msgpack,mysqli,mysqlnd,mysqlnd_ed25519,mysqlnd_parsec,odbc,opentelemetry,parallel,pcov,pdo,pdo_mysql,pdo_odbc,pdo_pgsql,pdo_sqlite,pdo_sqlsrv,pgsql,protobuf,rar,redis,rdkafka,shmop,simdjson,snappy,soap,spx,sqlite3,sqlsrv,ssh2,swoole,swoole-hook-mysql,swoole-hook-pgsql,swoole-hook-sqlite,swoole-hook-odbc,sysvmsg,sysvsem,sysvshm,tidy,trader,uuid,uv,xdebug,xhprof,xlswriter,xsl,xz,yac,yaml,zip,zstd' -%}
+{%- set base_extensions_str = 'calendar,ctype,dom,exif,filter,iconv,libxml,mbregex,mbstring,opcache,openssl,password-argon2,pcntl,phar,posix,readline,session,simplexml,sockets,sodium,tokenizer,xml,xmlreader,xmlwriter,zlib' -%}
+{%- set base_shared_str = 'amqp,apcu,ast,bcmath,brotli,bz2,clickhouse,curl,dba,decimal,deepclone,dio,ds,ev,event,excimer,fastchart,fastjson,ffi,fileinfo,ftp,gd,gearman,gettext,gmp,gmssl,grpc,igbinary,imagick,inotify,intl,ldap,lz4,maxminddb,memcache,memcached,mongodb,msgpack,mysqli,mysqlnd,mysqlnd_ed25519,mysqlnd_parsec,odbc,opentelemetry,parallel,pcov,pdo,pdo_mysql,pdo_odbc,pdo_pgsql,pdo_sqlite,pdo_sqlsrv,pgsql,protobuf,rar,redis,rdkafka,shmop,simdjson,snappy,soap,spx,sqlite3,sqlsrv,ssh2,swoole,swoole-hook-mysql,swoole-hook-pgsql,swoole-hook-sqlite,swoole-hook-odbc,sysvmsg,sysvsem,sysvshm,tidy,trader,uuid,uv,xdebug,xhprof,xlswriter,xsl,xz,yac,yaml,zip,zstd' -%}
 
 {%- set base_extensions = base_extensions_str|split(',')|map(v => v|trim) -%}
 {%- set base_shared = base_shared_str|split(',')|map(v => v|trim) -%}
@@ -85,11 +87,11 @@
 {%- endif -%}
 
 php-version: {{ php_source_version }}
-extensions: {{ filter_libraries ? '' : extensions|join(',') }}
-shared-extensions: {{ filter_libraries ? '' : shared_ext|join(',') }}
+extensions: {{ filter_libraries ? '[]' : extensions|join(',') }}
+shared-extensions: {{ filter_libraries ? '[]' : shared_ext|join(',') }}
 {# craft's libs-only stage only resolves extensions, not sapi targets — list frankenphp's suggests explicitly #}
 libs: {{ filter_libraries ? '[' ~ filter_libraries|join(', ') ~ ']' : ('frankenphp' in sapi_list ? '[brotli, watcher]' : '[]') }}
-sapi: {{ filter_libraries ? '' : sapi_list|join(',') }}
+sapi: {{ filter_libraries ? '[]' : sapi_list|join(',') }}
 debug: false
 build-options:
     enable-zts: true
@@ -136,6 +138,8 @@ craft-options:
     build: true
 
 extra-env:
+    GOAMD64: 'v1'
+    GOARM64: 'v8.0'
     {% if using_gcc -%}
     SPC_TOOLCHAIN: 'StaticPHP\Toolchain\GccNativeToolchain'
     SPC_LIBC: '{{ type == 'apk' ? 'musl' : 'glibc' }}'

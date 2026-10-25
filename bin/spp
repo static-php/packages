@@ -102,6 +102,16 @@ function getLibdir(): string
     return $type === 'rpm' ? '/usr/lib64' : '/usr/lib';
 }
 
+function getRuntimeLibdir(): string
+{
+    return '/usr/lib/php-zts/lib';
+}
+
+function getRuntimeModuledir(): string
+{
+    return '/usr/lib/' . CreatePackages::getPrefix() . '/modules';
+}
+
 function getConfdir(): string
 {
     // Get the prefix from user-provided parameter (e.g., php-zts, php-zts8.5, php-zts85)

@@ -13,6 +13,7 @@ final class SharedLibraries
     private array $files = [];
     private array $sonameOwners = [];
     private array $elf = [];
+    private string $manifestHash;
 
     public function __construct(string $root, ?string $expectedRuntimeLibdir = null)
     {
@@ -29,6 +30,12 @@ final class SharedLibraries
         }
         if (($this->manifest['schema'] ?? null) !== 1 || ($this->manifest['linkage'] ?? null) !== 'shared' || !is_array($this->manifest['libraries'] ?? null)) {
             throw new RuntimeException("Unsupported shared-library manifest: {$path}");
+        }
+        $this->manifestHash = hash_file('sha256', $path);
+        $this->loadPackageVersions();
+        if (array_key_exists('pending_rebuilds', $this->manifest)
+            && (!is_array($this->manifest['pending_rebuilds']) || $this->manifest['pending_rebuilds'] !== [])) {
+            throw new RuntimeException('Shared-library ABI transition still requires dependent rebuilds');
         }
         $libdir = $this->manifest['runtime_libdir'] ?? null;
         if (!is_string($libdir) || !in_array($libdir, ['/usr/lib/php-zts/lib', '/usr/lib64/php-zts/lib'], true)) {
@@ -214,7 +221,24 @@ final class SharedLibraries
     public function getPackageFiles(string $id): array
     {
         $this->get($id);
-        return $this->files[$id];
+        $files = $this->files[$id];
+        if (defined('SPP_TYPE') && SPP_TYPE === 'rpm' && $this->getLibc() === 'glibc') {
+            foreach ($files as &$destination) {
+                if (str_starts_with($destination, '/usr/lib/php-zts/')) {
+                    $destination = '/usr/lib64/php-zts/' . substr($destination, strlen('/usr/lib/php-zts/'));
+                }
+            }
+            unset($destination);
+        }
+        return $files;
+    }
+
+    public function getInstallLibdir(string $type): string
+    {
+        if (!in_array($type, ['rpm', 'deb', 'apk'], true)) {
+            throw new RuntimeException("Unsupported package type {$type}");
+        }
+        return $type === 'rpm' && $this->getLibc() === 'glibc' ? '/usr/lib64/php-zts/lib' : $this->getRuntimeLibdir();
     }
 
     public function getSonameOwners(): array
@@ -250,29 +274,74 @@ final class SharedLibraries
 
     public function persist(): void
     {
-        $path = $this->root . '/shared-libraries.json';
-        $temporary = tempnam($this->root, '.shared-libraries-');
+        $path = $this->packageVersionsPath();
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true) && !is_dir(dirname($path))) {
+            throw new RuntimeException('Cannot create package version sidecar directory');
+        }
+        $temporary = tempnam(dirname($path), '.shared-libraries-');
         if ($temporary === false) {
             throw new RuntimeException('Cannot stage shared-library manifest');
         }
         try {
-            $data = $this->manifest;
-            foreach ($data['libraries'] as &$entry) {
-                foreach (['elf', 'runtime_assets', 'abi_dump', 'abi_dump_hashes', 'package_versions'] as $field) {
-                    if (isset($entry[$field]) && is_array($entry[$field])) {
-                        $entry[$field] = (object) $entry[$field];
-                    }
-                }
+            $versions = [];
+            foreach ($this->manifest['libraries'] as $id => $entry) {
+                $versions[$id] = (object) ($entry['package_versions'] ?? []);
             }
-            unset($entry);
-            $data['libraries'] = (object) $data['libraries'];
+            $data = ['schema' => 1, 'manifest_sha256' => $this->manifestHash, 'package_versions' => (object) $versions];
             $contents = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
             if (file_put_contents($temporary, $contents) !== strlen($contents) || !chmod($temporary, file_exists($path) ? (fileperms($path) & 0777) : 0644) || !rename($temporary, $path)) {
-                throw new RuntimeException("Cannot persist shared-library manifest {$path}");
+                throw new RuntimeException("Cannot persist shared-library package versions {$path}");
             }
         } finally {
             if (file_exists($temporary)) {
                 unlink($temporary);
+            }
+        }
+    }
+
+    public function exportManifest(string $path): void
+    {
+        $data = $this->manifest;
+        foreach ($data['libraries'] as &$entry) {
+            foreach (['elf', 'runtime_assets', 'abi_dump', 'abi_dump_hashes', 'package_versions'] as $field) {
+                if (isset($entry[$field]) && is_array($entry[$field])) {
+                    $entry[$field] = (object) $entry[$field];
+                }
+            }
+        }
+        unset($entry);
+        $data['libraries'] = (object) $data['libraries'];
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true) && !is_dir(dirname($path))) {
+            throw new RuntimeException('Cannot create exported manifest directory');
+        }
+        if (file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n") === false) {
+            throw new RuntimeException("Cannot export packaging manifest {$path}");
+        }
+    }
+
+    private function packageVersionsPath(): string
+    {
+        $directory = defined('DIST_PATH') ? DIST_PATH . '/.package-metadata' : (defined('TEMP_DIR') ? TEMP_DIR : $this->root) . '/.package-metadata';
+        return $directory . '/' . $this->manifestHash . '.json';
+    }
+
+    private function loadPackageVersions(): void
+    {
+        $path = $this->packageVersionsPath();
+        if (!is_file($path)) {
+            return;
+        }
+        $data = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        if (($data['schema'] ?? null) !== 1 || ($data['manifest_sha256'] ?? null) !== $this->manifestHash || !is_array($data['package_versions'] ?? null)) {
+            throw new RuntimeException('Invalid shared-library package version sidecar');
+        }
+        foreach ($data['package_versions'] as $id => $versions) {
+            if (!isset($this->manifest['libraries'][$id]) || !is_array($versions)) {
+                throw new RuntimeException('Invalid library in package version sidecar');
+            }
+            foreach ($versions as $type => $version) {
+                $this->validatePackageVersion($type, $version);
+                $this->manifest['libraries'][$id]['package_versions'][$type] = $version;
             }
         }
     }
@@ -329,6 +398,9 @@ final class SharedLibraries
             $this->expandFile($source, $destination, $expanded);
         }
         foreach ($expanded as $source => $destination) {
+            if (is_link($source)) {
+                continue;
+            }
             $details = $this->elf[$source] ?? $this->readElf($source);
             if ($details === null) {
                 continue;
@@ -428,6 +500,16 @@ final class SharedLibraries
             }
         }
         if (is_link($source) || !is_dir($source)) {
+            if (is_link($source) && !str_starts_with($source, $this->root . '/')) {
+                $link = readlink($source);
+                $target = $link === false ? '' : $this->normalizeAbsolute(dirname($destination) . '/' . $link);
+                if ($link === false || str_starts_with($link, '/') || str_contains($link, "\0") || str_contains($link, '\\')
+                    || (!str_starts_with($target, '/usr/lib/') && !str_starts_with($target, '/usr/lib64/'))) {
+                    throw new RuntimeException("Invalid package compatibility symlink: {$source}");
+                }
+                $mapping[$source] = $destination;
+                return;
+            }
             if (!is_file($source)) {
                 throw new RuntimeException("Invalid package payload file: {$source}");
             }
@@ -459,6 +541,9 @@ final class SharedLibraries
 
     private function readElf(string $source): ?array
     {
+        if (is_link($source)) {
+            return null;
+        }
         $stream = fopen($source, 'rb');
         if ($stream === false) {
             throw new RuntimeException("Cannot inspect package payload {$source}");

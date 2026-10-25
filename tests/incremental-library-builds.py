@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / ".github/actions/shared-libraries"))
+spec = importlib.util.spec_from_file_location("incremental_libraries", ROOT / ".github/actions/shared-libraries/incremental-build.py")
+incremental = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(incremental)
+
+
+class IncrementalLibraryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="selective-library-build-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.sdk = self.root / "buildroot"
+        (self.sdk / "lib").mkdir(parents=True)
+        (self.root / "downloads").mkdir()
+        self.graph = {
+            "base": {"artifact": "base", "depends": [], "inputs": ["base"], "recipe_hash": "base-recipe"},
+            "consumer": {"artifact": "consumer-source", "depends": ["base"], "inputs": ["base", "consumer-source"], "recipe_hash": "consumer-recipe"},
+            "other": {"artifact": "other", "depends": [], "inputs": ["other"], "recipe_hash": "other-recipe"},
+        }
+        self.inventory = {"libraries": self.graph, "required_libraries": list(self.graph)}
+        self.sources = {}
+        for name, record in self.graph.items():
+            artifact = record["artifact"]
+            body = ("source for " + artifact + " version1").encode()
+            filename = artifact + "-1.tar.gz"
+            (self.root / "downloads" / filename).write_bytes(body)
+            self.sources[artifact] = {"source": {"cache_type": "archive", "filename": filename,
+                "hash": hashlib.sha1(body).hexdigest(), "version": "1", "config": {"type": "url", "url": "https://example.invalid/" + filename}}}
+        self.manifest = {"schema": 1, "linkage": "shared", "libraries": {}}
+        for name, record in self.graph.items():
+            relative = "lib/lib" + name + ".so.1"
+            (self.sdk / relative).write_bytes(("compiled " + name).encode())
+            self.manifest["libraries"][name] = {"source_hash": self.sources[record["artifact"]]["source"]["hash"],
+                "files": [relative], "file_hashes": {relative: incremental.signature(self.sdk / relative)},
+                "depends": record["depends"]}
+        full = {"full": True, "inventory": self.inventory, "effective_sources": self.sources, "compatibility": "compatible", "reused": []}
+        self.state = incremental.record_state(full, self.manifest)
+        incremental.write(self.root / "downloads/.cache.json", self.sources)
+        incremental.write(self.sdk / "shared-libraries.json", self.manifest)
+        incremental.write(self.sdk / ".shared-library-ownership.json", self.manifest)
+        incremental.write(self.sdk / incremental.STATE, self.state)
+
+    def plan(self, **overrides):
+        values = dict(inventory=self.inventory, sources=self.sources, manifest=self.manifest,
+                      state=self.state, compatibility="compatible")
+        values.update(overrides)
+        return incremental.selection(**values)
+
+    def changed(self, artifact, version="2"):
+        current = copy.deepcopy(self.sources)
+        body = ("source for " + artifact + " version" + version).encode()
+        filename = artifact + "-" + version + ".tar.gz"
+        (self.root / "downloads" / filename).write_bytes(body)
+        current[artifact]["source"].update(filename=filename, hash=hashlib.sha1(body).hexdigest(), version=version)
+        return current
+
+    def test_compatible_update_builds_only_changed_root(self):
+        plan = self.plan(sources=self.changed("base"))
+        self.assertEqual(plan["selected"], ["base"])
+        self.assertEqual(plan["reused"], ["consumer", "other"])
+
+    def test_manual_one_or_set_ignores_unrelated_new_sources(self):
+        current = self.changed("other")
+        for requested in ["base", "base,consumer", "consumer-source"]:
+            with self.subTest(requested=requested):
+                plan = self.plan(sources=current, libraries=requested)
+                self.assertEqual(plan["selected"], [])
+                self.assertEqual(plan["effective_sources"]["other"], self.sources["other"])
+
+    def test_manual_scope_compiles_only_changed_requested_inputs(self):
+        current = self.changed("base")
+        current["other"] = self.changed("other")["other"]
+        plan = self.plan(sources=current, libraries="base,consumer")
+        self.assertEqual(plan["selected"], ["base"])
+        self.assertEqual(plan["effective_sources"]["other"], self.sources["other"])
+        self.assertEqual(self.plan(sources=self.changed("consumer-source"), libraries="consumer-source")["selected"], ["consumer"])
+        inventory = copy.deepcopy(self.inventory)
+        inventory["libraries"]["base"]["recipe_hash"] = "new-base-recipe"
+        inventory["libraries"]["other"]["recipe_hash"] = "new-other-recipe"
+        self.assertEqual(self.plan(inventory=inventory, libraries="base")["selected"], ["base"])
+
+    def test_manual_unchanged_scope_never_invokes_builder_or_rewrites_sdk(self):
+        plan = self.plan(libraries="base,consumer")
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in [self.sdk / incremental.STATE, self.sdk / "shared-libraries.json"]}
+        result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
+        self.assertFalse(result["built"])
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
+
+    def test_manual_scope_repairs_invalid_dependency_and_pending_consumer(self):
+        self.assertEqual(self.plan(libraries="consumer", invalid=["base"])["selected"], ["base"])
+        manifest = dict(self.manifest, pending_rebuilds={"consumer": {"libbase.so.1": "base"}})
+        self.assertEqual(self.plan(manifest=manifest, libraries="other")["selected"], ["consumer"])
+
+    def test_new_forward_dependency_is_added_without_unrelated_libraries(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory["libraries"]["new"] = {"artifact": "new", "depends": [], "inputs": ["new"], "recipe_hash": "new-recipe"}
+        inventory["libraries"]["consumer"]["depends"].append("new")
+        plan = self.plan(inventory=inventory, libraries="consumer")
+        self.assertEqual(plan["selected"], ["consumer", "new"])
+
+    def test_missing_required_library_catches_up_independently_of_latest_snapshot_delta(self):
+        inventory = copy.deepcopy(self.inventory)
+        sources = copy.deepcopy(self.sources)
+        for name in ["new-required", "new-forward", "optional-unused"]:
+            inventory["libraries"][name] = {"artifact": name, "depends": [], "inputs": [name], "recipe_hash": name}
+            sources[name] = {"source": {"hash": name, "version": "1"}}
+        inventory["libraries"]["new-required"]["depends"] = ["new-forward"]
+        inventory["required_libraries"].append("new-required")
+        plan = self.plan(inventory=inventory, sources=sources, changed_artifacts=[])
+        self.assertEqual(plan["selected"], ["new-forward", "new-required"])
+        self.assertEqual(plan["reused"], ["base", "consumer", "other"])
+        manual = self.plan(inventory=inventory, sources=sources, libraries="base", changed_artifacts=[])
+        self.assertEqual(manual["selected"], [])
+
+    def test_recipe_change_selects_only_its_library(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory["libraries"]["base"]["recipe_hash"] = "updated-recipe"
+        self.assertEqual(self.plan(inventory=inventory)["selected"], ["base"])
+
+    def test_timestamps_and_php_consumer_changes_do_not_select_libraries(self):
+        current = copy.deepcopy(self.sources)
+        current["base"]["source"]["time"] = 123
+        current["php-src"] = {"source": {"hash": "new PHP"}}
+        current["ext-redis"] = {"source": {"hash": "new extension"}}
+        current["go"] = {"source": {"hash": "new Go"}}
+        path = self.sdk / incremental.STATE
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        plan = self.plan(sources=current)
+        self.assertEqual(plan["selected"], [])
+        result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
+        self.assertFalse(result["built"])
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_manual_incompatible_seed_fails_without_full_rebuild(self):
+        with self.assertRaisesRegex(RuntimeError, "compatible recorded buildroot"):
+            self.plan(compatibility="different", libraries="base")
+        self.assertTrue(self.plan(compatibility="different")["full"])
+
+    def test_unknown_manual_library_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "Unknown managed library"):
+            self.plan(libraries="typo")
+
+    def test_runtime_abi_rebuild_expands_only_affected_unbuilt_consumers(self):
+        current = self.changed("base")
+        first = self.plan(sources=current)
+        first["rebuilt_libraries"] = ["base"]
+        next_state = incremental.record_state(first, self.manifest)
+        self.manifest["libraries"]["base"]["source_hash"] = current["base"]["source"]["hash"]
+        second = incremental.expansion(first, self.manifest, next_state, "base")
+        self.assertEqual(second["selected"], ["consumer"])
+        self.assertEqual(second["rebuilt_libraries"], ["base"])
+        second["rebuilt_libraries"] += ["consumer"]
+        latest = incremental.record_state(second, self.manifest)
+        retry = incremental.expansion(dict(second, rebuilt_libraries=[]), self.manifest, latest, "base")
+        self.assertEqual(retry["selected"], [])
+
+    def test_pending_marker_forces_consumer_even_when_cached_signatures_match(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["pending_rebuilds"] = {"consumer": {"libbase.so.1": "base"}}
+        first = dict(self.plan(), rebuilt_libraries=["consumer"])
+        second = incremental.expansion(first, manifest, self.state, "")
+        self.assertEqual(second["selected"], ["consumer"])
+        with self.assertRaisesRegex(RuntimeError, "still requires ABI rebuilds: consumer"):
+            incremental.validate_final(manifest)
+        manifest.pop("pending_rebuilds")
+        incremental.validate_final(manifest)
+
+    def test_malformed_pending_markers_are_rejected_during_planning_and_expansion(self):
+        for pending in [[], {"consumer": {}}, {"missing": {"libbase.so.1": "base"}},
+                        {"consumer": {"libbase.so.1": "missing"}}]:
+            with self.subTest(pending=pending):
+                manifest = dict(self.manifest, pending_rebuilds=pending)
+                with self.assertRaisesRegex(RuntimeError, "Invalid pending shared-library"):
+                    self.plan(manifest=manifest)
+                with self.assertRaisesRegex(RuntimeError, "Invalid pending shared-library"):
+                    incremental.expansion(self.plan(), manifest, self.state, "base")
+
+    def test_rebuilt_consumer_must_clear_its_pending_marker_before_state_commit(self):
+        manifest = dict(self.manifest, pending_rebuilds={"consumer": {"libbase.so.1": "base"}})
+        incremental.write(self.sdk / "shared-libraries.json", manifest)
+        before = (self.sdk / incremental.STATE).read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "Rebuilt libraries still require ABI rebuilds: consumer"):
+            incremental.execute(self.root, self.sdk, self.plan(manifest=manifest, libraries="consumer"),
+                                "rpm", [sys.executable, "-c", "pass"])
+        self.assertEqual((self.sdk / incremental.STATE).read_bytes(), before)
+
+    def test_failed_builder_restores_source_snapshot_and_leaves_state(self):
+        current = self.changed("base")
+        current["other"] = self.changed("other")["other"]
+        incremental.write(self.root / "downloads/.cache.json", current)
+        original = (self.root / "downloads/.cache.json").read_bytes()
+        state_before = (self.sdk / incremental.STATE).read_bytes()
+        plan = self.plan(sources=current, libraries="base")
+        with self.assertRaises(subprocess.CalledProcessError):
+            incremental.execute(self.root, self.sdk, plan, "rpm", [sys.executable, "-c", "raise SystemExit(7)"])
+        self.assertEqual((self.root / "downloads/.cache.json").read_bytes(), original)
+        self.assertEqual((self.sdk / incremental.STATE).read_bytes(), state_before)
+
+    def test_unselected_output_mutation_is_rejected_before_sdk_state_commit(self):
+        original = (self.sdk / incremental.STATE).read_bytes()
+        code = "from pathlib import Path;Path('buildroot/lib/libother.so.1').write_bytes(b'corrupt')"
+        with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+            incremental.execute(self.root, self.sdk, self.plan(sources=self.changed("base"), libraries="base"), "rpm", [sys.executable, "-c", code])
+        self.assertEqual((self.sdk / incremental.STATE).read_bytes(), original)
+
+    @unittest.skipUnless(shutil.which("cc") and shutil.which("readelf"), "native C toolchain unavailable")
+    def test_real_shared_objects_compatible_then_abi_break_compile_counters(self):
+        builder = self.root / "builder.py"
+        builder.write_text('''import hashlib,json,pathlib,subprocess,sys
+r=pathlib.Path(sys.argv[1]);p=json.loads(pathlib.Path(sys.argv[2]).read_text());m=json.loads((r/'buildroot/shared-libraries.json').read_text());counts=json.loads((r/'counts.json').read_text()) if (r/'counts.json').exists() else {};pending=m.get('pending_rebuilds',{})
+for name in p['selected']:
+ counts[name]=counts.get(name,0)+1
+ source=p['effective_sources'][p['inventory']['libraries'][name]['artifact']]['source']
+ version=source['version']; abi=2 if name=='base' and version=='3' else 1
+ c=r/(name+'.c');libs=[]
+ if name=='base':
+  c.write_text('int '+('base_new' if abi==2 else 'base')+'(void){return '+version+';}')
+ elif name=='consumer':
+  base=m['libraries']['base']['files'][0];symbol='base_new' if base.endswith('.2') else 'base';c.write_text('int '+symbol+'(void);int consumer(void){return '+symbol+'()+3;}');libs=['-L'+str(r/'buildroot/lib'),'-l:'+pathlib.Path(base).name]
+ else:c.write_text('int other(void){return 9;}')
+ relative='lib/lib'+name+'.so.'+str(abi);dest=r/'buildroot'/relative
+ subprocess.run(['cc','-shared','-fPIC','-Wl,-soname,'+dest.name,'-Wl,--enable-new-dtags,-rpath,/usr/lib/php-zts/lib','-o',str(dest),str(c),*libs],check=True)
+ for old in m['libraries'][name]['files']:
+  if old!=relative:
+   if name=='base':pending['consumer']={pathlib.Path(old).name:'base'}
+   (r/'buildroot'/old).unlink()
+ m['libraries'][name].update(source_hash=source['hash'],files=[relative],file_hashes={relative:hashlib.sha256(dest.read_bytes()).hexdigest()})
+ if name=='consumer':pending.pop(name,None)
+if pending:m['pending_rebuilds']=pending
+else:m.pop('pending_rebuilds',None)
+(r/'counts.json').write_text(json.dumps(counts));(r/'buildroot/shared-libraries.json').write_text(json.dumps(m));(r/'buildroot/.shared-library-ownership.json').write_text(json.dumps(m))
+''')
+        # Start with three actual DSOs, then assert compile counters and unrelated bytes/mtime.
+        seed = self.plan(libraries="base,consumer,other", invalid=list(self.graph))
+        plan_path = self.root / "plan.json"
+        incremental.write(plan_path, seed)
+        command = [sys.executable, str(builder), str(self.root), str(plan_path)]
+        incremental.execute(self.root, self.sdk, seed, "rpm", command)
+        (self.root / "counts.json").write_text("{}")
+        self.manifest = incremental.read(self.sdk / "shared-libraries.json")
+        self.state = incremental.read(self.sdk / incremental.STATE)
+        unchanged = {n: ((self.sdk / self.manifest["libraries"][n]["files"][0]).read_bytes(),
+                         (self.sdk / self.manifest["libraries"][n]["files"][0]).stat().st_mtime_ns) for n in ["consumer", "other"]}
+        current = self.changed("base", "2")
+        first = self.plan(sources=current)
+        incremental.write(plan_path, first)
+        incremental.execute(self.root, self.sdk, first, "rpm", command)
+        self.assertEqual(incremental.read(self.root / "counts.json"), {"base": 1})
+        for name, (contents, mtime) in unchanged.items():
+            path = self.sdk / self.manifest["libraries"][name]["files"][0]
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (contents, mtime))
+        # A SONAME/symbol change recompiles the reverse library in a separate pass, not the root twice.
+        self.manifest = incremental.read(self.sdk / "shared-libraries.json")
+        self.state = incremental.read(self.sdk / incremental.STATE)
+        first = self.plan(sources=self.changed("base", "3"))
+        incremental.write(plan_path, first)
+        incremental.execute(self.root, self.sdk, first, "rpm", command)
+        current_manifest = incremental.read(self.sdk / "shared-libraries.json")
+        self.assertEqual(current_manifest["libraries"]["base"]["files"], ["lib/libbase.so.2"])
+        self.assertEqual(current_manifest["pending_rebuilds"], {"consumer": {"libbase.so.1": "base"}})
+        with self.assertRaisesRegex(RuntimeError, "still requires ABI rebuilds"):
+            incremental.validate_final(current_manifest)
+        second = incremental.expansion(first, current_manifest, incremental.read(self.sdk / incremental.STATE), "base")
+        self.assertEqual(second["selected"], ["consumer"])
+        incremental.write(plan_path, second)
+        incremental.execute(self.root, self.sdk, second, "rpm", command)
+        incremental.validate_final(incremental.read(self.sdk / "shared-libraries.json"))
+        self.assertEqual(incremental.read(self.root / "counts.json"), {"base": 2, "consumer": 1})
+        dynamic = subprocess.check_output(["readelf", "-d", str(self.sdk / "lib/libconsumer.so.1")], text=True)
+        self.assertIn("Shared library: [libbase.so.2]", dynamic)
+        other = self.sdk / self.manifest["libraries"]["other"]["files"][0]
+        self.assertEqual((other.read_bytes(), other.stat().st_mtime_ns), unchanged["other"])
+
+
+if __name__ == "__main__":
+    unittest.main()

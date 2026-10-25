@@ -7,6 +7,7 @@ use staticphp\util\SharedLibraries;
 
 require dirname(__DIR__) . '/src/package.php';
 require dirname(__DIR__) . '/src/util/SharedLibraries.php';
+require dirname(__DIR__) . '/src/util/BuildPayload.php';
 require dirname(__DIR__) . '/src/package/library.php';
 
 function run(array $command): string
@@ -125,7 +126,7 @@ try {
     $package = new library($libraries, 'base');
     $config = $package->getFpmConfig();
     expect($package->getName() === 'php-zts-lib-base' && $package->getVersion() === '1.0', 'PHP-independent package identity changed');
-    expect($config['provides_unversioned'] === ['php-zts-lib-base-abi-1'] && $config['depends'] === [], 'Base library must provide only its private ABI and no PHP dependency');
+    expect($config['provides_unversioned'] === ['php-zts-lib-base-abi-1'] && $config['depends'] === ['php-zts-runtime-layout'], 'Base library must require its runtime layout without a PHP dependency');
     expect($config['files'][$temporary . '/lib/libbase.so.1'] === $runtime . '/libbase.so.1', 'Runtime library path incorrect');
     expect($config['files'][$temporary . '/assets/data.txt'] === '/usr/share/php-zts/base/data.txt', 'Runtime asset path incorrect');
     expect($config['files'][$temporary . '/abi/base.xml'] === '/usr/share/php-zts/libraries/abi/base/libbase.so.1.xml', 'ABI dump missing from package');
@@ -143,7 +144,9 @@ try {
     expect($package->getFpmConfig()['files'] === $config['files'], 'Preparing runtime payload twice changed staging paths');
 
     $libraries->setPackageVersion('base', 'deb', '1.0-3');
+    $manifestBeforePersist = hash_file('sha256', $temporary . '/shared-libraries.json');
     $libraries->persist();
+    expect(hash_file('sha256', $temporary . '/shared-libraries.json') === $manifestBeforePersist, 'Package revision persistence mutated the immutable SDK');
     $reloaded = SharedLibraries::load($temporary);
     expect($reloaded->getPackageVersion('base', 'deb') === '1.0-3', 'Resolved package revision did not survive manifest persistence');
     expect($reloaded->get('base')['source_hash'] === $manifest['libraries']['base']['source_hash'], 'Persisting package versions lost source identity');
@@ -162,6 +165,12 @@ try {
     $save($manifest);
     rejected(static fn () => SharedLibraries::load($temporary, true, '/usr/lib64/php-zts/lib'), 'expected');
     rejected(static fn () => $libraries->dependenciesForPackage([], 'rpm', null, ['missing']), 'Unknown declared');
+    foreach ([['top' => ['libbase.so.1' => 'base']], null, false] as $pending) {
+        $bad = $manifest;
+        $bad['pending_rebuilds'] = $pending;
+        $save($bad);
+        rejected(static fn () => SharedLibraries::load($temporary), 'dependent rebuilds');
+    }
     $bad = $manifest;
     unset($bad['libraries']['base']);
     unset($bad['libraries']['top']['depends']);

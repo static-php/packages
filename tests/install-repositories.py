@@ -49,13 +49,13 @@ else:
                               env=dict(self.environment, SPP_INSTALL_TYPE=package_type, **environment),
                               text=True, capture_output=True)
 
-    def test_debian_stream_and_common_repositories_are_signed_and_idempotent(self):
+    def test_debian_selected_stream_includes_libraries_without_an_extra_repository(self):
         for _ in range(2):
             result = self.run_installer('deb')
             self.assertEqual(result.returncode, 0, result.stderr)
         sources = self.root / 'etc/apt/sources.list.d'
-        self.assertEqual(len(list(sources.glob('*.list'))), 2)
-        for owner in ('86', 'libs'):
+        self.assertEqual(len(list(sources.glob('*.list'))), 1)
+        for owner in ('86',):
             expected = (f'deb [signed-by=/etc/apt/keyrings/henderkes{owner}.asc] '
                         f'http://fixture.invalid/api/packages/{owner}/debian php-zts main\n')
             self.assertEqual((sources / f'henderkes{owner}.list').read_text(), expected)
@@ -70,9 +70,10 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
         lines = repositories.read_text().splitlines()
         self.assertIn('https://dl-cdn.alpinelinux.org/alpine/v3.21/main', lines)
-        for owner in ('82', 'libs'):
+        for owner in ('82',):
             self.assertEqual(lines.count(f'http://fixture.invalid/api/packages/{owner}/alpine/main/php-zts'), 1)
             self.assertTrue((self.root / f'etc/apk/keys/forgejo-{owner}.rsa.pub').is_file())
+        self.assertNotIn('http://fixture.invalid/api/packages/libs/alpine/main/php-zts', lines)
 
     def test_key_download_failure_does_not_change_configuration(self):
         for package_type, relative_file in (('deb', 'etc/apt/sources.list.d/henderkes86.list'),
@@ -81,7 +82,7 @@ else:
                 original = self.root / relative_file
                 original.parent.mkdir(parents=True, exist_ok=True)
                 original.write_text('existing configuration\n')
-                result = self.run_installer(package_type, FAIL_OWNER='libs')
+                result = self.run_installer(package_type, FAIL_OWNER='86')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(original.read_text(), 'existing configuration\n')
                 self.assertFalse((self.root / 'etc/apt/keyrings/henderkes86.asc').exists())

@@ -31,6 +31,17 @@ def manifest(libraries=None):
 
 
 class SharedLibraryPlan(unittest.TestCase):
+    def test_pending_transition_is_available_only_for_intermediate_planning(self):
+        value = manifest({'fixture': library(soname='libfixture.so.2'), 'consumer': library(soname='libconsumer.so.1', depends=['fixture'])})
+        value['pending_rebuilds'] = {'consumer': {'libfixture.so.1': 'fixture'}}
+        for complete in [True, False]:
+            with self.subTest(complete=complete), self.assertRaisesRegex(RuntimeError, 'dependent rebuilds'):
+                planner['validate_manifest'](value, complete)
+        self.assertEqual(planner['validate_manifest'](value, allow_pending=True), value)
+        for pending in [[], {'unknown': {'libfixture.so.1': 'fixture'}}, {'consumer': {'libfixture.so.1': 'missing'}}]:
+            with self.subTest(pending=pending), self.assertRaisesRegex(RuntimeError, 'Invalid pending'):
+                planner['validate_manifest'](dict(value, pending_rebuilds=pending), allow_pending=True)
+
     def test_epoch_is_published_generation(self):
         previous = manifest({'fixture': library(epoch=7)})
         current = manifest({'fixture': library(version='1.1')})
@@ -228,8 +239,10 @@ class SharedLibraryPlan(unittest.TestCase):
             with patch.dict(namespace, {'compare': Mock(return_value=(manifest(), result))}):
                 planner['prepare'](args)
                 plan = json.loads(Path(args.output).read_text())
-                self.assertEqual(plan['php_requests']['8.4'], {'full': False, 'packages': ['curl']})
-                self.assertEqual(plan['php_requests']['8.5'], {'full': False, 'packages': []})
+                self.assertEqual(plan['php_requests']['8.4'], {'full': False, 'packages': ['curl'], 'compile': True,
+                                                             'reuse_payload': False, 'compile_full': False, 'compile_packages': ['curl']})
+                self.assertEqual(plan['php_requests']['8.5'], {'full': False, 'packages': [], 'compile': False,
+                                                             'reuse_payload': False, 'compile_full': False, 'compile_packages': []})
                 self.assertEqual(json.loads(Path(args.manifest_output).read_text())['libraries']['fixture']['package_versions']['deb'], '1.0-7')
                 args.mode = 'incremental'
                 args.packages = None
@@ -248,6 +261,103 @@ class SharedLibraryPlan(unittest.TestCase):
             args = argparse.Namespace(plan=str(plan), baseline_manifest=str(baseline))
             with self.assertRaisesRegex(RuntimeError, 'changed during'):
                 planner['cohort'](args)
+
+    def manual_plan(self, names=('fixture', 'other'), selected='fixture', rebuilt='', changed=(), breaking=(), packages=None, dependencies=None):
+        with TemporaryDirectory(prefix='shared-library-manual-') as directory:
+            temporary = Path(directory)
+            baseline = temporary / 'baseline'
+            (baseline / 'abi').mkdir(parents=True)
+            old = manifest({name: library(soname='lib' + name + '.so.1') for name in names})
+            if dependencies is not None:
+                old['consumers'] = {stream: sorted(dependencies.get(stream, {})) for stream in planner['STREAMS']}
+                old['consumer_dependencies'] = dependencies
+                old['consumer_versions'] = {stream: {name: '1.0-1' for name in names} for stream, names in old['consumers'].items()}
+            for name, entry in old['libraries'].items():
+                entry['published_version'] = '1.0-1'
+                (baseline / entry['abi_dump']['lib' + name + '.so.1']).write_text('<abi-corpus/>')
+            current = copy.deepcopy(old)
+            for name in changed:
+                current['libraries'][name]['source_hash'] = 'new-source'
+            if 'consumer' in current['libraries']:
+                current['libraries']['consumer']['depends'] = ['fixture']
+                old['libraries']['consumer']['depends'] = ['fixture']
+            (baseline / 'shared-libraries.json').write_text(json.dumps(old))
+            (temporary / 'current.json').write_text(json.dumps(current))
+            request = {'requests': {stream: {'full': True, 'packages': []} for stream in planner['STREAMS']},
+                       'libraries': ['other'], 'library_build_inputs': ['unrelated-tool']}
+            (temporary / 'request.json').write_text(json.dumps(request))
+            args = argparse.Namespace(manifest=str(temporary / 'current.json'), baseline=str(baseline),
+                                      request=str(temporary / 'request.json'), bootstrap=True, mode='full',
+                                      root=str(temporary), libraries=selected, rebuilt_libraries=rebuilt,
+                                      php_versions='8.4', packages=packages, type='deb',
+                                      manifest_output=str(temporary / 'annotated.json'), output=str(temporary / 'plan.json'))
+            comparison = {'schema': 1, 'bootstrap': False,
+                          'libraries': {name: {'status': 'breaking' if name in breaking else 'compatible'} for name in names}}
+            with patch.dict(namespace, {'compare': Mock(return_value=(current, comparison))}):
+                planner['prepare'](args)
+            return json.loads(Path(args.output).read_text())
+
+    def test_manual_library_bump_ignores_unrelated_snapshot_and_full_default(self):
+        plan = self.manual_plan()
+        self.assertEqual(plan['libraries'], ['fixture'])
+        self.assertFalse(any(value['full'] or value['packages'] for value in plan['php_requests'].values()))
+
+    def test_manual_library_set_includes_only_selected_and_actually_rebuilt_libraries(self):
+        plan = self.manual_plan(names=('fixture', 'other', 'consumer', 'headerconsumer'),
+                                selected='fixture,other', rebuilt='fixture,other,headerconsumer')
+        self.assertEqual(plan['libraries'], ['fixture', 'headerconsumer', 'other'])
+        self.assertFalse(plan['abi_break'])
+
+    def test_manual_abi_break_still_rebuilds_all_affected_php_streams(self):
+        plan = self.manual_plan(names=('fixture', 'consumer', 'other'), breaking=('fixture',))
+        self.assertTrue(plan['abi_break'])
+        self.assertEqual(plan['abi_rebuild_roots'], ['fixture'])
+        self.assertEqual(plan['libraries'], ['consumer', 'fixture'])
+        self.assertTrue(all(value == {'full': True, 'packages': [], 'compile': True, 'reuse_payload': False,
+                                     'compile_full': True, 'compile_packages': []} for value in plan['php_requests'].values()))
+
+    def test_abi_break_rebuilds_only_published_consumers_of_affected_libraries(self):
+        dependencies = {'8.4': {'php-zts-cli': ['other'], 'php-zts-imagick': ['fixture'], 'php-zts-redis': []},
+                        '8.5': {'php-zts-cli': ['other'], 'php-zts-curl': ['consumer']}}
+        plan = self.manual_plan(names=('fixture', 'consumer', 'other'), breaking=('fixture',), dependencies=dependencies)
+        self.assertEqual(plan['php_requests']['8.4'], {'full': False, 'packages': ['imagick'], 'compile': True,
+                         'reuse_payload': False, 'compile_full': False, 'compile_packages': ['imagick']})
+        self.assertEqual(plan['php_requests']['8.5']['compile_packages'], ['curl'])
+        self.assertFalse(plan['php_requests']['8.6']['compile'])
+        self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-imagick'])
+        self.assertEqual(plan['published_consumers']['8.4'], {'php-zts-imagick': '1.0-1'})
+
+    def test_abi_break_in_core_library_requires_core_build_but_only_affected_packages(self):
+        dependencies = {'8.4': {'php-zts-cli': ['fixture'], 'php-zts-fpm': ['fixture'], 'frankenphp': ['fixture'], 'php-zts-imagick': ['other']}}
+        plan = self.manual_plan(breaking=('fixture',), dependencies=dependencies)
+        request = plan['php_requests']['8.4']
+        self.assertTrue(request['compile_full'])
+        self.assertFalse(request['full'])
+        self.assertEqual(request['packages'], ['cli', 'fpm', 'frankenphp'])
+        self.assertEqual(request['compile_packages'], [])
+        self.assertFalse(plan['php_requests']['8.5']['compile'])
+
+    def test_missing_consumer_dependency_metadata_requires_one_full_stream_build(self):
+        value = manifest()
+        value['consumers'] = {'8.4': ['php-zts-cli', 'php-zts-imagick'], '8.5': ['php-zts-cli']}
+        value['consumer_dependencies'] = {'8.4': {'php-zts-cli': []}, '8.5': {'php-zts-cli': []}}
+        requests = planner['abi_consumers'](value, ['fixture'])
+        self.assertTrue(requests['8.4']['full'])
+        self.assertEqual(requests['8.4']['missing_metadata'], ['php-zts-imagick'])
+        self.assertFalse(requests['8.5']['full'])
+        self.assertEqual(requests['8.5']['packages'], [])
+
+    def test_manual_bump_rejects_unpublished_unselected_seed_changes(self):
+        with self.assertRaisesRegex(RuntimeError, 'outside the requested set: other'):
+            self.manual_plan(changed=('other',))
+
+    def test_manual_bump_rejects_unknown_rebuilt_libraries(self):
+        with self.assertRaisesRegex(RuntimeError, 'Unknown selected libraries: missing'):
+            self.manual_plan(rebuilt='missing')
+
+    def test_manual_library_and_php_package_requests_are_not_silently_combined(self):
+        with self.assertRaisesRegex(RuntimeError, 'Select libraries or PHP packages'):
+            self.manual_plan(packages='curl')
 
     def test_peer_baselines_reconcile_an_interrupted_publication(self):
         first = manifest({'fixture': library(version='1.1', epoch=2)})
@@ -293,11 +403,31 @@ class SharedLibraryPlan(unittest.TestCase):
         packages = [{'name': 'php-zts-cli', 'version': '2'}, {'name': 'php-zts-cli', 'version': '1'},
                     {'name': 'php-zts-cli-debuginfo', 'version': '2'}]
         listing = Mock(return_value=packages)
-        archs = Mock(side_effect=lambda host, owner, password, kind, name, version, strict: {'arm64'} if version == '2' else {'amd64'})
-        helper = {'get_remote_packages': listing, 'get_remote_package_archs': archs}
+        archives = Mock(side_effect=lambda host, owner, password, kind, name, version: [{'arch': 'arm64' if version == '2' else 'amd64'}])
+        helper = {'get_remote_packages': listing, 'remote_package_archives': archives}
         with patch.dict(namespace, {'native_compare': lambda kind, a, b: (a > b) - (a < b)}):
             self.assertEqual(planner['published_consumers'](helper, 'https://example.com', '84', 'consumer-secret', 'deb', 'amd64'), {'php-zts-cli': '1'})
         listing.assert_called_once_with('https://example.com', '84', 'consumer-secret', 'debian')
+
+    def test_published_consumer_dependency_metadata_is_bound_to_archive_identity(self):
+        value = {'schema': 1, 'name': 'php-zts-imagick', 'php_stream': '8.4',
+                 'architecture': 'x86_64', 'libraries': ['fixture']}
+        archives = [{'arch': 'amd64', 'consumer_metadata': value}]
+        helper = {'get_remote_packages': Mock(return_value=[{'name': 'php-zts-imagick', 'version': '1'}]),
+                  'remote_package_archives': Mock(return_value=archives)}
+        dependencies = {}
+        self.assertEqual(planner['published_consumers'](helper, 'https://example.com', '84', '', 'deb', 'amd64',
+                                                        dependencies=dependencies), {'php-zts-imagick': '1'})
+        self.assertEqual(dependencies, {'8.4': {'php-zts-imagick': ['fixture']}})
+        for field, invalid in [('name', 'php-zts-cli'), ('php_stream', '8.5'), ('architecture', 'aarch64'), ('libraries', ['fixture', 'fixture'])]:
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'does not match its package'):
+                planner['consumer_dependencies'](dict(value, **{field: invalid}), 'php-zts-imagick', '8.4', 'amd64')
+
+    def test_debian_hyphenated_package_names_resolve_to_actual_extension_components(self):
+        value = manifest()
+        value['consumers'] = {'8.4': ['php-zts-pdo-pgsql']}
+        value['consumer_dependencies'] = {'8.4': {'php-zts-pdo-pgsql': ['fixture']}}
+        self.assertEqual(planner['abi_consumers'](value, ['fixture'])['8.4']['packages'], ['pdo_pgsql'])
 
     def test_partial_published_library_inventory_remains_readable_for_recovery(self):
         partial = manifest({'fixture': library(depends=['not-uploaded-yet'])})

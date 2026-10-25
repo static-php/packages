@@ -13,15 +13,20 @@ import runpy
 import shutil
 import subprocess
 import sys
+import shlex
 import tarfile
 import tempfile
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 
 STREAMS = ['8.2', '8.3', '8.4', '8.5', '8.6']
 METADATA = 'usr/share/php-zts/libraries'
 ROOT = Path(__file__).resolve().parent
+ABI_DUMP_FLAGS = ('--no-corpus-path', '--no-show-locs')
+APK_ALIASES = runpy.run_path(str(ROOT.parent / '.github/actions/shared-libraries/apk-aliases.py'))
 
 
 def read_json(path):
@@ -42,6 +47,14 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def relative_path(value):
     path = PurePosixPath(value)
     if path.is_absolute() or '..' in path.parts or not path.parts or str(path) == '.':
@@ -56,9 +69,20 @@ def rooted(root, value):
     return path
 
 
-def validate_manifest(value, complete=True):
+def validate_manifest(value, complete=True, allow_pending=False):
     if value.get('schema') != 1 or value.get('linkage') != 'shared' or not isinstance(value.get('libraries'), dict):
         raise RuntimeError('Expected schema 1 shared-libraries.json')
+    pending = value.get('pending_rebuilds', {})
+    if not isinstance(pending, dict):
+        raise RuntimeError('Invalid pending shared-library rebuilds')
+    if pending and not allow_pending:
+        raise RuntimeError('Shared-library ABI transition still requires dependent rebuilds')
+    for consumer, dependencies in pending.items():
+        if consumer not in value['libraries'] or not isinstance(dependencies, dict) or not dependencies:
+            raise RuntimeError('Invalid pending shared-library consumer')
+        for soname, provider in dependencies.items():
+            if not isinstance(soname, str) or not re.fullmatch('[A-Za-z0-9_.+-]+', soname) or not isinstance(provider, str) or provider not in value['libraries']:
+                raise RuntimeError('Invalid pending shared-library dependency')
     owned = {}
     sonames = {}
     for identifier, library in value['libraries'].items():
@@ -91,21 +115,23 @@ def validate_manifest(value, complete=True):
     return value
 
 
-def manifest(path, complete=True):
-    return validate_manifest(read_json(path), complete)
+def manifest(path, complete=True, allow_pending=False):
+    return validate_manifest(read_json(path), complete, allow_pending)
 
 
 def fingerprint(value, inputs=()):
     stable = copy.deepcopy(value)
     stable.pop('generated_at', None)
+    stable.pop('baseline_origins', None)
     for library in stable['libraries'].values():
         library.pop('generated_at', None)
+        library.pop('published_debug_archive', None)
     extra = {}
     for name in sorted(inputs):
         path = Path(name)
         if not path.is_file():
             raise RuntimeError('Fingerprint input does not exist: ' + name)
-        extra[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        extra[name] = file_sha256(path)
     return digest({'manifest': stable, 'inputs': extra})
 
 
@@ -157,36 +183,222 @@ def defined_public_symbols(path):
     return public
 
 
-def dump_abi(root, identifier, library):
+def abi_debug_names(source):
+    reader = shutil.which('readelf')
+    if not reader:
+        return None
+    result = subprocess.run([reader, '--wide', '--string-dump=.gnu_debuglink', '--string-dump=.gnu_debugaltlink',
+                             '--string-dump=.debug_sup', '--notes', str(source)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, encoding='utf-8', errors='replace')
+    if result.returncode != 0:
+        return None
+    names = {source.name + '.debug'}
+    for line in result.stdout.splitlines():
+        match = re.match(r'\s*\[\s*[0-9a-fA-F]+\]\s+(.+?)\s*$', line)
+        if match:
+            names.add(PurePosixPath(match[1]).name)
+        build_id = re.search(r'Build ID:\s*([0-9a-fA-F]+)', line)
+        if build_id:
+            names.add(build_id[1][2:] + '.debug')
+    return names
+
+
+def abi_dump_inputs(root, path, flags=None, context=None, debug_scope='elf'):
+    source = rooted(root, path)
+    executable = shutil.which('abidw')
+    if not source.is_file() or not executable or not Path(executable).is_file():
+        return None
+    context = context if context is not None else {}
+    tools = context.get('tools')
+    if tools is not None:
+        for actual, previous in context.get('tool_stamps', {}).items():
+            try:
+                stat = Path(actual).stat()
+            except OSError:
+                tools = None
+                break
+            if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != previous:
+                tools = None
+                break
+        if context.get('tool_executable') != str(Path(executable).resolve()):
+            tools = None
+    if tools is None:
+        version = run([executable, '--version'])
+        dependencies = run(['ldd', executable])
+        if version.returncode != 0 or dependencies.returncode != 0:
+            return None
+        files = {'abidw': file_sha256(executable)}
+        paths = {str(Path(executable).resolve())}
+        for line in dependencies.stdout.splitlines():
+            matches = re.findall(r'(?:=>\s*)?(/[^\s()]+)', line)
+            for dependency in matches:
+                if not Path(dependency).is_file():
+                    return None
+                files[Path(dependency).name] = file_sha256(dependency)
+                paths.add(str(Path(dependency).resolve()))
+        tools = {'version': version.stdout.strip(), 'files': files}
+        context['tools'] = tools
+        context['tool_executable'] = str(Path(executable).resolve())
+        context['tool_stamps'] = {}
+        for actual in paths:
+            stat = Path(actual).stat()
+            context['tool_stamps'][actual] = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    debug = {}
+    hashes = context.setdefault('debug_hashes', {})
+    directories = [Path(root) / 'usr/lib/debug', Path(root) / 'debug', source.parent / '.debug']
+    candidates = []
+    for directory in directories:
+        if not directory.exists():
+            continue
+        if os.path.commonpath([str(directory.resolve()), str(Path(root).resolve())]) != str(Path(root).resolve()):
+            return None
+        if not directory.is_dir():
+            return None
+        candidates.extend(candidate for candidate in directory.rglob('*') if not candidate.is_dir())
+    if debug_scope == 'elf':
+        names = abi_debug_names(source)
+        reader = shutil.which('readelf')
+        if names is None or reader is None:
+            return None
+        candidates.extend(source.parent / name for name in names if (source.parent / name).is_file())
+        selected = set()
+        while True:
+            additions = {candidate for candidate in candidates if candidate.name in names or candidate.suffix in ['.dwo', '.dwp']} - selected
+            if not additions:
+                break
+            for candidate in additions:
+                extra = abi_debug_names(candidate)
+                if extra is None:
+                    return None
+                names.update(extra)
+            selected.update(additions)
+        candidates = selected
+    for candidate in sorted(set(candidates)):
+        relative = str(candidate.relative_to(root))
+        actual = rooted(root, relative)
+        if not actual.is_file():
+            return None
+        stat = actual.stat()
+        stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cached = hashes.get(relative)
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, file_sha256(actual))
+            hashes[relative] = cached
+        debug[relative] = cached[1]
+    result = {'schema': 1, 'source': {'path': str(relative_path(path)), 'sha256': file_sha256(source)},
+            'debug': debug, 'tools': tools, 'flags': list(ABI_DUMP_FLAGS if flags is None else flags),
+            'debug_directories': ['usr/lib/debug', 'debug']}
+    if debug_scope == 'elf':
+        result.update(debug_scope='elf', reader_sha256=file_sha256(reader))
+    return result
+
+
+def validate_abi_dump(output, source):
+    stack = []
+    typed = False
+    source_exports = False
+    for event, element in ET.iterparse(output, events=('start', 'end')):
+        if event == 'start':
+            if not stack and element.tag != 'abi-corpus':
+                raise RuntimeError('Invalid ABI dump: ' + str(output))
+            stack.append(element)
+            if len(stack) == 3 and stack[1].tag == 'abi-instr':
+                typed = True
+            continue
+        if (len(stack) == 3 and stack[1].tag in ('elf-function-symbols', 'elf-variable-symbols')
+                and element.tag == 'elf-symbol' and (element.get('name') not in ('_init', '_fini')
+                or element.get('type') not in ('func-type', 'no-type'))):
+            source_exports = True
+        stack.pop()
+        if stack:
+            stack[-1].remove(element)
+        element.clear()
+    if typed:
+        return False
+    exported = defined_public_symbols(source)
+    if exported or source_exports:
+        raise RuntimeError('ABI dump has no type information: ' + str(output))
+    return True
+
+
+def abi_dump_receipt(output, inputs):
+    return {'schema': 1, 'inputs': inputs, 'inputs_sha256': digest(inputs), 'output_sha256': file_sha256(output)}
+
+
+def write_abi_dump_receipt(output, inputs):
+    target = output.with_suffix(output.suffix + '.inputs.json')
+    descriptor, temporary = tempfile.mkstemp(prefix='.' + target.name + '-', dir=target.parent)
+    os.close(descriptor)
+    try:
+        write_json(temporary, abi_dump_receipt(output, inputs))
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def adopt_abi_dump(root, path, output, captured_inputs, expected_sha256):
+    current = abi_dump_inputs(root, path, debug_scope=captured_inputs.get('debug_scope', 'tree'))
+    if current is None or current != captured_inputs or file_sha256(output) != expected_sha256:
+        raise RuntimeError('Completed ABI dump differs from captured input proof')
+    validate_abi_dump(output, rooted(root, path))
+    reusable_inputs = abi_dump_inputs(root, path)
+    if reusable_inputs is None:
+        raise RuntimeError('Completed ABI dump has no reusable input proof')
+    write_abi_dump_receipt(output, reusable_inputs)
+
+
+def dump_abi(root, identifier, library, context=None):
     dumps = {}
     empty = []
     for name, path in sorted(soname_files(library).items()):
         relative = '{}/abi/{}/{}.xml'.format(METADATA, identifier, name)
         output = rooted(root, relative)
         output.parent.mkdir(parents=True, exist_ok=True)
-        result = run(['abidw', '--no-corpus-path', '--no-show-locs',
+        receipt = output.with_suffix(output.suffix + '.inputs.json')
+        inputs = abi_dump_inputs(root, path, context=context)
+        reusable = False
+        if inputs is not None and output.is_file() and receipt.is_file():
+            try:
+                proof = read_json(receipt)
+                reusable = (proof.get('schema') == 1 and proof.get('inputs') == inputs
+                            and proof.get('inputs_sha256') == digest(inputs)
+                            and proof.get('output_sha256') == file_sha256(output))
+                if reusable:
+                    is_empty = validate_abi_dump(output, rooted(root, path))
+            except (ValueError, OSError, RuntimeError, ET.ParseError):
+                reusable = False
+        if reusable:
+            dumps[name] = relative
+            if is_empty:
+                empty.append(name)
+            continue
+        receipt.unlink(missing_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix='.' + output.name + '-', dir=output.parent)
+        os.close(descriptor)
+        temporary = Path(temporary)
+        try:
+            result = run(['abidw', *ABI_DUMP_FLAGS,
                       '--debug-info-dir', str(Path(root) / 'usr/lib/debug'),
                       '--debug-info-dir', str(Path(root) / 'debug'),
-                      '--out-file', str(output), str(rooted(root, path))])
-        if result.returncode != 0 or not output.is_file():
-            raise RuntimeError('Cannot generate debug ABI for {} ({}): {}'.format(identifier, name, result.stderr.strip()))
-        corpus = ET.parse(output).getroot()
-        instructions = corpus.findall('abi-instr')
-        if corpus.tag != 'abi-corpus':
-            raise RuntimeError('Invalid ABI dump: ' + str(output))
-        if not any(list(instruction) for instruction in instructions):
-            exported = defined_public_symbols(rooted(root, path))
-            symbols = corpus.findall('elf-function-symbols/elf-symbol') + corpus.findall('elf-variable-symbols/elf-symbol')
-            source_exports = [symbol for symbol in symbols if symbol.get('name') not in ['_init', '_fini'] or symbol.get('type') not in ['func-type', 'no-type']]
-            if exported or source_exports:
-                raise RuntimeError('ABI dump has no type information: ' + str(output))
+                      '--out-file', str(temporary), str(rooted(root, path))])
+            if result.returncode != 0 or not temporary.is_file():
+                raise RuntimeError('Cannot generate debug ABI for {} ({}): {}'.format(identifier, name, result.stderr.strip()))
+            is_empty = validate_abi_dump(temporary, rooted(root, path))
+            if inputs is not None and abi_dump_inputs(root, path, context=context) != inputs:
+                raise RuntimeError('ABI input changed while generating dump: ' + name)
+            os.replace(temporary, output)
+            if inputs is not None:
+                write_abi_dump_receipt(output, inputs)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if is_empty:
             empty.append(name)
         dumps[name] = relative
     if not dumps:
         raise RuntimeError('Library has no SONAME-bearing ELF output: ' + identifier)
     library['abi_dump'] = dumps
     library['abi_empty'] = empty
-    library['abi_dump_hashes'] = {name: hashlib.sha256(rooted(root, path).read_bytes()).hexdigest() for name, path in dumps.items()}
+    library['abi_dump_hashes'] = {name: file_sha256(rooted(root, path)) for name, path in dumps.items()}
 
 
 def abi_difference(previous, current):
@@ -213,8 +425,9 @@ def compare(old, new, old_root, new_root, bootstrap=False):
             raise RuntimeError('ABI baseline {} differs from candidate'.format(key))
     annotated = copy.deepcopy(new)
     changes = {}
+    abi_context = {}
     for identifier, library in sorted(annotated['libraries'].items()):
-        dump_abi(new_root, identifier, library)
+        dump_abi(new_root, identifier, library, abi_context)
         previous = old['libraries'].get(identifier)
         status = 'added' if previous is None else 'compatible'
         if previous:
@@ -261,13 +474,64 @@ def reverse_closure(value, initial):
         selected.update(added)
 
 
+def consumer_dependencies(value, name, stream, architecture):
+    if value is None:
+        return None
+    normalized = lambda arch: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(arch, arch)
+    dependencies = value.get('libraries')
+    if (value.get('schema') != 1 or value.get('name') != name or value.get('php_stream') != stream
+            or normalized(value.get('architecture')) != normalized(architecture)
+            or not isinstance(dependencies, list)
+            or any(not isinstance(item, str) or not re.fullmatch('[a-z0-9][a-z0-9-]*', item) for item in dependencies)
+            or len(dependencies) != len(set(dependencies))):
+        raise RuntimeError('Published consumer dependency metadata does not match its package: ' + name)
+    return sorted(dependencies)
+
+
+def abi_consumers(value, roots):
+    affected_libraries = set(reverse_closure(value, roots))
+    result = {}
+    for stream in STREAMS:
+        names = set(value.get('consumers', {}).get(stream, []))
+        known = value.get('consumer_dependencies', {}).get(stream, {})
+        missing = names - known.keys()
+        affected = sorted(name for name in names if affected_libraries.intersection(known.get(name, [])))
+        inventory_missing = not value.get('consumer_inventory_complete', 'consumers' in value)
+        result[stream] = {'full': bool(missing) or inventory_missing, 'packages': [],
+                          'consumers': sorted(names) if missing else affected,
+                          'missing_metadata': sorted(missing)}
+        if missing or inventory_missing:
+            continue
+        for name in affected:
+            component = value.get('consumer_components', {}).get(stream, {}).get(name)
+            if component is not None:
+                result[stream]['packages'].append(component)
+                continue
+            if re.fullmatch(r'frankenphp(?:\d+(?:\.\d+)?)?', name):
+                result[stream]['packages'].append('frankenphp')
+                continue
+            if not name.startswith('php-zts-'):
+                result[stream]['full'] = True
+                result[stream]['consumers'] = sorted(names)
+                result[stream]['packages'] = []
+                break
+            component = name.removeprefix('php-zts-')
+            template = ROOT.parent / 'config/templates/craft.yml.twig'
+            match = re.search(r"set\s+base_shared_str\s*=\s*['\"]([^'\"]*)['\"]", template.read_text()) if template.is_file() else None
+            if match:
+                component = next((item for item in match[1].split(',') if item.replace('_', '-') == component.replace('_', '-')), component)
+            result[stream]['packages'].append(component)
+    return result
+
+
 def empty_manifest():
     return {'schema': 1, 'linkage': 'shared', 'libraries': {}}
 
 
 def merge_baselines(baselines, kind, destination):
     merged = empty_manifest()
-    divergent = set()
+    divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
+    drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
     for value, _ in baselines:
         for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']:
             if value.get(key):
@@ -282,6 +546,11 @@ def merge_baselines(baselines, kind, destination):
         identities = {digest({key: library.get(key) for key in ['version', 'source_hash', 'abi_epoch', 'published_version', 'abi_dump_hashes']}) if library is not None else 'missing'
                       for library, _ in candidates}
         if len(identities) > 1:
+            drift.add(identifier)
+        if any(library.get('published_debug_required') and not library.get('published_debug_archive') for library, _ in available):
+            drift.add(identifier)
+        abi_identities = {(library.get('abi_epoch', 1), library.get('abi_capability')) for library, _ in available}
+        if len(abi_identities) > 1:
             divergent.add(identifier)
         for candidate, candidate_root in available[1:]:
             left, right = candidate.get('published_version'), selected.get('published_version')
@@ -292,7 +561,9 @@ def merge_baselines(baselines, kind, destination):
                 ordering = native_compare(kind, left, right)
                 if ordering == 0 and (candidate.get('source_hash'), candidate.get('abi_epoch')) != (selected.get('source_hash'), selected.get('abi_epoch')):
                     raise RuntimeError('Published hosts have conflicting ABI metadata for the same package version: ' + identifier)
-                if ordering > 0:
+                if ordering == 0 and candidate.get('published_archive_sha256') and selected.get('published_archive_sha256') and candidate['published_archive_sha256'] != selected['published_archive_sha256']:
+                    raise RuntimeError('Published hosts have conflicting archive bytes for the same package version: ' + identifier)
+                if ordering > 0 or ordering == 0 and candidate.get('published_debug_archive') and not selected.get('published_debug_archive'):
                     selected, source = candidate, candidate_root
         if selected.get('abi_epoch', 1) < max(library.get('abi_epoch', 1) for library, _ in available):
             raise RuntimeError('Published ABI generation moved backwards: ' + identifier)
@@ -301,19 +572,71 @@ def merge_baselines(baselines, kind, destination):
             output = rooted(destination, relative)
             output.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(rooted(source, relative), output)
+        if selected.get('published_archive'):
+            relative = selected['published_archive']
+            output = rooted(destination, relative)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(rooted(source, relative), output)
     merged['consumers'] = {stream: sorted(set().union(*(set(value.get('consumers', {}).get(stream, [])) for value, _ in baselines))) for stream in STREAMS}
+    merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete', 'consumers' in value) for value, _ in baselines)
     merged['consumer_versions'] = {stream: {} for stream in STREAMS}
+    merged['consumer_dependencies'] = {stream: {} for stream in STREAMS}
+    for field in ['consumer_components', 'logical_replacements', 'consumer_native_metadata']:
+        merged[field] = {stream: {} for stream in STREAMS}
+        for value, _ in baselines:
+            for stream, records in value.get(field, {}).items():
+                for name, record in records.items():
+                    known = merged[field].setdefault(stream, {})
+                    if field == 'consumer_native_metadata' and name in known:
+                        ordering = native_compare(kind, record['version'], known[name]['version'])
+                        if ordering < 0:
+                            continue
+                        if ordering > 0:
+                            known[name] = copy.deepcopy(record)
+                            continue
+                    if name in known and known[name] != record:
+                        raise RuntimeError('Published consumer alias metadata disagrees: ' + name)
+                    known[name] = copy.deepcopy(record)
     for value, _ in baselines:
         for stream, packages in value.get('consumer_versions', {}).items():
             for name, version in packages.items():
                 versions = merged['consumer_versions'].setdefault(stream, {})
                 if name not in versions or native_compare(kind, version, versions[name]) > 0:
                     versions[name] = version
+    for stream, names in merged['consumers'].items():
+        for name in names:
+            records = [value.get('consumer_dependencies', {}).get(stream, {}).get(name)
+                       for value, _ in baselines if name in value.get('consumers', {}).get(stream, [])]
+            if records and all(isinstance(record, list) for record in records):
+                merged['consumer_dependencies'][stream][name] = sorted(set().union(*(set(record) for record in records)))
+    merged['migration_cutoffs'] = {}
+    for value, _ in baselines:
+        for stream, cutoffs in value.get('migration_cutoffs', {}).items():
+            known = merged['migration_cutoffs'].setdefault(stream, {})
+            for name, version in cutoffs.items():
+                if name in known and known[name] != version:
+                    raise RuntimeError('Published first-shared cutoffs disagree: ' + name)
+                known[name] = version
+    merged['publication_drift'] = sorted(drift)
+    layouts = [(value.get('runtime_layout'), root) for value, root in baselines]
+    layouts_present = [(layout, root) for layout, root in layouts if layout]
+    if layouts_present:
+        selected, source = layouts_present[0]
+        for layout, root in layouts_present[1:]:
+            ordering = native_compare(kind, layout['package_version'], selected['package_version'])
+            if ordering == 0 and layout['archive_sha256'] != selected['archive_sha256']:
+                raise RuntimeError('Conflicting published runtime layout archives')
+            if ordering > 0:
+                selected, source = layout, root
+        merged['runtime_layout'] = dict(selected, complete=all(layout and layout.get('complete', True) and layout['archive_sha256'] == selected['archive_sha256'] for layout, _ in layouts))
+        output = rooted(destination, selected['archive'])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(rooted(source, selected['archive']), output)
     return merged, divergent
 
 
 def prepare(args):
-    current = manifest(args.manifest)
+    current = manifest(args.manifest, allow_pending=True)
     baseline_path = Path(args.baseline) / 'shared-libraries.json'
     baselines = [(manifest(baseline_path, False) if baseline_path.is_file() else empty_manifest(), args.baseline)]
     if getattr(args, 'peer_baseline', None):
@@ -322,9 +645,23 @@ def prepare(args):
             raise RuntimeError('Missing peer baseline manifest: ' + str(peer))
         baselines.append((manifest(peer, False), args.peer_baseline))
     request = read_json(args.request) if args.request else {}
-    requested = request.get('requests', {})
-    bootstrap = args.bootstrap
-    if bootstrap and args.mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
+    metadata_libraries = set(request.get('library_package_requests', [])) | set(request.get('variant_package_requests', {}).get(args.type, []))
+    if metadata_libraries - current['libraries'].keys():
+        raise RuntimeError('Unknown library metadata requests: ' + ', '.join(sorted(metadata_libraries - current['libraries'].keys())))
+    specified = sorted(set(name.strip() for name in (args.libraries or '').split(',') if name.strip()))
+    rebuilt = set(name.strip() for name in (getattr(args, 'rebuilt_libraries', None) or '').split(',') if name.strip())
+    if specified and args.packages:
+        raise RuntimeError('Select libraries or PHP packages in one request, not both')
+    requested = {} if specified else request.get('requests', {})
+    package_requested = copy.deepcopy({} if specified else request.get('package_requests', {}))
+    if not specified:
+        for stream, entry in request.get('format_package_requests', {}).get(args.type, {}).items():
+            target = package_requested.setdefault(stream, {})
+            target['full'] = bool(target.get('full') or entry.get('full'))
+            target['packages'] = sorted(set(target.get('packages', [])) | set(entry.get('packages', [])))
+    mode = 'incremental' if specified else args.mode
+    bootstrap = args.bootstrap and not specified
+    if bootstrap and mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
         raise RuntimeError('Bootstrap requires full mode or a full migration request for every PHP stream')
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
         old, divergent = merge_baselines(baselines, args.type, temporary)
@@ -338,16 +675,25 @@ def prepare(args):
             versions.pop(args.type, None)
     comparison['candidate_fingerprint'] = fingerprint(annotated)
     sources = source_changes(old, current)
-    specified = [name.strip() for name in (args.libraries or '').split(',') if name.strip()]
-    unknown = set(specified) - current['libraries'].keys()
+    abi_roots = set(divergent) | {identifier for identifier, change in comparison['libraries'].items() if change['status'] in ['breaking', 'removed']}
+    unknown = (set(specified) | rebuilt) - current['libraries'].keys()
     if unknown:
         raise RuntimeError('Unknown selected libraries: ' + ', '.join(sorted(unknown)))
-    selected = set(current['libraries']) if args.mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | set(specified)
-    selected.update(divergent)
-    selected.update(identifier for identifier, change in comparison['libraries'].items() if change['status'] == 'breaking')
-    selected = reverse_closure(current, selected)
+    if specified:
+        selected = set(specified) | rebuilt
+        allowed = selected | set(reverse_closure(current, selected.intersection(abi_roots)))
+        unexpected = (set(sources) | abi_roots) - allowed
+        if unexpected:
+            raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
+    else:
+        selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
+        selected.update(metadata_libraries)
+        selected.update(old.get('publication_drift', []))
+    selected.update(reverse_closure(current, abi_roots))
+    selected = sorted(selected)
     breaking = bool(divergent) or any(item['status'] in ['breaking', 'removed'] for item in comparison['libraries'].values())
-    force_all = comparison['bootstrap'] or breaking
+    force_all = comparison['bootstrap']
+    abi_requests = abi_consumers(old, abi_roots) if breaking else {}
     streams = set(name.strip() for name in (args.php_versions or ','.join(STREAMS)).split(',') if name.strip())
     if streams - set(STREAMS):
         raise RuntimeError('Unknown PHP streams: ' + ', '.join(sorted(streams - set(STREAMS))))
@@ -355,26 +701,53 @@ def prepare(args):
     php = {}
     for stream in STREAMS:
         if force_all:
-            php[stream] = {'full': True, 'packages': []}
-        elif stream not in streams:
-            php[stream] = {'full': False, 'packages': []}
-        elif args.mode == 'full':
-            php[stream] = {'full': not bool(package_filter), 'packages': package_filter}
+            php[stream] = {'full': True, 'packages': [], 'compile': True, 'reuse_payload': False, 'compile_full': True, 'compile_packages': []}
+        elif stream not in streams and not (abi_requests.get(stream, {}).get('full') or abi_requests.get(stream, {}).get('packages')):
+            php[stream] = {'full': False, 'packages': [], 'compile': False, 'reuse_payload': False, 'compile_full': False, 'compile_packages': []}
+        elif mode == 'full':
+            php[stream] = {'full': not bool(package_filter), 'packages': package_filter, 'compile': True, 'reuse_payload': False,
+                           'compile_full': not bool(package_filter), 'compile_packages': package_filter}
         else:
             entry = requested.get(stream, {})
-            php[stream] = {'full': bool(entry.get('full')) and not bool(package_filter),
-                           'packages': package_filter or sorted(set(entry.get('packages', [])))}
+            packaging = package_requested.get(stream, {})
+            compiling = bool(entry.get('full') or entry.get('packages') or package_filter and not (packaging.get('full') or packaging.get('packages')))
+            full = bool(entry.get('full') or packaging.get('full')) and not bool(package_filter)
+            packages = package_filter or sorted(set(entry.get('packages', [])) | set(packaging.get('packages', [])))
+            php[stream] = {'full': full, 'packages': packages, 'compile': compiling,
+                           'reuse_payload': not compiling and bool(full or packages),
+                           'compile_full': compiling and bool(entry.get('full')) and not bool(package_filter),
+                           'compile_packages': package_filter if compiling and package_filter else sorted(set(entry.get('packages', [])))}
+        if breaking and not force_all:
+            affected = abi_requests[stream]
+            entry = php[stream]
+            entry['full'] |= affected['full']
+            entry['packages'] = [] if entry['full'] else sorted(set(entry['packages']) | set(affected['packages']))
+            if affected['full'] or affected['packages']:
+                entry['compile'] = True
+                entry['reuse_payload'] = False
+                entry['compile_full'] |= affected['full'] or bool(set(affected['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'}))
+                entry['compile_packages'] = [] if entry['compile_full'] else sorted(set(entry['compile_packages']) | set(affected['packages']))
     selected = [identifier for identifier in selected if identifier in current['libraries']]
     plan = {'schema': 1, 'type': args.type, 'libraries': selected, 'removed_libraries': sorted(set(old['libraries']) - set(current['libraries'])),
-            'abi_break': breaking, 'bootstrap': comparison['bootstrap'], 'baseline_fingerprint': fingerprint(baselines[0][0]),
+            'abi_break': breaking, 'abi_rebuild_roots': sorted(abi_roots), 'bootstrap': comparison['bootstrap'], 'baseline_fingerprint': fingerprint(baselines[0][0]),
             'baseline_fingerprints': sorted(set(fingerprint(value) for value, _ in baselines)),
+            'baseline_states': [value for value, _ in baselines],
             'divergent_libraries': sorted(divergent),
             'candidate_fingerprint': comparison['candidate_fingerprint'], 'php_requests': php,
+            'candidate_environment': {key: annotated.get(key) for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']},
             'expected_members': ['php-zts-lib-' + identifier for identifier in selected],
-            'expected_consumers': {stream: old.get('consumers', {}).get(stream, []) for stream in STREAMS} if force_all else {},
+            'expected_consumers': {stream: old.get('consumers', {}).get(stream, []) if force_all else abi_requests.get(stream, {}).get('consumers', []) for stream in STREAMS} if force_all or breaking else {},
+            'abi_consumer_requests': abi_requests,
+            'abi_core_rebuild_streams': sorted(stream for stream, entry in abi_requests.items()
+                                             if entry['full'] or set(entry['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'})),
             'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes', 'abi_empty']} for identifier in selected},
             'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
-            'published_consumers': old.get('consumer_versions', {}) if force_all else {},
+            'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']}
+                                    for identifier in old.get('publication_drift', []) if identifier in selected and identifier not in sources and identifier not in abi_roots and identifier not in metadata_libraries},
+            'library_package_requests': sorted(metadata_libraries.intersection(selected)),
+            'published_consumers': {stream: {name: version for name, version in versions.items()
+                                           if force_all or name in abi_requests.get(stream, {}).get('consumers', [])}
+                                    for stream, versions in old.get('consumer_versions', {}).items()} if force_all or breaking else {},
             'comparison': comparison['libraries']}
     if plan['removed_libraries']:
         raise RuntimeError('Library removal requires an explicit package migration: ' + ', '.join(plan['removed_libraries']))
@@ -382,19 +755,19 @@ def prepare(args):
     write_json(args.output, plan)
 
 
-def metadata_entries(archive):
+def metadata_entries(archive, prefix=METADATA):
     with tarfile.open(fileobj=archive, mode='r|*', ignore_zeros=True) as data:
         for member in data:
             name = member.name[2:] if member.name.startswith('./') else member.name
             name = name.lstrip('/')
-            if not name.startswith(METADATA + '/'):
+            if not name.startswith(prefix + '/'):
                 continue
             relative_path(name)
             if member.isfile():
                 yield name, data.extractfile(member).read()
 
 
-def cpio_entries(data):
+def cpio_entries(data, prefix=METADATA):
     offset = 0
     while offset + 110 <= len(data):
         header = data[offset:offset + 110]
@@ -410,7 +783,7 @@ def cpio_entries(data):
             return
         if start + size > len(data):
             raise RuntimeError('Truncated RPM cpio archive')
-        if name.startswith(METADATA + '/'):
+        if name.startswith(prefix + '/'):
             relative_path(name)
             mode = int(header[14:22], 16)
             if mode & 0o170000 == 0o100000:
@@ -434,6 +807,187 @@ def extract_metadata(path, kind, destination):
         output.write_bytes(content)
         found = True
     return found
+
+
+def archive_runtime_json(path, kind, relative):
+    prefix = str(PurePosixPath(relative).parent)
+    if kind == 'rpm':
+        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]), prefix)
+    elif kind == 'deb':
+        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])), prefix)
+    else:
+        entries = metadata_entries(gzip.GzipFile(filename=str(path)), prefix)
+    for name, content in entries:
+        if name == relative:
+            if len(content) > 1024 * 1024:
+                raise RuntimeError('Oversized runtime metadata')
+            value = json.loads(content)
+            if value.get('schema') != 1:
+                raise RuntimeError('Invalid runtime metadata')
+            return value
+    return None
+
+
+def archive_migration_cutoffs(path, kind):
+    value = archive_runtime_json(path, kind, 'usr/share/php-zts/migration/cutoffs.json')
+    if value is not None and not isinstance(value.get('formats'), dict):
+        raise RuntimeError('Invalid migration cutoffs')
+    return value
+
+
+def retain_archive(root, path, filename):
+    if PurePosixPath(filename).name != filename:
+        raise RuntimeError('Invalid published archive filename')
+    relative = 'archives/' + filename
+    output = rooted(root, relative)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, output)
+    return relative, file_sha256(output)
+
+
+def archive_identity(path, kind):
+    if kind == 'rpm':
+        rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+        package = rpm['local_package'](path)
+        return package['name'], package['evr'], package['arch']
+    helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+    return helper['package_metadata'](path, 'debian' if kind == 'deb' else 'alpine')
+
+
+def layout_fingerprint(kind):
+    script = 'define("BASE_PATH", $argv[1]); require BASE_PATH . "/vendor/autoload.php"; echo (new staticphp\\package\\runtime_layout())->sourceHash($argv[2]);'
+    value = subprocess.check_output(['php', '-r', script, str(ROOT.parent), kind], universal_newlines=True).strip()
+    if not re.fullmatch('[a-f0-9]{64}', value):
+        raise RuntimeError('Cannot fingerprint the runtime layout recipe')
+    return value
+
+
+def stage_debug_archive(record, destination):
+    kind = record['type']
+    with tempfile.TemporaryDirectory(prefix='shared-library-debug-retry-') as temporary:
+        path = Path(temporary) / ('archive.' + kind)
+        filename = None
+        if kind == 'rpm':
+            relative = relative_path(record['location'])
+            if record.get('base_url'):
+                url = record['base_url'].rstrip('/') + '/' + str(relative)
+                request = urllib.request.Request(url, headers={'User-Agent': 'APT-HTTP/1.3 (2.6.1)'})
+                with urllib.request.urlopen(request, timeout=120) as response, path.open('wb') as output:
+                    shutil.copyfileobj(response, output, 1024 * 1024)
+            else:
+                remote = str(PurePosixPath(record['remote_directory']) / relative)
+                with path.open('wb') as output:
+                    result = subprocess.run(['ssh', record['host'], 'cat ' + shlex.quote(remote)], stdout=output, stderr=subprocess.PIPE)
+                if result.returncode:
+                    raise RuntimeError('Cannot read matching published library debuginfo')
+            filename = relative.name
+            if record.get('checksum'):
+                rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+                rpm['same_archive']({'name': record['name'], 'evr': record['package_version'], 'path': str(path)}, record)
+        else:
+            import requests
+            helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+            package_type = 'debian' if kind == 'deb' else 'alpine'
+            password = os.environ.get(record.get('password_env') or '', '')
+            files = helper['get_remote_package_files'](record['host'], record['owner'], password, package_type, record['name'], record['package_version'])
+            for file in files:
+                if not file.get('name', '').endswith('.' + kind):
+                    continue
+                url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(record['host'].rstrip('/'), quote(record['owner'], safe=''), package_type,
+                                                               quote(record['name'], safe=''), quote(record['package_version'], safe=''), file['id'])
+                with requests.get(url, auth=(record['owner'], password), timeout=120, stream=True) as response:
+                    response.raise_for_status()
+                    with path.open('wb') as output:
+                        for chunk in response.iter_content(1024 * 1024):
+                            output.write(chunk)
+                actual = archive_identity(path, kind)
+                if actual[:2] != (record['name'], record['package_version']):
+                    raise RuntimeError('Matching library debuginfo headers differ from registry')
+                if normalized_arch(actual[2], kind) == normalized_arch(record['architecture'], kind):
+                    filename = file['name']
+                    break
+        if filename is None or PurePosixPath(filename).name != filename:
+            raise RuntimeError('Cannot locate matching published library debuginfo')
+        name, version, arch = archive_identity(path, kind)
+        if name != record['name'] or native_compare(kind, version, record['package_version']) != 0 or normalized_arch(arch, kind) != normalized_arch(record['architecture'], kind):
+            raise RuntimeError('Matching library debuginfo archive identity differs')
+        digest = file_sha256(path)
+        output = Path(destination) / filename
+        if output.exists() and file_sha256(output) != digest:
+            raise RuntimeError('Matching library debuginfo collides with another archive')
+        if not output.exists():
+            shutil.copyfile(path, output)
+        return {'path': str(output), 'sha256': digest}
+
+
+def stage_publication_retries(args):
+    plan = read_json(args.plan)
+    kind = plan['type']
+    value = manifest(args.manifest)
+    destination = Path(args.destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    baselines = [(manifest(path, False), Path(path).parent) for path in args.baseline_manifest]
+    copied = []
+    identifiers = []
+    for identifier, retry in sorted(plan.get('publication_retries', {}).items()):
+        library = value['libraries'].get(identifier)
+        if not library or any(library.get(key) != retry.get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']):
+            raise RuntimeError('Publication retry no longer matches the SDK: ' + identifier)
+        selected = None
+        selected_metadata = None
+        for baseline, root in baselines:
+            package = baseline['libraries'].get(identifier, {})
+            if package.get('published_archive_sha256') != retry.get('published_archive_sha256') or not package.get('published_archive'):
+                continue
+            source = rooted(root, package['published_archive'])
+            if source.is_file() and file_sha256(source) == retry['published_archive_sha256']:
+                selected = source
+                selected_metadata = package
+                if not package.get('published_debug_required') or package.get('published_debug_archive'):
+                    break
+        if selected is None:
+            raise RuntimeError('Cannot find the exact published archive for retry: ' + identifier)
+        if selected_metadata.get('published_debug_required') and not selected_metadata.get('published_debug_archive'):
+            continue
+        name, version, arch = archive_identity(selected, kind)
+        if name != 'php-zts-lib-' + identifier or native_compare(kind, version, retry['published_version']) != 0 or normalized_arch(arch, kind) != normalized_arch(value['architecture'], kind):
+            raise RuntimeError('Publication retry archive headers differ: ' + identifier)
+        output = destination / selected.name
+        if output.exists() and file_sha256(output) != retry['published_archive_sha256']:
+            raise RuntimeError('Publication retry collides with a rebuilt archive: ' + identifier)
+        if not output.exists():
+            shutil.copyfile(selected, output)
+        library.setdefault('package_versions', {})[kind] = retry['published_version']
+        identifiers.append(identifier)
+        copied.append({'path': str(output), 'sha256': retry['published_archive_sha256']})
+        if selected_metadata.get('published_debug_archive'):
+            copied.append(stage_debug_archive(selected_metadata['published_debug_archive'], destination))
+    layouts = [(baseline.get('runtime_layout'), root) for baseline, root in baselines]
+    expected_hash = getattr(args, 'layout_source_hash', None) or layout_fingerprint(kind)
+    present = [(layout, root) for layout, root in layouts if layout]
+    matching = [(layout, root) for layout, root in present if layout.get('source_hash') == expected_hash and layout.get('type') == kind]
+    matching.sort(key=functools.cmp_to_key(lambda a, b: native_compare(kind, a[0]['package_version'], b[0]['package_version'])), reverse=True)
+    layout_required = not bool(matching)
+    if matching and any(native_compare(kind, layout['package_version'], matching[0][0]['package_version']) > 0 for layout, _ in present):
+        layout_required = True
+    if not layout_required and not all(layout and layout.get('complete', True) and layout.get('archive_sha256') == matching[0][0]['archive_sha256'] for layout, _ in layouts):
+        layout, root = matching[0]
+        source = rooted(root, layout['archive'])
+        if file_sha256(source) != layout['archive_sha256']:
+            raise RuntimeError('Runtime layout retry archive checksum mismatch')
+        name, version, arch = archive_identity(source, kind)
+        if name != 'php-zts-runtime-layout' or native_compare(kind, version, layout['package_version']) != 0 or arch not in ['all', 'noarch'] and normalized_arch(arch, kind) != normalized_arch(value['architecture'], kind):
+            raise RuntimeError('Runtime layout retry archive headers differ')
+        output = destination / source.name
+        if output.exists() and file_sha256(output) != layout['archive_sha256']:
+            raise RuntimeError('Runtime layout retry collides with another archive')
+        if not output.exists():
+            shutil.copyfile(source, output)
+        copied.append({'path': str(output), 'sha256': layout['archive_sha256']})
+    write_json(args.manifest_output, value)
+    write_json(args.output, {'schema': 1, 'copied_archives': copied, 'retry_libraries': identifiers,
+                            'layout_required': layout_required,
+                            'remaining_libraries': sorted(set(plan.get('libraries', [])) - set(identifiers))})
 
 
 def package_provides(path, kind):
@@ -471,25 +1025,94 @@ def normalized_arch(arch, kind):
     return arch
 
 
-def published_consumers(helper, host, owner, password, kind, architecture):
+def published_consumers(helper, host, owner, password, kind, architecture, migration=None, dependencies=None, components=None, replacements=None, native_metadata=None):
     package_type = 'debian' if kind == 'deb' else 'alpine'
     packages = helper['get_remote_packages'](host, owner, password, package_type)
     result = {}
-    names = {package['name'] for package in packages if not package['name'].endswith('-debuginfo')}
-    for name in sorted(names):
+    names = {package['name'] for package in packages if not package['name'].endswith('-debuginfo')
+             and not package['name'].startswith('php-zts-lib-') and package['name'] != 'php-zts-runtime-layout'}
+    selected = {}
+    for name in sorted(names, key=lambda name: (not name.endswith('-cli'), name)):
         candidates = [package for package in packages if package['name'] == name]
         candidates.sort(key=functools.cmp_to_key(lambda a, b: native_compare(kind, a['version'], b['version'])), reverse=True)
         for candidate in candidates:
-            archs = helper['get_remote_package_archs'](host, owner, password, package_type, name, candidate['version'], strict=True)
+            archives = helper['remote_package_archives'](host, owner, password, package_type, name, candidate['version'])
+            archs = {archive['arch'] for archive in archives}
             if not archs:
                 raise RuntimeError('Cannot determine published consumer architectures: ' + name)
             if architecture in archs or archs.intersection({'all', 'noarch'}):
                 result[name] = candidate['version']
+                selected[name] = [archive for archive in archives if archive['arch'] == architecture or archive['arch'] in ('all', 'noarch')]
                 break
+    stream = owner[0] + '.' + owner[1:]
+    if kind == 'apk':
+        core = next((record.get('native_metadata') for name, records in selected.items() if name.endswith('-cli') for record in records), None)
+        for name, records in list(selected.items()):
+            logical = APK_ALIASES['logical_name'](name)
+            if logical == name or core is None or '!' + logical + '>0' not in core.get('depends', []):
+                continue
+            for record in records:
+                APK_ALIASES['verify_alias'](record.get('native_metadata', {}), record.get('consumer_metadata'), core)
+            result.pop(logical, None)
+            selected.pop(logical, None)
+            if replacements is not None:
+                replacements.setdefault(stream, {})[logical] = name
+    for name, records in selected.items():
+        if dependencies is not None:
+            values = [consumer_dependencies(record.get('consumer_metadata'), name, stream, architecture) for record in records]
+            if values and all(value is not None for value in values):
+                dependencies.setdefault(stream, {})[name] = sorted(set().union(*(set(value) for value in values)))
+        for record in records:
+            data = record.get('consumer_metadata') or {}
+            if components is not None and data.get('logical_name') != name and data.get('extension'):
+                components.setdefault(stream, {})[name] = data['extension']
+            if native_metadata is not None and record.get('native_metadata'):
+                native_metadata.setdefault(stream, {})[name] = record['native_metadata']
+            data = record.get('migration_cutoffs')
+            if migration is not None and name == 'php-zts-cli' and record['arch'] == architecture and data:
+                if data.get('php_stream') != stream:
+                    raise RuntimeError('Published CLI migration metadata has the wrong PHP stream')
+                migration[stream] = data['formats'].get(kind, {})
     return result
 
 
-def baseline(args):
+def published_rpm_consumer_index(reader, packages, architecture):
+    namespace = '{http://linux.duke.edu/metadata/repo}'
+    metadata = ET.fromstring(reader('repodata/repomd.xml'))
+    entries = [entry for entry in metadata.findall(namespace + 'data') if entry.get('type') == 'php-zts-consumers']
+    if not entries:
+        return {}
+    if len(entries) != 1:
+        raise RuntimeError('Conflicting published consumer inventory metadata')
+    entry = entries[0]
+    location = entry.find(namespace + 'location').get('href')
+    content = reader(str(relative_path(location)))
+    checksum = entry.find(namespace + 'checksum')
+    algorithm = {'sha': 'sha1'}.get(checksum.get('type'), checksum.get('type'))
+    if algorithm not in ('sha256', 'sha512', 'sha1') or hashlib.new(algorithm, content).hexdigest() != checksum.text:
+        raise RuntimeError('Published consumer inventory checksum differs')
+    if content.startswith(b'\x1f\x8b'):
+        with gzip.GzipFile(fileobj=io.BytesIO(content)) as stream:
+            content = stream.read(16 * 1024 * 1024 + 1)
+    if len(content) > 16 * 1024 * 1024:
+        raise RuntimeError('Oversized published consumer inventory')
+    value = json.loads(content)
+    if (value.get('schema') != 1 or value.get('type') != 'rpm' or value.get('architecture') != architecture
+            or not isinstance(value.get('packages'), dict)):
+        raise RuntimeError('Invalid published consumer inventory')
+    result = {}
+    for filename, record in value['packages'].items():
+        package = next((item for item in packages if PurePosixPath(item.get('location', '')).name == filename), None)
+        if package is None or any(record.get(key) != package.get(remote) for key, remote in [('name', 'name'), ('version', 'evr'), ('arch', 'arch')]):
+            raise RuntimeError('Published consumer inventory differs from primary package identity')
+        checksum = package.get('checksum', {})
+        if checksum.get('type') != 'sha256' or checksum.get('value') != record.get('sha256'):
+            raise RuntimeError('Published consumer inventory differs from primary archive digest')
+        result[(record['name'], record['version'], record['arch'])] = record
+    return result
+
+
+def baseline_single(args):
     destination = Path(args.output)
     destination.mkdir(parents=True, exist_ok=True)
     if any(destination.iterdir()):
@@ -498,16 +1121,27 @@ def baseline(args):
     selected = {}
     consumers = {stream: set() for stream in STREAMS}
     consumer_versions = {stream: {} for stream in STREAMS}
+    dependencies = {stream: {} for stream in STREAMS}
+    components = {stream: {} for stream in STREAMS}
+    replacements = {stream: {} for stream in STREAMS}
+    native_metadata = {stream: {} for stream in STREAMS}
+    migration = {}
+    layout_metadata = None
     with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
         temporary = Path(temporary)
         if args.type == 'rpm':
-            if not args.remote_directory:
-                raise RuntimeError('RPM baseline requires --remote-directory')
             rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
-            reader = lambda location, missing_ok=False: rpm['read_remote_file'](args.host, args.remote_directory, location, missing_ok)
+            if getattr(args, 'base_url', None):
+                reader = lambda location, missing_ok=False: rpm['read_http_file'](args.base_url, location, missing_ok)
+            elif args.host and args.remote_directory:
+                reader = lambda location, missing_ok=False: rpm['read_remote_file'](args.host, args.remote_directory, location, missing_ok)
+            else:
+                raise RuntimeError('RPM baseline requires --base-url or --host and --remote-directory')
             packages = rpm['published_packages'](reader)
+            consumer_index = published_rpm_consumer_index(reader, packages, architecture)
             for package in packages:
-                if package['arch'] == architecture and not package['name'].startswith('php-zts-lib-'):
+                if (package['arch'] == architecture and not package['name'].startswith('php-zts-lib-')
+                        and not package['name'].endswith('-debuginfo') and package['name'] != 'php-zts-runtime-layout'):
                     stream = rpm['php_stream'](package['version'])
                     if stream in consumers:
                         consumers[stream].add(package['name'])
@@ -516,7 +1150,7 @@ def baseline(args):
                             versions[package['name']] = package['evr']
             for package in packages:
                 name = package['name']
-                if not name.startswith('php-zts-lib-') or name.endswith('-debuginfo') or package['arch'] != architecture:
+                if (not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout') or name.endswith('-debuginfo') or package['arch'] not in [architecture, 'noarch']:
                     continue
                 if name not in selected or native_compare('rpm', package['evr'], selected[name]['evr']) > 0:
                     selected[name] = package
@@ -525,8 +1159,60 @@ def baseline(args):
                 if not package.get('location'):
                     raise RuntimeError('Published RPM has no location')
                 path.write_bytes(reader(package['location']))
-                if not extract_metadata(path, 'rpm', destination):
+                actual = rpm['local_package'](path)
+                if any(actual.get(key) != package.get(key) for key in ['name', 'arch', 'evr']):
+                    raise RuntimeError('Published RPM headers do not match primary metadata')
+                if package.get('checksum'):
+                    rpm['same_archive'](dict(actual, path=str(path)), package)
+                package['archive'], package['archive_sha256'] = retain_archive(destination, path, PurePosixPath(package['location']).name)
+                debug = next((item for item in packages if item['name'] == package['name'] + '-debuginfo' and item['evr'] == package['evr'] and item['arch'] == package['arch']), None)
+                package['debug_required'] = any(item['name'] == package['name'] + '-debuginfo' and item['arch'] == package['arch'] for item in packages)
+                if debug:
+                    package['debug_archive'] = {'type': 'rpm', 'name': debug['name'], 'package_version': debug['evr'],
+                                                'architecture': debug['arch'], 'location': debug['location'], 'checksum': debug.get('checksum'),
+                                                'base_url': getattr(args, 'base_url', None), 'host': args.host, 'remote_directory': args.remote_directory}
+                if package['name'] == 'php-zts-runtime-layout':
+                    layout_metadata = archive_runtime_json(path, 'rpm', 'usr/share/php-zts/runtime-layout.json')
+                    if layout_metadata is None:
+                        raise RuntimeError('Published runtime layout has no metadata')
+                    layout_metadata.update(package_version=package['evr'], archive=package['archive'], archive_sha256=package['archive_sha256'], complete=True)
+                elif not extract_metadata(path, 'rpm', destination):
                     raise RuntimeError('Published library has no ABI metadata: ' + package['name'])
+            for stream, versions in consumer_versions.items():
+                shared = any(package['name'] == 'php-zts-cli' and package['evr'] == versions.get('php-zts-cli')
+                             and any(name.startswith('php-zts-shared-runtime') for name in package.get('provides', [])) for package in packages)
+                if not shared:
+                    continue
+                for name, version in versions.items():
+                    package = next(package for package in packages if package['name'] == name and package['evr'] == version and package['arch'] == architecture)
+                    indexed = consumer_index.get((name, version, architecture))
+                    if indexed is not None:
+                        value = consumer_dependencies(indexed.get('consumer_metadata'), name, stream, architecture)
+                        if value is not None:
+                            dependencies[stream][name] = value
+                        if name == 'php-zts-cli' and indexed.get('migration_cutoffs') is not None:
+                            data = indexed['migration_cutoffs']
+                            if data.get('php_stream') != stream or not isinstance(data.get('formats'), dict):
+                                raise RuntimeError('Published CLI inventory migration metadata has the wrong PHP stream')
+                            migration[stream] = data['formats'].get('rpm', {})
+                        continue
+                    path = temporary / (stream + '-' + name + '.rpm')
+                    path.write_bytes(reader(package['location']))
+                    actual = rpm['local_package'](path)
+                    if any(actual.get(key) != package.get(key) for key in ['name', 'arch', 'evr']):
+                        raise RuntimeError('Published consumer RPM headers do not match primary metadata')
+                    if package.get('checksum'):
+                        rpm['same_archive'](dict(actual, path=str(path)), package)
+                    data = archive_runtime_json(path, 'rpm', 'usr/share/php-zts/consumers/' + name + '.json')
+                    value = consumer_dependencies(data, name, stream, architecture)
+                    if value is not None:
+                        dependencies[stream][name] = value
+                    if name == 'php-zts-cli':
+                        data = archive_migration_cutoffs(path, 'rpm')
+                        if data:
+                            if data.get('php_stream') != stream:
+                                raise RuntimeError('Published CLI migration metadata has the wrong PHP stream')
+                            migration[stream] = data['formats'].get('rpm', {})
         else:
             import requests
             helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
@@ -535,12 +1221,15 @@ def baseline(args):
             consumer_password = os.environ.get(args.consumer_password_env, '') if args.consumer_password_env else password
             auth = (args.owner, password)
             packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
-            for stream in STREAMS:
+            consumer_streams = STREAMS
+            if args.owner in [value.replace('.', '') for value in STREAMS]:
+                consumer_streams = [args.owner[0] + '.' + args.owner[1:]]
+            for stream in consumer_streams:
                 owner = stream.replace('.', '')
-                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture)
+                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, replacements, native_metadata)
                 consumers[stream].update(versions)
                 consumer_versions[stream].update(versions)
-            names = {item['name'] for item in packages if item['name'].startswith('php-zts-lib-') and not item['name'].endswith('-debuginfo')}
+            names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
             for name in sorted(names):
                 versions = [item for item in packages if item['name'] == name]
                 versions.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, a['version'], b['version'])), reverse=True)
@@ -550,7 +1239,7 @@ def baseline(args):
                     response.raise_for_status()
                     matched = False
                     for file in response.json():
-                        if args.type == 'deb' and architecture not in file.get('name', ''):
+                        if args.type == 'deb' and architecture not in file.get('name', '') and not file.get('name', '').endswith('_all.deb'):
                             continue
                         url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'], file['id'])
                         path = temporary / ('package.' + args.type)
@@ -562,9 +1251,19 @@ def baseline(args):
                         actual_name, actual_version, actual_arch = helper['package_metadata'](path, package_type)
                         if actual_name != name or actual_version != item['version']:
                             raise RuntimeError('Published package headers do not match registry')
-                        if actual_arch != architecture:
+                        if actual_arch not in [architecture, 'all', 'noarch']:
                             continue
-                        if not extract_metadata(path, args.type, destination):
+                        item['archive'], item['archive_sha256'] = retain_archive(destination, path, file['name'])
+                        item['debug_required'] = any(package['name'] == name + '-debuginfo' for package in packages)
+                        if any(package['name'] == name + '-debuginfo' and package['version'] == item['version'] for package in packages):
+                            item['debug_archive'] = {'type': args.type, 'name': name + '-debuginfo', 'package_version': item['version'],
+                                                     'architecture': actual_arch, 'host': args.host, 'owner': args.owner, 'password_env': args.password_env}
+                        if name == 'php-zts-runtime-layout':
+                            layout_metadata = archive_runtime_json(path, args.type, 'usr/share/php-zts/runtime-layout.json')
+                            if layout_metadata is None:
+                                raise RuntimeError('Published runtime layout has no metadata')
+                            layout_metadata.update(package_version=item['version'], archive=item['archive'], archive_sha256=item['archive_sha256'], complete=True)
+                        elif not extract_metadata(path, args.type, destination):
                             raise RuntimeError('Published library has no ABI metadata: ' + name)
                         selected[name] = item
                         matched = True
@@ -574,6 +1273,14 @@ def baseline(args):
     aggregate = empty_manifest()
     aggregate['consumers'] = {stream: sorted(names) for stream, names in consumers.items()}
     aggregate['consumer_versions'] = consumer_versions
+    aggregate['consumer_dependencies'] = dependencies
+    aggregate['consumer_components'] = components
+    aggregate['logical_replacements'] = replacements
+    aggregate['consumer_native_metadata'] = native_metadata
+    aggregate['consumer_inventory_complete'] = True
+    aggregate['migration_cutoffs'] = migration
+    if layout_metadata:
+        aggregate['runtime_layout'] = layout_metadata
     metadata = destination / METADATA
     if metadata.exists():
         for path in sorted(metadata.glob('*.json')):
@@ -592,7 +1299,13 @@ def baseline(args):
             if not package:
                 raise RuntimeError('Published metadata has no matching package: ' + identifier)
             library['published_version'] = package.get('evr', package.get('version'))
-            hashes = {name: hashlib.sha256(rooted(destination, relative).read_bytes()).hexdigest() for name, relative in library.get('abi_dump', {}).items()}
+            library['published_archive'] = package['archive']
+            library['published_archive_filename'] = PurePosixPath(package['archive']).name
+            library['published_archive_sha256'] = package['archive_sha256']
+            library['published_debug_required'] = package.get('debug_required', False)
+            if package.get('debug_archive'):
+                library['published_debug_archive'] = package['debug_archive']
+            hashes = {name: file_sha256(rooted(destination, relative)) for name, relative in library.get('abi_dump', {}).items()}
             if library.get('abi_dump_hashes', hashes) != hashes:
                 raise RuntimeError('Published ABI data checksum mismatch: ' + identifier)
             library['abi_dump_hashes'] = hashes
@@ -600,17 +1313,197 @@ def baseline(args):
     write_json(destination / 'shared-libraries.json', aggregate)
 
 
+def baseline(args):
+    destination = Path(args.output)
+    if destination.exists() and any(destination.iterdir()):
+        raise RuntimeError('Baseline output must be empty: ' + str(destination))
+    sources = []
+    if args.type == 'rpm':
+        for url in ([getattr(args, 'base_url', None)] + list(getattr(args, 'baseline_url', []) or [])):
+            if url:
+                sources.append(dict(base_url=url, remote_directory=None))
+        for directory in ([args.remote_directory] + list(getattr(args, 'baseline_directory', []) or [])):
+            if directory:
+                sources.append(dict(base_url=None, remote_directory=directory))
+        if not sources:
+            raise RuntimeError('RPM baseline requires --base-url or --remote-directory')
+    else:
+        owners = getattr(args, 'owners', None) or ','.join(stream.replace('.', '') for stream in STREAMS)
+        owners = [owner.strip() for owner in owners.split(',') if owner.strip()]
+        if getattr(args, 'owner', None):
+            owners.append(args.owner)
+        for owner in dict.fromkeys(owners):
+            password_env = args.consumer_password_env if owner in [stream.replace('.', '') for stream in STREAMS] else args.password_env
+            sources.append(dict(owner=owner, password_env=password_env))
+    destination.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='shared-library-baselines-') as temporary:
+        baselines = []
+        for index, source in enumerate(sources):
+            source_args = copy.copy(args)
+            source_args.__dict__.update(source)
+            source_args.output = str(Path(temporary) / str(index))
+            baseline_single(source_args)
+            baselines.append((manifest(Path(source_args.output) / 'shared-libraries.json', False), source_args.output))
+        merged, divergent = merge_baselines(baselines, args.type, destination)
+        merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
+        merged['divergent_libraries'] = sorted(divergent)
+        merged['baseline_origins'] = sources
+        write_json(destination / 'shared-libraries.json', merged)
+
+
+def cutoff_baseline(path, kind):
+    value = read_json(path)
+    if value.get('linkage') == 'shared':
+        return validate_manifest(value, False)
+    if value.get('schema') != 1 or value.get('type') != kind or value.get('php_stream') not in STREAMS or not isinstance(value.get('packages'), list):
+        raise RuntimeError('Expected a shared-library manifest or frozen package baseline')
+    result = empty_manifest()
+    result['architecture'] = value['architecture']
+    result['consumer_versions'] = {stream: {} for stream in STREAMS}
+    result['migration_cutoffs'] = value.get('migration_cutoffs', {})
+    packages = value.get('published_packages', value['packages'])
+    rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+    for package in packages:
+        arch = package.get('architecture', package.get('arch'))
+        if arch not in ['all', 'noarch'] and normalized_arch(arch, kind) != normalized_arch(value['architecture'], kind):
+            continue
+        stream = rpm['php_stream'](package['version']) if kind == 'rpm' else value['php_stream']
+        if stream not in STREAMS:
+            continue
+        version = package['version']
+        if kind == 'rpm':
+            version = package.get('evr') or str(package.get('epoch', '0')) + ':' + version
+        versions = result['consumer_versions'][stream]
+        name = package['name']
+        if name not in versions or native_compare(kind, version, versions[name]) > 0:
+            versions[name] = version
+    for package in value['packages']:
+        if package['name'] == 'php-zts-cli' and package.get('path'):
+            archive = rooted(Path(path).parent, package['path'])
+            if archive.is_file():
+                data = archive_migration_cutoffs(archive, kind)
+                if data:
+                    if data.get('php_stream') != value['php_stream']:
+                        raise RuntimeError('Frozen CLI migration metadata has the wrong PHP stream')
+                    result['migration_cutoffs'][value['php_stream']] = data['formats'].get(kind, {})
+    return result
+
+
+def migration_cutoffs(args):
+    baselines = [cutoff_baseline(path, args.type) for path in args.baseline_manifest]
+    published = {}
+    inherited = {}
+    for baseline in baselines:
+        for name, version in baseline.get('consumer_versions', {}).get(args.php_version, {}).items():
+            if name not in published or native_compare(args.type, version, published[name]) > 0:
+                published[name] = version
+        for name, version in baseline.get('migration_cutoffs', {}).get(args.php_version, {}).items():
+            if name in inherited and inherited[name] != version:
+                raise RuntimeError('Published first-shared cutoffs disagree: ' + name)
+            inherited[name] = version
+    excluded = {'php-zts', 'php-zts-cli', 'php-zts-runtime-layout', 'pie-zts'}
+    published = {name: version for name, version in published.items()
+                 if name not in excluded and not name.startswith('php-zts-lib-')
+                 and not name.endswith(('-debuginfo', '-dbgsym'))}
+    required = {name for name, version in published.items()
+                if name not in inherited or native_compare(args.type, version, inherited[name]) < 0}
+    candidates = {}
+    architectures = set()
+    helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
+    rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
+    for path in sorted(Path(args.artifacts).rglob('*.' + args.type)):
+        if args.type == 'rpm':
+            package = rpm['local_package'](path)
+            name, version, arch = package['name'], package['evr'], package['arch']
+            stream = rpm['php_stream'](package['version'])
+        else:
+            name, version, arch = helper['package_metadata'](path, 'debian' if args.type == 'deb' else 'alpine')
+            tag = re.search(r'(?:\+php|p)(\d)(\d+)[._]', version)
+            stream = '{}.{}'.format(*tag.groups()) if tag else re.match(r'\d+\.\d+', version).group() if re.match(r'\d+\.\d+', version) else None
+        if stream != args.php_version or name in excluded or name.startswith('php-zts-lib-') or name.endswith(('-debuginfo', '-dbgsym')):
+            continue
+        if arch not in ['noarch', 'all']:
+            architectures.add(normalized_arch(arch, args.type))
+        if name in candidates and candidates[name]['version'] != version:
+            raise RuntimeError('Conflicting migration candidates: ' + name)
+        if name in published:
+            order = native_compare(args.type, version, published[name])
+            if order < 0 or (name in required and order == 0):
+                raise RuntimeError('First shared consumer must advance published version: ' + name)
+        if name in inherited and native_compare(args.type, version, inherited[name]) < 0:
+            raise RuntimeError('Candidate precedes the first shared consumer: ' + name)
+        candidates[name] = {'version': version, 'sha256': file_sha256(path)}
+    missing = required - set(candidates)
+    if missing:
+        raise RuntimeError('Missing published migration consumers: ' + ', '.join(sorted(missing)))
+    if len(architectures) > 1:
+        raise RuntimeError('Migration cutoffs require one architecture per artifact set')
+    write_json(args.output, {'schema': 1, 'php_stream': args.php_version,
+                            'architecture': next(iter(architectures), next((normalized_arch(value['architecture'], args.type) for value in baselines if value.get('architecture')), None)),
+                            'formats': {args.type: {**{name: value['version'] for name, value in candidates.items()}, **inherited}},
+                            'published_versions': {args.type: published}, 'candidate_archives': candidates})
+
+
+def candidate_progress(current, previous, plan, versions, archives=None):
+    for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']:
+        if current.get(key) != previous.get(key):
+            if previous.get(key) is not None or current.get(key) != plan.get('candidate_environment', {}).get(key):
+                return False
+    before = previous.get('libraries', {})
+    after = current.get('libraries', {})
+    for identifier in before.keys() | after.keys():
+        old, new = before.get(identifier), after.get(identifier)
+        if {key: value for key, value in (old or {}).items() if key != 'published_debug_archive'} == {key: value for key, value in (new or {}).items() if key != 'published_debug_archive'}:
+            continue
+        expected = plan.get('expected_libraries', {}).get(identifier)
+        package = 'php-zts-lib-' + identifier
+        if not expected or not new or (None, package) not in versions:
+            return False
+        if any(new.get(key) != value for key, value in expected.items()):
+            return False
+        if new.get('published_version') != versions[(None, package)]:
+            return False
+    for stream in STREAMS:
+        old = previous.get('consumer_versions', {}).get(stream, {})
+        new = current.get('consumer_versions', {}).get(stream, {})
+        for name in old.keys() | new.keys():
+            if old.get(name) != new.get(name):
+                if (stream, name) not in versions or new.get(name) != versions[(stream, name)]:
+                    return False
+        old_cutoffs = previous.get('migration_cutoffs', {}).get(stream, {})
+        new_cutoffs = current.get('migration_cutoffs', {}).get(stream, {})
+        if old_cutoffs != new_cutoffs:
+            if new.get('php-zts-cli') != versions.get((stream, 'php-zts-cli')):
+                return False
+            for name in old_cutoffs.keys() | new_cutoffs.keys():
+                if name in old_cutoffs and old_cutoffs[name] != new_cutoffs.get(name):
+                    return False
+                if name not in old_cutoffs and new_cutoffs[name] != versions.get((stream, name)):
+                    return False
+    old_layout = {key: value for key, value in (previous.get('runtime_layout') or {}).items() if key not in ['complete', 'archive']}
+    new_layout = {key: value for key, value in (current.get('runtime_layout') or {}).items() if key not in ['complete', 'archive']}
+    if old_layout != new_layout:
+        key = (None, 'php-zts-runtime-layout')
+        if key not in versions or new_layout.get('package_version') != versions[key] or new_layout.get('archive_sha256') != (archives or {}).get(key):
+            return False
+    return True
+
+
 def cohort(args):
     plan = read_json(args.plan)
     if plan.get('schema') != 1:
         raise RuntimeError('Invalid shared-library plan')
     known_baselines = plan.get('baseline_fingerprints', [plan['baseline_fingerprint']])
-    if args.baseline_manifest and fingerprint(manifest(args.baseline_manifest, False)) not in known_baselines:
+    current_baseline = manifest(args.baseline_manifest, False) if args.baseline_manifest else None
+    baseline_changed = current_baseline is not None and fingerprint(current_baseline) not in known_baselines
+    if baseline_changed and not plan.get('baseline_states'):
         raise RuntimeError('Published library baseline changed during the build; prepare a new cohort')
     members = set()
     streams = set()
     consumer_members = {stream: set() for stream in STREAMS}
     files = []
+    candidate_versions = {}
+    candidate_archives = {}
     helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
     rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
     for path in sorted(Path(args.artifacts).rglob('*.' + args.type)):
@@ -622,7 +1515,11 @@ def cohort(args):
             name, version, architecture = helper['package_metadata'](path, 'debian' if args.type == 'deb' else 'alpine')
             tag = re.search(r'(?:\+php|p)(\d)(\d+)[._]', version)
             stream = '{}.{}'.format(*tag.groups()) if tag else re.match(r'\d+\.\d+', version).group() if re.match(r'\d+\.\d+', version) else None
+        if name.startswith('php-zts-lib-') or name.removesuffix('-debuginfo') == 'php-zts-runtime-layout':
+            stream = None
         members.add(name)
+        candidate_versions[(stream, name)] = package['evr'] if args.type == 'rpm' else version
+        candidate_archives[(stream, name)] = file_sha256(path)
         previous_consumer = plan.get('published_consumers', {}).get(stream, {}).get(name)
         if previous_consumer and native_compare(args.type, package['evr'] if args.type == 'rpm' else version, previous_consumer) <= 0:
             raise RuntimeError('ABI transition consumer must have a new package revision: ' + name)
@@ -632,8 +1529,11 @@ def cohort(args):
             if expected:
                 previous_version = plan.get('published_versions', {}).get(identifier)
                 candidate_version = package['evr'] if args.type == 'rpm' else version
-                if previous_version and native_compare(args.type, candidate_version, previous_version) <= 0:
-                    raise RuntimeError('Selected library must have a new package revision: ' + name)
+                if previous_version:
+                    ordering = native_compare(args.type, candidate_version, previous_version)
+                    retry = plan.get('publication_retries', {}).get(identifier, {})
+                    if ordering < 0 or (ordering == 0 and file_sha256(path) != retry.get('published_archive_sha256')):
+                        raise RuntimeError('Selected library must have a new package revision: ' + name)
                 with tempfile.TemporaryDirectory(prefix='shared-library-cohort-') as temporary:
                     if not extract_metadata(path, args.type, temporary):
                         raise RuntimeError('Candidate library has no ABI metadata: ' + str(path))
@@ -648,20 +1548,22 @@ def cohort(args):
                     for abi in data.get('abi_dump', {}).values():
                         if not rooted(temporary, abi).is_file():
                             raise RuntimeError('Candidate library is missing persisted ABI data: ' + abi)
-                    hashes = {soname: hashlib.sha256(rooted(temporary, abi).read_bytes()).hexdigest() for soname, abi in data.get('abi_dump', {}).items()}
+                    hashes = {soname: file_sha256(rooted(temporary, abi)) for soname, abi in data.get('abi_dump', {}).items()}
                     if data.get('abi_dump_hashes', hashes) != hashes:
                         raise RuntimeError('Candidate library ABI data checksum mismatch: ' + name)
         if stream in consumer_members and not name.startswith('php-zts-lib-'):
             consumer_members[stream].add(name)
         if name == 'php-zts-cli' and stream:
             streams.add(stream)
-        files.append({'name': name, 'version': version, 'architecture': architecture, 'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+        files.append({'name': name, 'version': version, 'architecture': architecture, 'path': str(path), 'sha256': candidate_archives[(stream, name)]})
     missing = set(plan.get('expected_members', [])) - members
     missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full')} - streams
     missing_consumers = {stream: sorted(set(names) - consumer_members[stream]) for stream, names in plan.get('expected_consumers', {}).items()
                          if set(names) - consumer_members[stream]}
     if missing or missing_streams or missing_consumers:
         raise RuntimeError('Incomplete shared-library cohort; missing packages {}, full PHP streams {}, consumers {}'.format(', '.join(sorted(missing)), ', '.join(sorted(missing_streams)), json.dumps(missing_consumers, sort_keys=True)))
+    if baseline_changed and not any(candidate_progress(current_baseline, previous, plan, candidate_versions, candidate_archives) for previous in plan.get('baseline_states', [])):
+        raise RuntimeError('Published library baseline changed during the build; prepare a new cohort')
     write_json(args.output, {'schema': 1, 'plan_fingerprint': digest(plan), 'baseline_fingerprint': plan['baseline_fingerprint'], 'files': files})
 
 
@@ -691,12 +1593,32 @@ def main():
     command = commands.add_parser('baseline')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command.add_argument('--arch', required=True)
-    command.add_argument('--host', required=True)
+    command.add_argument('--host')
     command.add_argument('--remote-directory')
-    command.add_argument('--owner', default='libs')
+    command.add_argument('--base-url')
+    command.add_argument('--baseline-directory', action='append', default=[])
+    command.add_argument('--baseline-url', action='append', default=[])
+    command.add_argument('--owner')
+    command.add_argument('--owners')
     command.add_argument('--password-env')
     command.add_argument('--consumer-password-env', default='FORGEJO_PASSWORD')
     command.add_argument('--output', required=True)
+    command = commands.add_parser('migration-cutoffs')
+    command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
+    command.add_argument('--baseline-manifest', action='append', required=True)
+    command.add_argument('--artifacts', required=True)
+    command.add_argument('--php-version', required=True, choices=STREAMS)
+    command.add_argument('--output', required=True)
+    command = commands.add_parser('stage-publication-retries')
+    command.add_argument('--plan', required=True)
+    command.add_argument('--baseline-manifest', action='append', required=True)
+    command.add_argument('--destination', required=True)
+    command.add_argument('--manifest', required=True)
+    command.add_argument('--manifest-output', required=True)
+    command.add_argument('--output', required=True)
+    command.add_argument('--layout-source-hash')
+    command = commands.add_parser('layout-fingerprint')
+    command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command = commands.add_parser('prepare')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command.add_argument('--manifest', required=True)
@@ -706,6 +1628,7 @@ def main():
     command.add_argument('--mode', choices=['full', 'incremental'], default='full')
     command.add_argument('--request')
     command.add_argument('--libraries')
+    command.add_argument('--rebuilt-libraries')
     command.add_argument('--php-versions')
     command.add_argument('--packages')
     command.add_argument('--bootstrap', action='store_true')
@@ -733,6 +1656,12 @@ def main():
         prepare(args)
     elif args.command == 'baseline':
         baseline(args)
+    elif args.command == 'migration-cutoffs':
+        migration_cutoffs(args)
+    elif args.command == 'stage-publication-retries':
+        stage_publication_retries(args)
+    elif args.command == 'layout-fingerprint':
+        print(layout_fingerprint(args.type))
     elif args.command == 'cohort':
         cohort(args)
 

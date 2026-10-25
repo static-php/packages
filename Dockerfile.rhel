@@ -1,7 +1,7 @@
-ARG ALMA_VERSION=10
+ARG ALMA_VERSION=8
 FROM almalinux:${ALMA_VERSION}
 
-ARG ALMA_VERSION=10
+ARG ALMA_VERSION=8
 ARG TARGETARCH
 ARG RPM_ARCH
 ARG UID=1000
@@ -42,7 +42,7 @@ RUN if [[ "${ALMA_VERSION}" == "8" || "${ALMA_VERSION}" == "9" ]]; then \
 RUN if [[ "${ALMA_VERSION}" == "9" || "${ALMA_VERSION}" == "10" ]]; then \
         dnf -y install re2c; \
     else \
-        dnf -y install python39 && \
+        dnf -y install python39 python39-pyyaml python39-requests dpkg && \
         curl -L https://github.com/skvadrik/re2c/releases/download/4.3/re2c-4.3.tar.xz | tar xJ && \
         cd re2c-4.3 && ./configure && make -j"$(nproc)" && make install && cd .. && rm -rf re2c-4.3; \
     fi
@@ -114,13 +114,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
 COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
 RUN GCC_VERSION="${GCC_VERSION}" /usr/local/bin/build-gcc-runtime
 
-# Older toolchain archives contain a static-only linker script here.
-RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.so.6" ]; then \
-            ln -sf libstdc++.so.6 "$d/libstdc++.so"; \
-        fi; \
-    done && \
-    ln -sf gcc /opt/gcc/bin/cc && \
+RUN ln -sf gcc /opt/gcc/bin/cc && \
     echo 'export PATH=/opt/gcc/bin:$PATH' > /etc/profile.d/gcc16.sh && \
     command -v gcc | grep -q /opt/gcc && \
     gcc -dumpfullversion | tee /dev/stderr | grep -qx "${GCC_VERSION}" && \

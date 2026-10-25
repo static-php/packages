@@ -1,0 +1,7 @@
+{
+    "schema": 1,
+    "extensions": {
+        "amqp": {"suffix": "-shared"},
+        "igbinary": {"suffix": "-shared"}
+    }
+}

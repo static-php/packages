@@ -1,4 +1,4 @@
-name: Build and upload Debian packages to Forgejo
+name: Build Debian packages through shared EL8 pipeline
 
 on:
     workflow_dispatch:
@@ -20,7 +20,11 @@ on:
             bump:
                 description: "Bump package revisions above published packages"
                 type: boolean
-                default: true
+                default: false
+            publish:
+                description: "Publish validated packages and reusable buildroot caches"
+                type: boolean
+                default: false
             php_versions:
                 description: "Optional: PHP streams (comma-separated); ABI transitions include all affected streams"
                 default: ""
@@ -34,477 +38,67 @@ on:
                 description: "Open tmate on failure"
                 type: boolean
                 default: false
-    repository_dispatch:
-        types: [spc-download]
+    workflow_call:
+        inputs:
+            mode:
+                type: string
+                required: false
+                default: "full"
+            libraries:
+                type: string
+                required: false
+                default: ""
+            downloads_run_id:
+                type: string
+                required: false
+                default: ""
+            iteration:
+                type: string
+                required: false
+                default: ""
+            bump:
+                type: boolean
+                required: false
+                default: false
+            publish:
+                type: boolean
+                required: false
+                default: false
+            php_versions:
+                type: string
+                required: false
+                default: ""
+            architectures:
+                type: string
+                required: false
+                default: ""
+            packages:
+                type: string
+                required: false
+                default: ""
+            debug_tmate:
+                type: boolean
+                required: false
+                default: false
 
 permissions:
-    contents: read
+    contents: write
     packages: read
-
-concurrency:
-    group: shared-packages-deb
-    cancel-in-progress: false
+    actions: read
 
 jobs:
-    setup-matrix:
-        runs-on: ubuntu-24.04
-        permissions:
-            actions: read
-            contents: read
-        outputs:
-            downloads-run-id: ${{ steps.source.outputs.run-id }}
-            matrix: ${{ steps.matrix.outputs.matrix }}
-            php-versions: ${{ steps.matrix.outputs.php-versions }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Resolve one source snapshot for the entire build
-                id: source
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    REQUESTED_RUN_ID: ${{ inputs.downloads_run_id }}
-                run: |
-                    set -euo pipefail
-                    source_run="$REQUESTED_RUN_ID"
-                    if [[ -z "$source_run" ]]; then
-                        runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/spc-download.yml/runs?status=success&per_page=100" --paginate --jq '.workflow_runs[].id')
-                        for candidate in $runs; do
-                            available=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts" --paginate --jq '.artifacts[] | select(.name == "downloads-tarball" and .expired == false) | .id')
-                            if [[ -n "$available" ]]; then
-                                source_run="$candidate"
-                                break
-                            fi
-                        done
-                    fi
-                    if [[ ! "$source_run" =~ ^[0-9]+$ ]]; then
-                        echo '::error::No available spc-download source snapshot'
-                        exit 1
-                    fi
-                    echo "run-id=$source_run" >> "$GITHUB_OUTPUT"
-            -   name: Set target matrix
-                id: matrix
-                env:
-                    ARCHITECTURES: ${{ inputs.architectures }}
-                    ALMA_VERSIONS: ${{ inputs.alma_versions }}
-                    PHP_VERSIONS: ${{ inputs.php_versions }}
-                run: |
-                    python3 .github/actions/shared-libraries/workflow.py setup --type=deb \
-                        --architectures "$ARCHITECTURES" --alma-versions "$ALMA_VERSIONS" \
-                        --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
-
-    resolve-builders:
-        name: Resolve builder (${{ matrix.target }})
-        needs: setup-matrix
-        runs-on: ubuntu-24.04
-        permissions:
-            contents: read
-            packages: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Pin target builder image
-                env:
-                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    ACTOR: ${{ github.actor }}
-                    ARCH: ${{ matrix.arch }}
-                    ALMA: ${{ matrix.alma }}
-                run: |
-                    set -euo pipefail
-                    echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-                    python3 .github/actions/shared-libraries/workflow.py setup --type=deb \
-                        --architectures "$ARCH" --alma-versions "$ALMA" --resolve-images > "$RUNNER_TEMP/builder-output"
-                    sed -n 's/^matrix=//p' "$RUNNER_TEMP/builder-output" | jq '.include[0]' > target.json
-            -   name: Stage pinned builder
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-builders-deb-${{ matrix.target }}
-                    path: target.json
-                    retention-days: 1
-
-    compute-libs-matrix:
-        needs: [setup-matrix, resolve-builders]
-        if: ${{ !cancelled() }}
-        runs-on: ubuntu-24.04
-        permissions:
-            contents: read
-            actions: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download pinned builders
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                continue-on-error: true
-                with:
-                    pattern: shared-builders-deb-*
-                    path: builders
-            -   name: Filter successful builder targets
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Resolve builder \\("))) | .name' \
-                        | sed -E 's/^Resolve builder \(([^)]+)\)$/\1/' | sort -u)
-                    python3 .github/actions/shared-libraries/workflow.py targets --directory builders \
-                        --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
-
-    build-libs:
-        name: Build libs shared (${{ matrix.target }})
-        needs: [setup-matrix, compute-libs-matrix]
-        if: ${{ !cancelled() && needs.compute-libs-matrix.outputs.any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ${{ matrix.image }}
-        permissions:
-            contents: write
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-libs-matrix.outputs.matrix) }}
-        env:
-            IMAGE: ${{ matrix.image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: deb
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            MODE: ${{ inputs.mode || 'full' }}
-            LIBRARIES: ${{ inputs.libraries || '' }}
-            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
-            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
-            PHPV: ${{ matrix.php-version || '' }}
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download pinned source snapshot
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            -   name: Extract source snapshot
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
-            -   name: Prepare Composer cache
-                run: mkdir -p ~/.cache/composer
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: composer-
-            -   name: Compute source and toolchain fingerprint
-                id: fingerprint
-                run: bash .github/actions/shared-libraries/run.sh fingerprint >> "$GITHUB_OUTPUT"
-            -   name: Compute buildroot cache key
-                id: cache-key
-                env:
-                    FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
-                run: echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-            -   name: Restore buildroot cache
-                id: cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-            -   name: Build shared libraries
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: bash .github/actions/shared-libraries/run.sh libs
-            -   name: Pack buildroot
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: tar --zstd -cf buildroot.tar.zst buildroot
-            -   name: Save buildroot cache
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: save
-                    key: ${{ steps.cache-key.outputs.key }}
-            -   name: Extract cached buildroot
-                if: steps.cache.outputs.cache-hit == 'true'
-                run: tar --zstd -xf buildroot.tar.zst
-            -   name: Classify ABI and package shared libraries
-                run: bash .github/actions/shared-libraries/run.sh classify
-            -   name: Record target and buildroot
-                env:
-                    CACHE_KEY: ${{ steps.cache-key.outputs.key }}
-                    ALMA: ${{ matrix.alma }}
-                run: bash .github/actions/shared-libraries/run.sh record
-            -   name: Stage target plan
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-plans-deb-${{ matrix.target }}
-                    path: |
-                        stage/shared-library-plan.json
-                        stage/target.json
-                    retention-days: 1
-            -   name: Stage library packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-libs-deb-${{ matrix.target }}
-                    path: stage
-                    retention-days: 1
-            -   name: Upload logs on failure
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: logs-libs-deb-${{ matrix.target }}
-                    path: log
-            -   name: Install tmate on failure
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                run: |
-                    arch=amd64
-                    if [[ "$MATRIX_ARCH" == arm64 ]]; then arch=arm64v8; fi
-                    directory="tmate-2.4.0-static-linux-$arch"
-                    curl -fsSL "https://github.com/tmate-io/tmate/releases/download/2.4.0/$directory.tar.xz" | tar -xJ -O "$directory/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-            -   name: Debug build failure
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                timeout-minutes: 30
-                with:
-                    install-dependencies: false
-                    sudo: false
-
-    compute-build-matrix:
-        needs: [setup-matrix, build-libs]
-        if: ${{ !cancelled() }}
-        runs-on: ubuntu-24.04
-        permissions:
-            actions: read
-            contents: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-            publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
-            publish-any: ${{ steps.filter.outputs.publish-any }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download target plans
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                continue-on-error: true
-                with:
-                    pattern: shared-plans-deb-*
-                    path: plans
-            -   name: Filter successful targets and select PHP consumers
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    PHP_VERSIONS: ${{ inputs.php_versions }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs shared \\("))) | .name' \
-                        | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
-                    python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
-                        --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
-
     build:
-        name: Build (${{ matrix.target }} php${{ matrix.php-version }})
-        needs: [setup-matrix, compute-build-matrix]
-        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ${{ matrix.image }}
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.matrix) }}
-        env:
-            IMAGE: ${{ matrix.image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: deb
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            MODE: ${{ inputs.mode || 'full' }}
-            LIBRARIES: ${{ inputs.libraries || '' }}
-            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
-            PACKAGES: ${{ matrix.packages }}
-            PHPV: ${{ matrix.php-version || '' }}
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download pinned source snapshot
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            -   name: Extract source snapshot
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-                    python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
-            -   name: Download shared library packages and plan
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: shared-libs-deb-${{ matrix.target }}
-                    path: stage
-            -   name: Read buildroot key
-                id: cache-key
-                run: echo "key=$(cat stage/cache-key)" >> "$GITHUB_OUTPUT"
-            -   name: Restore exact buildroot
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-                    fail-on-cache-miss: true
-            -   name: Extract buildroot
-                run: tar --zstd -xf buildroot.tar.zst
-            -   name: Prepare Composer cache
-                run: mkdir -p ~/.cache/composer
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: composer-
-            -   name: Build and test PHP packages
-                run: bash .github/actions/shared-libraries/run.sh php
-            -   name: Report skipped shared extensions
-                if: ${{ !cancelled() }}
-                env:
-                    PHPV: ${{ matrix.php-version }}
-                run: |
-                    for manifest in "build/$PHPV/skipped-shared-extensions.json" buildroot/skipped-shared-extensions.json; do
-                        if [[ -f "$manifest" ]]; then
-                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "::warning::\($target): skipped \(.extension) (\(.phase)): \(.message)"' "$manifest"
-                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "- \($target): \(.extension) (\(.phase)): \(.message | gsub("[\r\n]"; " "))"' "$manifest" >> "$GITHUB_STEP_SUMMARY"
-                            break
-                        fi
-                    done
-            -   name: Stage consumer packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-consumers-deb-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: dist/deb
-                    retention-days: 1
-            -   name: Upload logs on failure
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: logs-php-deb-${{ matrix.target }}-${{ matrix.php-version }}
-                    path: log
-            -   name: Install tmate on failure
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                run: |
-                    arch=amd64
-                    if [[ "$MATRIX_ARCH" == arm64 ]]; then arch=arm64v8; fi
-                    directory="tmate-2.4.0-static-linux-$arch"
-                    curl -fsSL "https://github.com/tmate-io/tmate/releases/download/2.4.0/$directory.tar.xz" | tar -xJ -O "$directory/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-            -   name: Debug build failure
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                timeout-minutes: 30
-                with:
-                    install-dependencies: false
-                    sudo: false
-
-    publish:
-        name: Publish (${{ matrix.target }})
-        needs: [compute-build-matrix, build]
-        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.publish-any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ${{ matrix.image }}
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        env:
-            IMAGE: ${{ matrix.image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: deb
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            MODE: ${{ inputs.mode || 'full' }}
-            LIBRARIES: ${{ inputs.libraries || '' }}
-            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
-            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
-            PHPV: ${{ matrix.php-version || '' }}
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download complete staged cohort
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    pattern: shared-*-deb-${{ matrix.target }}*
-                    path: cohort
-            -   name: Verify complete cohort and all downgrade guards
-                run: bash .github/actions/shared-libraries/run.sh publish
-            -   name: Publish consumers then libraries on host 1
-                id: host-1
-                continue-on-error: true
-                run: bash .github/actions/shared-libraries/run.sh upload-1
-            -   name: Publish consumers then libraries on host 2
-                id: host-2
-                continue-on-error: true
-                run: bash .github/actions/shared-libraries/run.sh upload-2
-            -   name: Report publication failures
-                if: ${{ !cancelled() && (steps.host-1.outcome == 'failure' || steps.host-2.outcome == 'failure') }}
-                run: exit 1
+        name: Build shared EL8 RPM and DEB packages
+        uses: ./.github/workflows/build-rpm-modular-packages.yml
+        with:
+            mode: ${{ inputs.mode }}
+            libraries: ${{ inputs.libraries }}
+            downloads_run_id: ${{ inputs.downloads_run_id }}
+            iteration: ${{ inputs.iteration }}
+            bump: ${{ inputs.bump }}
+            publish: ${{ inputs.publish }}
+            php_versions: ${{ inputs.php_versions }}
+            architectures: ${{ inputs.architectures }}
+            packages: ${{ inputs.packages }}
+            debug_tmate: ${{ inputs.debug_tmate }}
+        secrets: inherit

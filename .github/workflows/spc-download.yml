@@ -11,6 +11,16 @@ on:
                 type: boolean
                 required: false
                 default: false
+            publish:
+                description: "Publish downstream packages after a manual source update"
+                type: boolean
+                required: false
+                default: false
+            bump:
+                description: "Bump downstream package revisions after a manual source update"
+                type: boolean
+                required: false
+                default: false
 
 permissions:
     contents: read
@@ -141,6 +151,30 @@ jobs:
                     jq --argjson v "$new" --arg pie "$pie_latest" -n \
                         '{php_versions: $v, pie_version: $pie}' > downloads/.spc-meta.json
 
+            -   name: Freeze pinned PIE release
+                run: python3 bin/freeze-pie.py --downloads downloads
+
+            -   name: Freeze extension source profiles
+                run: |
+                    set -euo pipefail
+                    python3 .github/actions/shared-libraries/php-source.py --root . --capture-extensions --profile stable
+                    artifacts=$(python3 .github/actions/shared-libraries/php-source.py --root . --custom-git-artifacts)
+                    if [[ -n "$artifacts" ]]; then
+                        mapfile -t git_args < <(python3 .github/actions/shared-libraries/php-source.py --root . --custom-git-args)
+                        php vendor/bin/spc download "$artifacts" "${git_args[@]}" --shallow-clone --retry=5
+                    fi
+                    python3 .github/actions/shared-libraries/php-source.py --root . --capture-extensions --profile custom
+                    python3 .github/actions/shared-libraries/php-source.py --root . --restore-stable
+
+            -   name: Download pinned PHP source archives
+                run: |
+                    set -euo pipefail
+                    for minor in $PHP_MINORS; do
+                        release=$(jq -er --arg minor "$minor" '.php_versions[$minor]' downloads/.spc-meta.json)
+                        php vendor/bin/spc download php-src --with-php="$release" --ignore-cache-sources=php-src --retry=5
+                        python3 .github/actions/shared-libraries/php-source.py --root . --version "$release" --capture
+                    done
+
             -   name: Diff state and compute triggers
                 id: diff
                 env:
@@ -167,7 +201,7 @@ jobs:
                     cp downloads/.spc-meta.json .download-state/meta.prev.json
 
             -   name: Delete previous state cache
-                if: hashFiles('downloads/.cache.json') != ''
+                if: (github.event_name == 'schedule' || inputs.publish == true) && hashFiles('downloads/.cache.json') != ''
                 continue-on-error: true
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -177,7 +211,7 @@ jobs:
                         2>/dev/null || true
 
             -   name: Save state cache
-                if: hashFiles('downloads/.cache.json') != ''
+                if: (github.event_name == 'schedule' || inputs.publish == true) && hashFiles('downloads/.cache.json') != ''
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: .download-state
@@ -200,10 +234,11 @@ jobs:
                 if: steps.diff.outputs.any_change == 'true'
                 env:
                     GH_TOKEN: ${{ secrets.GH_PAT }}
+                    PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+                    BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
                 run: |
                     set -euo pipefail
-                    for workflow in build-rpm-modular-packages.yml build-deb-forgejo.yml build-apk-forgejo.yml; do
-                        gh workflow run "$workflow" \
-                            -f mode=incremental \
-                            -f downloads_run_id="$GITHUB_RUN_ID"
+                    for workflow in build-rpm-modular-packages.yml build-apk-forgejo.yml; do
+                        args=(-f mode=incremental -f downloads_run_id="$GITHUB_RUN_ID" -f publish="$PUBLISH" -f bump="$BUMP")
+                        gh workflow run "$workflow" --ref "$GITHUB_REF_NAME" "${args[@]}"
                     done

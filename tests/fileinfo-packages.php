@@ -98,7 +98,7 @@ try {
 
     $prefix = CreatePackages::getPrefix();
     $config = (new cli())->getFpmConfig();
-    check($config['recommends'] === [$prefix . '-fileinfo'], 'CLI does not recommend the matching Fileinfo package');
+    check($config['recommends'] === [$prefix . '-fileinfo', $prefix . '-curl'], 'CLI does not recommend the matching shared extensions');
     foreach (['depends', 'provides', 'replaces', 'conflicts'] as $field) {
         check(!in_array($prefix . '-fileinfo', $config[$field] ?? [], true), "CLI still has a strong/builtin Fileinfo relationship in {$field}");
     }
@@ -142,14 +142,15 @@ try {
         $artifact = $artifacts[0];
         if ($type === 'rpm') {
             $recommendations = command(['rpm', '-qp', '--recommends', $artifact]);
-            check(trim($recommendations) === $prefix . '-fileinfo', 'RPM lacks native Recommends');
+            check(str_contains($recommendations, $prefix . '-fileinfo') && str_contains($recommendations, $prefix . '-curl'), 'RPM lacks native shared-extension Recommends');
             check(!str_contains(command(['rpm', '-qp', '--requires', $artifact]), $prefix . '-fileinfo'), 'RPM turned recommendation into a hard requirement');
             check(!str_contains(command(['rpm', '-qp', '--provides', $artifact]), $prefix . '-fileinfo'), 'RPM still provides builtin Fileinfo');
             $header = $recommendations;
         } elseif ($type === 'deb') {
             $member = current(array_filter(explode("\n", command(['ar', 't', $artifact])), static fn (string $name): bool => str_starts_with($name, 'control.tar')));
             $header = command(['tar', '-xOJf', '-', './control'], command(['ar', 'p', $artifact, $member]));
-            check(preg_match('/^Recommends: ' . preg_quote($prefix . '-fileinfo', '/') . '$/m', $header) === 1, 'DEB lacks native Recommends');
+            check(preg_match('/^Recommends:.*' . preg_quote($prefix . '-fileinfo', '/') . '/m', $header) === 1
+                && preg_match('/^Recommends:.*' . preg_quote($prefix . '-curl', '/') . '/m', $header) === 1, 'DEB lacks native shared-extension Recommends');
             check(preg_match('/^Depends:.*' . preg_quote($prefix . '-fileinfo', '/') . '/m', $header) === 0, 'DEB turned recommendation into a hard dependency');
         } else {
             $header = command(['tar', '-xOf', '-', '.PKGINFO'], command(['gzip', '-dc', $artifact]));

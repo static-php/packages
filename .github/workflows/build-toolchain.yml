@@ -2,8 +2,7 @@ name: Build toolchain blobs
 
 # Builds the GCC toolchain from source into /opt/gcc (TOOLCHAIN_URL= forces the Dockerfiles'
 # source path) and publishes /opt/gcc as a release asset per (family, arch).
-# The blob is built on the oldest supported libc of each family (el8, debian11,
-# alpine 3.21 musl) so it works on every newer member; the Dockerfiles fetch it by default.
+# The blob is built on el8 for glibc and Alpine for musl; the Dockerfiles fetch it by default.
 # Dispatch with a new gcc_version when GCC releases, then bump GCC_VERSION's default in
 # the Dockerfiles (release tag and asset names all derive from the version).
 
@@ -30,9 +29,6 @@ jobs:
                     -   name: rhel
                         dockerfile: Dockerfile.rhel
                         build-args: "ALMA_VERSION=8"
-                    -   name: debian
-                        dockerfile: Dockerfile.debian
-                        build-args: ""
                     -   name: alpine
                         dockerfile: Dockerfile.alpine
                         build-args: ""

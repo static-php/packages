@@ -181,7 +181,7 @@ int main(void)
 C;
 }
 
-$options = getopt('', ['downloads:', 'versions:', 'frankenphp:', 'fixture:']);
+$options = getopt('', ['downloads:', 'versions:', 'frankenphp:', 'upstream-frankenphp:', 'fixture:']);
 if (isset($options['fixture'])) {
     require ROOT_DIR . '/src/bootstrap.php';
     Registry::resolve();
@@ -203,11 +203,31 @@ if ($stage->package_name !== 'frankenphp' || $stage->stage !== [PhpTarget::class
     throw new RuntimeException('FrankenPHP output-handler patch is not wired before its build stage');
 }
 $downloads = $options['downloads'] ?? dirname(__DIR__) . '/downloads';
-$versions = explode(',', $options['versions'] ?? '8.2.33,8.3.33,8.4.24,8.5.9,8.6.0beta1,8.6.0RC2');
+$versions = array_map('trim', explode(',', $options['versions'] ?? '8.2,8.3,8.4,8.5,8.6'));
+$metadata = null;
+foreach ($versions as &$version) {
+    if (!preg_match('/^8\.[0-9]+$/D', $version)) {
+        continue;
+    }
+    $metadataPath = $downloads . '/.spc-meta.json';
+    if ($metadata === null) {
+        if (!is_readable($metadataPath)) {
+            throw new RuntimeException("Missing PHP release metadata: {$metadataPath}");
+        }
+        $metadata = json_decode(file_get_contents($metadataPath), true, flags: JSON_THROW_ON_ERROR);
+    }
+    $selected = $metadata['php_versions'][$version] ?? null;
+    if (!is_string($selected) || !preg_match('/^' . preg_quote($version, '/') . '\.[0-9]+(?:(?:alpha|beta|RC)[0-9]+)?$/D', $selected)) {
+        throw new RuntimeException("Invalid pinned PHP {$version} release in {$metadataPath}");
+    }
+    $version = $selected;
+}
+unset($version);
 $frankenphp = $options['frankenphp'] ?? $downloads . '/php-frankenphp-caddy-v1.12.7-0-ga765b08.tar.gz';
 $original = frankenArchiveFile($frankenphp, 'frankenphp.c');
+$upstream = isset($options['upstream-frankenphp']) ? frankenArchiveFile($options['upstream-frankenphp'], 'frankenphp.c') : null;
 $patch = dirname(__DIR__) . '/config/patches/frankenphp-php86-output-handler.patch';
-$temporary = trim(runFrankenPatch(['mktemp', '-d', '/tmp/php-zts-franken-patches-XXXXXX']));
+$temporary = trim(runFrankenPatch(['mktemp', '-d', sys_get_temp_dir() . '/php-zts-franken-patches-XXXXXX']));
 try {
     $fixtures = [];
     foreach ($versions as $version) {
@@ -254,19 +274,39 @@ try {
             file_put_contents($globals, $contents);
         }
         echo "Passed PHP {$version}: " . ($eligible ? 'patch applies, repeats safely and checks source API' : 'FrankenPHP source stays byte-identical') . ".\n";
+        if ($upstream !== null) {
+            $upstreamFixture = $fixture . '/upstream-frankenphp';
+            mkdir($upstreamFixture);
+            file_put_contents($upstreamFixture . '/frankenphp.c', $upstream);
+            $upstreamProbe = static fn (): array => json_decode(runFrankenPatch([PHP_BINARY, __FILE__, '--fixture=' . $upstreamFixture], $environment, $fixture), true, flags: JSON_THROW_ON_ERROR);
+            $expected = ['applied' => $eligible, 'changed' => false];
+            if ($upstreamProbe() !== $expected || $upstreamProbe() !== $expected) {
+                throw new RuntimeException("Upstream-compatible FrankenPHP source changed for PHP {$version}");
+            }
+            echo "Passed PHP {$version}: upstream-compatible FrankenPHP source stays byte-identical and repeats safely.\n";
+        }
     }
     if ($patched === null || !preg_match('/^#if PHP_VERSION_ID >= 80600\n.*?(?=^    frankenphp_reset_super_globals\(\);)/ms', $patched, $block)) {
         throw new RuntimeException('No patched output-handler block found for native regression');
+    }
+    $blocks = ['patched' => $block[0]];
+    if ($upstream !== null) {
+        if (!preg_match('/^#if PHP_VERSION_ID < 80600\n.*?(?=^    frankenphp_reset_super_globals\(\);)/ms', $upstream, $block)) {
+            throw new RuntimeException('No upstream-compatible output-handler block found for native regression');
+        }
+        $blocks['upstream'] = $block[0];
     }
     foreach ($fixtures as $version => $fixture) {
         if (!preg_match('/^\s*((?:zend_string|char)\s*\*)\s*output_handler\s*;/m', file_get_contents($fixture . '/source/php-src/main/php_globals.h'), $type)) {
             throw new RuntimeException("Missing PHP {$version} output-handler declaration");
         }
-        $probe = $fixture . '/output-handler.c';
-        file_put_contents($probe, frankenProbeSource($block[0], $fixture . '/source/php-src/main/php_version.h', $type[1]));
-        runFrankenPatch(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-o', $fixture . '/output-handler', $probe]);
-        runFrankenPatch([$fixture . '/output-handler']);
-        echo "Passed PHP {$version}: native output-handler values, ownership and buffering fallbacks.\n";
+        foreach ($blocks as $name => $contents) {
+            $probe = $fixture . '/output-handler-' . $name;
+            file_put_contents($probe . '.c', frankenProbeSource($contents, $fixture . '/source/php-src/main/php_version.h', $type[1]));
+            runFrankenPatch(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-o', $probe, $probe . '.c']);
+            runFrankenPatch([$probe]);
+            echo "Passed PHP {$version}: {$name} native output-handler values, ownership and buffering fallbacks.\n";
+        }
     }
 } finally {
     removeFrankenPatch($temporary);

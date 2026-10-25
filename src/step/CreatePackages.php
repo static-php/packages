@@ -8,9 +8,14 @@ use staticphp\package;
 use staticphp\util\ExtMeta;
 use staticphp\util\SkippedExtensions;
 use staticphp\util\SharedLibraries;
+use staticphp\util\BuildPayload;
+use staticphp\util\ApkRuntimeAliases;
 use staticphp\package\library;
+use staticphp\package\runtime_layout;
 use Symfony\Component\Process\Process;
 use staticphp\CraftConfig;
+
+require_once dirname(__DIR__) . '/util/ApkRuntimeAliases.php';
 
 class CreatePackages
 {
@@ -28,6 +33,7 @@ class CreatePackages
     private static array $httpCache = [];
     /** @var array<string,string> resolved iteration per base package (name|version|arch|type) */
     private static array $resolvedIterations = [];
+    private static array $migrationBaselines = [];
     private static string $prefix = '-zts';
     private static bool $debuginfo = false;
     private static ?SharedLibraries $sharedLibraries = null;
@@ -45,8 +51,22 @@ class CreatePackages
         self::$consumerManifest = [];
         $manifestRoot = $libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH;
         $shared = CraftConfig::getInstance()->getRawConfig()['build-options']['with-shared-libs'] ?? false;
-        self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, getLibdir() . '/php-zts/lib');
+        self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, self::runtimeLibdir());
+        if (($payload = BuildPayload::load($manifestRoot)) !== null && !$payload->isSealed()) {
+            throw new RuntimeException('Seal the recorded payload before packaging it.');
+        }
+        if ($payload !== null && self::$packageType !== 'apk' && self::$sharedLibraries !== null
+            && in_array('openssl', self::$sharedLibraries->libraryIds(), true)
+            && ($payload->metadata()['openssl_variant']['profile'] ?? null) !== self::$packageType) {
+            throw new RuntimeException('Select and seal the matching OpenSSL package profile before packaging.');
+        }
+        if (self::$sharedLibraries !== null) {
+            self::createRuntimeLayoutPackage(self::$sharedLibraries->architecture());
+        }
         if ($libsOnly) {
+            if (($packageNames === ['runtime_layout'] || $packageNames === 'runtime_layout') && $libraries === null) {
+                return true;
+            }
             self::createLibraryPackages($libraries);
             echo "Library package creation completed.\n";
             return true;
@@ -81,10 +101,12 @@ class CreatePackages
                 $packageNames = [$packageNames];
             }
 
+            $includeCli = in_array('cli', $packageNames, true);
+            $packageNames = array_values(array_filter($packageNames, static fn (string $name): bool => $name !== 'cli'));
             foreach ($packageNames as $packageName) {
                 echo "Building package: {$packageName}\n";
 
-                if (in_array($packageName, self::$sapis, true)) {
+                if (in_array($packageName, self::$sapis, true) || in_array($packageName, ['cli', 'cgi', 'fpm', 'embed', 'frankenphp'], true)) {
                     self::createSapiPackage($packageName);
                 }
                 elseif ($packageName === 'devel') {
@@ -103,6 +125,10 @@ class CreatePackages
                     }
                 }
             }
+            if ($includeCli) {
+                self::prepareMigrationCutoffs();
+                self::createSapiPackage('cli');
+            }
         }
         else {
             self::createSapiPackages();
@@ -113,10 +139,469 @@ class CreatePackages
                 self::createGenericPackage('meta');
             }
             self::createExtensionPackages();
+            if (in_array('cli', self::$sapis, true)) {
+                self::prepareMigrationCutoffs();
+                self::createSapiPackage('cli');
+            }
         }
 
         echo "Package creation completed.\n";
         return true;
+    }
+
+    public static function stageSymlink(string $target, string $name): string
+    {
+        if (str_starts_with($target, '/') || basename($name) !== $name) {
+            throw new RuntimeException('Compatibility symlinks must have relative targets and simple names');
+        }
+        $directory = TEMP_DIR . '/aliases/' . hash('sha256', $target . "\0" . $name);
+        if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) {
+            throw new RuntimeException('Cannot stage compatibility symlink');
+        }
+        $path = $directory . '/' . $name;
+        if (is_link($path) && readlink($path) !== $target) {
+            throw new RuntimeException('Conflicting compatibility symlink');
+        }
+        if (!is_link($path) && !symlink($target, $path)) {
+            throw new RuntimeException('Cannot stage compatibility symlink');
+        }
+        return $path;
+    }
+
+    public static function runtimeLibdir(): string
+    {
+        return function_exists('getRuntimeLibdir') ? getRuntimeLibdir() : (defined('SPP_TYPE') && SPP_TYPE === 'apk' ? getLibdir() . '/php-zts/lib' : '/usr/lib/php-zts/lib');
+    }
+
+    private static function isPhpIndependent(package $package): bool
+    {
+        return $package instanceof library || $package instanceof runtime_layout;
+    }
+
+    private static function createRuntimeLayoutPackage(string $architecture): void
+    {
+        $package = new runtime_layout();
+        $baselines = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
+        $unchanged = $baselines !== [];
+        $reusable = [];
+        foreach ($baselines as $path) {
+            if (!is_string($path) || !is_file($path)) {
+                throw new RuntimeException('Missing captured runtime layout baseline');
+            }
+            $baseline = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+            $layout = $baseline['runtime_layout'] ?? [];
+            $matching = ($layout['version'] ?? null) === $package->getVersion()
+                && ($layout['source_hash'] ?? null) === $package->sourceHash(self::$packageType);
+            $unchanged = $unchanged && $matching && ($layout['complete'] ?? true);
+            if ($matching && isset($layout['archive'], $layout['archive_sha256'], $layout['package_version'])) {
+                $reusable[] = [$path, $layout];
+            }
+        }
+        if ($unchanged) {
+            return;
+        }
+        if ($reusable !== []) {
+            usort($reusable, static function (array $left, array $right): int {
+                $release = static function (array $record): int {
+                    if (!preg_match('/^(?:0:)?[^:-]+-(?:r)?(\d+)$/D', $record['package_version'], $match)) {
+                        throw new RuntimeException('Unexpected runtime layout package release');
+                    }
+                    return (int) $match[1];
+                };
+                return $release($right[1]) <=> $release($left[1]);
+            });
+            [$path, $layout] = $reusable[0];
+            self::reuseLayoutArchive($path, $layout, $architecture);
+            return;
+        }
+        $pattern = match (self::$packageType) {
+            'rpm' => DIST_RPM_PATH . '/php-zts-runtime-layout-' . $package->getVersion() . '-*.noarch.rpm',
+            'deb' => DIST_DEB_PATH . '/php-zts-runtime-layout_' . $package->getVersion() . '-*_all.deb',
+            'apk' => DIST_APK_PATH . '/php-zts-runtime-layout-' . $package->getVersion() . '-r*.' . $architecture . '.apk',
+        };
+        if (glob($pattern) !== []) {
+            return;
+        }
+        self::createPackageWithFpm($package, $package->getVersion(), self::$packageType === 'rpm' ? 'noarch' : (self::$packageType === 'deb' ? 'all' : $architecture));
+    }
+
+    private static function reuseLayoutArchive(string $baselinePath, array $layout, string $architecture): void
+    {
+        $directory = realpath(dirname($baselinePath));
+        $archive = realpath(dirname($baselinePath) . '/' . $layout['archive']);
+        if ($directory === false || $archive === false || !str_starts_with($archive, $directory . '/')
+            || !is_file($archive) || hash_file('sha256', $archive) !== $layout['archive_sha256']) {
+            throw new RuntimeException('Invalid retained runtime layout archive');
+        }
+        if (self::$packageType === 'rpm') {
+            $query = new Process(['rpm', '-qp', '--qf', '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}', $archive]);
+            $query->mustRun();
+            [$name, $version, $release, $arch] = explode('|', trim($query->getOutput()));
+            $fullVersion = $version . '-' . $release;
+            $filename = $name . '-' . $fullVersion . '.' . $arch . '.rpm';
+            $validArch = $arch === 'noarch';
+        } else {
+            $kind = self::$packageType === 'deb' ? 'debian' : 'alpine';
+            $code = 'import json,runpy,sys; h=runpy.run_path(sys.argv[1]); print(json.dumps(h["package_metadata"](sys.argv[2],sys.argv[3])))';
+            $query = new Process(['python3', '-c', $code, BASE_PATH . '/bin/forgejo-helper', $archive, $kind]);
+            $query->mustRun();
+            [$name, $fullVersion, $arch] = json_decode(trim($query->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+            $filename = self::$packageType === 'deb' ? $name . '_' . $fullVersion . '_' . $arch . '.deb' : $name . '-' . $fullVersion . '.' . $arch . '.apk';
+            $validArch = self::$packageType === 'deb' ? $arch === 'all' : $arch === $architecture;
+        }
+        if ($name !== 'php-zts-runtime-layout' || $fullVersion !== preg_replace('/^0:/', '', $layout['package_version']) || !$validArch) {
+            throw new RuntimeException('Retained runtime layout archive has unexpected native headers');
+        }
+        $destination = DIST_PATH . '/' . self::$packageType . '/' . $filename;
+        if (is_file($destination) && hash_file('sha256', $destination) !== $layout['archive_sha256']) {
+            throw new RuntimeException('Conflicting retained runtime layout archive bytes');
+        }
+        if (!is_file($destination) && !copy($archive, $destination)) {
+            throw new RuntimeException('Cannot reuse retained runtime layout archive');
+        }
+    }
+
+    private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
+    {
+        if ($name === 'php-zts-runtime-layout' || str_starts_with($name, 'php-zts-lib-')) {
+            return $type === 'apk' ? 0 : 1;
+        }
+        $paths = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
+        $minimum = $type === 'apk' ? 0 : 1;
+        $matchName = $type === 'deb' ? str_replace('_', '-', $name) : $name;
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        [$phpVersion] = self::getPhpVersionAndArchitecture();
+        preg_match('/^(\d+\.\d+)/', $phpVersion, $targetStream);
+        $advanceAbi = false;
+        if (($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) !== false && $planPath !== '') {
+            $plan = self::migrationBaseline($planPath);
+            if (($plan['schema'] ?? null) !== 1 || ($plan['type'] ?? null) !== $type) {
+                throw new RuntimeException('Invalid shared-library package plan');
+            }
+            $advanceAbi = ($plan['abi_break'] ?? false) === true && isset($plan['published_consumers'][$targetStream[1]][$matchName]);
+        }
+        foreach ($paths as $path) {
+            $data = self::migrationBaseline($path);
+            if (isset($data['type']) && $data['type'] !== $type) {
+                continue;
+            }
+            if (array_key_exists($targetStream[1], $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
+                continue;
+            }
+            $packages = array_merge($data['packages'] ?? [], $data['published_packages'] ?? []);
+            foreach ($data['consumer_versions'] ?? [] as $stream => $consumers) {
+                if (array_key_exists($stream, $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
+                    continue;
+                }
+                if (isset($consumers[$matchName])) {
+                    $packages[] = ['name' => $matchName, 'version' => $consumers[$matchName]];
+                }
+            }
+            foreach ($packages as $package) {
+                if (($package['name'] ?? '') !== $matchName
+                    || (isset($package['architecture']) && $normalizeArch($package['architecture']) !== $normalizeArch($architecture))) {
+                    continue;
+                }
+                $published = preg_replace('/^\d+:/', '', $package['version']);
+                $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
+                if (preg_match($pattern, $published, $release)) {
+                    $minimum = max($minimum, (int) $release[1] + 1);
+                }
+            }
+        }
+        return $minimum;
+    }
+
+    public static function migrationPackageVersion(string $type, string $name, string $proposed, string $architecture): string
+    {
+        $paths = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($paths) || !array_is_list($paths)) {
+            throw new RuntimeException('SPP_BASELINE_MANIFESTS must be a JSON array');
+        }
+        $matchName = $type === 'deb' ? str_replace('_', '-', $name) : $name;
+        $baseName = preg_replace('/-debuginfo$/', '', $matchName);
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        $versions = [];
+        foreach ($paths as $path) {
+            if (!is_string($path) || !is_file($path)) {
+                throw new RuntimeException('Missing captured package baseline');
+            }
+            $data = self::migrationBaseline($path);
+            if (isset($data['type']) && $data['type'] !== $type) {
+                continue;
+            }
+            foreach (array_merge($data['packages'] ?? [], $data['published_packages'] ?? []) as $package) {
+                if (is_array($package) && in_array($package['name'] ?? '', [$matchName, $baseName], true)
+                    && (!isset($package['architecture']) || $normalizeArch($package['architecture']) === $normalizeArch($architecture))) {
+                    $versions[] = $package['version'];
+                }
+            }
+            foreach ($data['consumer_versions'] ?? [] as $consumers) {
+                foreach ([$matchName, $baseName] as $candidateName) {
+                    if (isset($consumers[$candidateName])) {
+                        $versions[] = $consumers[$candidateName];
+                    }
+                }
+            }
+        }
+        $identity = self::migrationVersionIdentity($type, $proposed);
+        if ($identity !== null) {
+            preg_match('/^([0-9]+(?:\.[0-9]+){1,2})/', $identity[0], $numeric);
+            $knownVersions = [];
+            $differentPhase = false;
+            foreach (array_unique($versions) as $version) {
+                $base = preg_replace('/^\d+:/', '', $version);
+                $base = preg_replace($type === 'apk' ? '/-r\d+$/' : '/-[^-]+$/', '', $base);
+                $known = self::migrationVersionIdentity($type, $base);
+                if ($known === null || explode('.', $known[1])[0] !== explode('.', $identity[1])[0]
+                    || !preg_match('/^' . preg_quote($numeric[1], '/') . '(?:~|$)/D', $known[0])) {
+                    continue;
+                }
+                $differentPhase = $differentPhase || $known[0] !== $identity[0];
+                $knownVersions[$base] = $known[0];
+            }
+            if ($differentPhase) {
+                $latest = null;
+                foreach ($knownVersions as $base => $upstream) {
+                    if ($latest === null || self::compareMigrationVersions($type, $base, $latest[0]) > 0) {
+                        $latest = [$base, $upstream];
+                    }
+                }
+                $currentUpstream = $type === 'apk' ? self::toApkVersion($identity[0]) : $identity[0];
+                $publishedUpstream = $type === 'apk' ? self::toApkVersion($latest[1]) : $latest[1];
+                if (self::compareMigrationVersions($type, $currentUpstream, $publishedUpstream) < 0) {
+                    return $proposed;
+                }
+            }
+        }
+        $retained = null;
+        foreach (array_unique($versions) as $published) {
+            $published = preg_replace('/^\d+:/', '', $published);
+            $published = preg_replace($type === 'apk' ? '/-r\d+$/' : '/-[^-]+$/', '', $published);
+            if ($published === $proposed) {
+                continue;
+            }
+            if ($published === $proposed . ($type === 'apk' ? '_p0' : '+ext')) {
+                if ($retained === null || self::compareMigrationVersions($type, $published, $retained) > 0) {
+                    $retained = $published;
+                }
+                continue;
+            }
+            if ($identity === null) {
+                continue;
+            }
+            $oldIdentity = self::migrationVersionIdentity($type, $published);
+            $floor = null;
+            preg_match('/^([0-9]+(?:\.[0-9]+){1,2})/', $identity[0], $numeric);
+            if ($oldIdentity !== null && explode('.', $oldIdentity[1])[0] === explode('.', $identity[1])[0]
+                && preg_match('/^' . preg_quote($numeric[1], '/') . '(?:~|$)/D', $oldIdentity[0])) {
+                $candidatePhase = substr($identity[0], strlen($numeric[1]));
+                if ($oldIdentity === $identity) {
+                    $floor = $published;
+                } elseif ($type !== 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2})(?:_|\+php)\d.*\+ext(.*)$/D', $published, $parts)
+                    && preg_match('/(?:_|\+php)\d.*$/D', $proposed, $tag)) {
+                    $floor = $parts[1] . $tag[0] . '+ext' . ($oldIdentity[0] === $identity[0] ? $parts[2] : $candidatePhase);
+                } elseif ($type === 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2})p\d+\.\d+.*_p0(.*)$/D', $published, $parts)) {
+                    $floor = $parts[1] . 'p' . self::toApkVersion($identity[1]) . '_p0' . ($oldIdentity[0] === $identity[0] ? $parts[2] : self::toApkVersion($candidatePhase));
+                }
+            }
+            if ($floor !== null && ($retained === null || self::compareMigrationVersions($type, $floor, $retained) > 0)) {
+                $retained = $floor;
+            }
+        }
+        return $retained ?? $proposed;
+    }
+
+    private static function migrationPhase(string $phase, bool $apk = false): ?string
+    {
+        if ($apk) {
+            $phase = preg_replace_callback('/_alpha0_alpha(\d*)/', static fn (array $match): string => '~~dev' . (int) ($match[1] ?: 0), $phase);
+            $phase = str_replace('_pre', '~~dev0', $phase);
+            $phase = preg_replace('/_(alpha|beta|rc)/', '~$1', $phase);
+        }
+        if (!preg_match('/^(?:~{1,2}(?:alpha|beta|rc|dev)\d*)*$/D', $phase)) {
+            return null;
+        }
+        return preg_replace_callback('/~{1,2}(alpha|beta|rc|dev)(\d*)/', static fn (array $match): string =>
+            ($match[1] === 'dev' ? '~~' : '~') . $match[1] . (int) ($match[2] ?: 0), $phase);
+    }
+
+    private static function migrationBaseline(string $path): array
+    {
+        $content = file_get_contents($path);
+        if ($content === false) {
+            throw new RuntimeException('Cannot read captured package baseline');
+        }
+        $hash = hash('sha256', $content);
+        if (!isset(self::$migrationBaselines[$path]) || self::$migrationBaselines[$path][0] !== $hash) {
+            $value = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($value)) {
+                throw new RuntimeException('Invalid captured package baseline');
+            }
+            self::$migrationBaselines[$path] = [$hash, $value];
+        }
+        return self::$migrationBaselines[$path][1];
+    }
+
+    private static function migrationVersionIdentity(string $type, string $version): ?array
+    {
+        $number = '([0-9]+(?:\.[0-9]+){1,2})';
+        $phase = '((?:~{1,2}(?:alpha|beta|rc|dev)\d*)*)';
+        if ($type !== 'apk') {
+            $tag = $type === 'rpm' ? '_' : '\+php';
+            if (!preg_match('/^' . $number . $phase . $tag . '(\d{2,})(?:\.(\d+))?' . $phase . '(?:\+ext' . $phase . ')?$/D', $version, $parts)) {
+                return null;
+            }
+            $upstream = self::migrationPhase(($parts[2] ?? '') . ($parts[6] ?? ''));
+            $php = self::migrationPhase($parts[5] ?? '');
+            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) ($parts[4] ?: 0) . $php];
+        }
+        $phase = '((?:_(?:alpha|beta|rc|pre)\d*)*)';
+        if (preg_match('/^' . $number . $phase . '_p(\d{2,})_p(\d+)' . $phase . '$/D', $version, $parts)) {
+            $upstream = self::migrationPhase($parts[2], true);
+            $php = self::migrationPhase($parts[5], true);
+            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) $parts[4] . $php];
+        }
+        if (preg_match('/^' . $number . 'p(\d{2,})\.(\d+)' . $phase . '(?:_p0' . $phase . ')?$/D', $version, $parts)) {
+            $upstream = self::migrationPhase($parts[5] ?? '', true);
+            $php = self::migrationPhase($parts[4], true);
+            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[2] . '.' . (int) $parts[3] . $php];
+        }
+        return null;
+    }
+
+    public static function migrationUpstreamVersion(string $type, string $version): ?string
+    {
+        $version = preg_replace('/^\d+:/', '', $version);
+        $version = preg_replace($type === 'apk' ? '/-r\d+$/' : '/-[^-]+$/', '', $version);
+        $identity = self::migrationVersionIdentity($type, $version);
+        if ($identity !== null) {
+            return $identity[0];
+        }
+        if ($type === 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2})~((?:alpha|beta|rc|dev)\d*)(?:_|p)(8[2-6])$/D', $version, $parts)) {
+            return $parts[1] . self::migrationPhase('~' . $parts[2]);
+        }
+        return null;
+    }
+
+    private static function compareMigrationVersions(string $type, string $left, string $right): int
+    {
+        if ($left === $right) {
+            return 0;
+        }
+        if ($type === 'rpm') {
+            $process = new Process(['rpmdev-vercmp', $left, $right]);
+            $process->run();
+            return match ($process->getExitCode()) {0 => 0, 11 => 1, 12 => -1, default => throw new RuntimeException('Cannot compare captured migration RPM versions')};
+        }
+        if ($type === 'apk') {
+            $process = new Process(['apk', 'version', '-t', $left, $right]);
+            $process->mustRun();
+            return match (trim($process->getOutput())) {'=' => 0, '>' => 1, '<' => -1, default => throw new RuntimeException('Cannot compare captured migration APK versions')};
+        }
+        foreach (['gt' => 1, 'lt' => -1] as $operation => $order) {
+            $process = new Process(['dpkg', '--compare-versions', $left, $operation, $right]);
+            $process->run();
+            if ($process->getExitCode() === 0) {
+                return $order;
+            }
+            if ($process->getExitCode() !== 1) {
+                throw new RuntimeException('Cannot compare captured migration DEB versions');
+            }
+        }
+        return 0;
+    }
+
+    private static function prepareMigrationCutoffs(): void
+    {
+        if (getenv('SPP_MIGRATION_CUTOFFS') || !getenv('SPP_BASELINE_MANIFESTS')) {
+            return;
+        }
+        $baselines = json_decode((string) getenv('SPP_BASELINE_MANIFESTS'), true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($baselines) || !array_is_list($baselines)) {
+            throw new RuntimeException('SPP_BASELINE_MANIFESTS must be a JSON array of captured baseline manifests');
+        }
+        if ($baselines === []) {
+            return;
+        }
+        $output = TEMP_DIR . '/migration-cutoffs-' . self::$packageType . '.json';
+        [$version] = self::getPhpVersionAndArchitecture();
+        preg_match('/^(\d+\.\d+)/', $version, $stream);
+        $arguments = ['python3', BASE_PATH . '/bin/shared-library-plan', 'migration-cutoffs', '--type', self::$packageType,
+            '--artifacts', DIST_PATH . '/' . self::$packageType, '--php-version', $stream[1], '--output', $output];
+        foreach ($baselines as $baseline) {
+            if (!is_string($baseline) || !is_file($baseline)) {
+                throw new RuntimeException('Missing captured migration baseline');
+            }
+            $arguments[] = '--baseline-manifest';
+            $arguments[] = $baseline;
+        }
+        $process = new Process($arguments);
+        $process->setTimeout(null);
+        $process->mustRun();
+        putenv('SPP_MIGRATION_CUTOFFS=' . $output);
+    }
+
+    private static function migrationConflicts(): array
+    {
+        $path = getenv('SPP_MIGRATION_CUTOFFS') ?: BUILD_ROOT_PATH . '/migration-cutoffs.json';
+        if (!is_file($path)) {
+            return [];
+        }
+        $data = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        if (($data['schema'] ?? null) !== 1 || !is_array($data['formats'][self::$packageType] ?? null)) {
+            throw new RuntimeException('Invalid migration cutoff manifest');
+        }
+        $conflicts = [];
+        foreach ($data['formats'][self::$packageType] as $name => $version) {
+            if (!is_string($name) || !preg_match('/^[a-z0-9][a-z0-9+_.-]*$/D', $name)
+                || !is_string($version) || !preg_match('/^[0-9][A-Za-z0-9.+:~_^\-]*$/D', $version)) {
+                throw new RuntimeException('Invalid package migration cutoff');
+            }
+            if ($name === self::getPrefix() . '-cli' || $name === 'php-zts-runtime-layout' || str_starts_with($name, 'php-zts-lib-')) {
+                throw new RuntimeException('Migration cutoffs may only constrain PHP runtime consumers');
+            }
+            $conflicts[] = match (self::$packageType) {
+                'deb' => $name . ' (<< ' . $version . ')',
+                'apk' => $name . '<' . $version,
+                default => $name . ' < ' . $version,
+            };
+        }
+        if (self::$packageType === 'apk') {
+            $replacements = $data['logical_replacements']['apk'] ?? [];
+            if (!is_array($replacements)) {
+                throw new RuntimeException('Invalid APK migration replacement manifest');
+            }
+            foreach ($replacements as $logical => $physical) {
+                if (!is_string($logical) || !is_string($physical) || $logical === $physical
+                    || ApkRuntimeAliases::physicalName($logical) !== $physical) {
+                    throw new RuntimeException('APK migration replacement does not match the configured aliases');
+                }
+                $conflicts[] = $logical . '>0';
+            }
+        }
+        return array_values(array_unique($conflicts));
+    }
+
+    public static function getSharedRuntimeCapability(): string
+    {
+        [$version] = self::getPhpVersionAndArchitecture();
+        if (!preg_match('/^(\d+)\.(\d+)/', $version, $parts)) {
+            throw new RuntimeException('Cannot determine PHP stream for shared runtime capability');
+        }
+        $payload = BuildPayload::load(BUILD_ROOT_PATH);
+        $api = $payload?->metadata()['module_api'] ?? null;
+        foreach ([BUILD_ROOT_PATH . '/include/php/Zend/zend_modules.h', BUILD_ROOT_PATH . '/include/Zend/zend_modules.h'] as $header) {
+            if ($api === null && is_file($header) && preg_match('/^#define\s+ZEND_MODULE_API_NO\s+(\d+)/m', (string) file_get_contents($header), $match)) {
+                $api = $match[1];
+                break;
+            }
+        }
+        if ($api === null && $payload !== null) {
+            throw new RuntimeException('Recorded PHP payload lacks the Zend module ABI');
+        }
+        $api ??= sprintf('%d%02d00', (int) $parts[1], (int) $parts[2]);
+        return self::getPrefix() . '-shared-runtime-' . $parts[1] . $parts[2] . '-abi' . $api . '-1';
     }
 
     private static function createLibraryPackages(?array $ids): void
@@ -137,8 +622,7 @@ class CreatePackages
             $package = new library($manifest, $id);
             $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
             $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
-            $dist = self::$packageType === 'rpm' ? self::getDistVersion() : '';
-            $release = $iteration . ($dist === '' ? '' : '.' . $dist);
+            $release = $iteration;
             $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $release);
             $packages[] = $package;
         }
@@ -229,12 +713,15 @@ class CreatePackages
         echo "Creating packages for SAPIs...\n";
 
         foreach (self::$sapis as $sapi) {
-            self::createSapiPackage($sapi);
+            if ($sapi !== 'cli') {
+                self::createSapiPackage($sapi);
+            }
         }
     }
 
     private static function createSapiPackage(string $sapi): void
     {
+        self::assertRecordedSapiAvailable($sapi);
         $packageClass = "\\staticphp\\package\\{$sapi}";
 
         if (!class_exists($packageClass)) {
@@ -245,10 +732,9 @@ class CreatePackages
         // FrankenPHP has a special package creation flow
         if ($sapi === 'frankenphp') {
             $package = new $packageClass();
-            $files = [BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/frankenphp'];
+            $files = [BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/' . $package->getName()];
             $dependencies = self::$sharedLibraries === null ? self::$binaryDependencies : self::getPayloadBinaryDependencies($files);
             $package->createPackages(self::$packageType, $dependencies, self::$iterationOverride, self::$debuginfo, self::$bump);
-            self::recordConsumer($package->getName(), $files);
             return;
         }
 
@@ -264,6 +750,27 @@ class CreatePackages
             if (self::$debuginfo) {
                 self::createPackageWithFpm($package, $phpVersion, $architecture, true);
             }
+        }
+    }
+
+    private static function assertRecordedSapiAvailable(string $sapi): void
+    {
+        if (!in_array($sapi, ['cli', 'cgi', 'fpm', 'embed', 'frankenphp'], true)
+            || ($payload = BuildPayload::load(BUILD_ROOT_PATH)) === null) {
+            return;
+        }
+        $builtSapis = $payload->configuration()['sapi'] ?? [];
+        $builtSapis = is_string($builtSapis) ? array_map('trim', explode(',', $builtSapis)) : $builtSapis;
+        if (!in_array($sapi, $builtSapis, true)) {
+            throw new RuntimeException("SAPI {$sapi} was not built in the recorded payload");
+        }
+        $source = match ($sapi) {
+            'embed' => BUILD_LIB_PATH . '/libphp' . getSharedLibrarySuffix() . '.so',
+            'frankenphp' => BUILD_BIN_PATH . '/frankenphp',
+            default => BUILD_BIN_PATH . '/php' . ($sapi === 'cli' ? '' : '-' . $sapi),
+        };
+        if (!is_file($source)) {
+            throw new RuntimeException("Recorded SAPI {$sapi} has no package source: {$source}");
         }
     }
 
@@ -519,17 +1026,65 @@ class CreatePackages
     private static function packageConfig(package $package, bool $isDebuginfo): array
     {
         $config = $isDebuginfo ? $package->getDebuginfoFpmConfig() : $package->getFpmConfig();
+        if (($payload = BuildPayload::load(BUILD_ROOT_PATH)) !== null && $payload->isSealed()) {
+            $files = [];
+            foreach ($config['files'] ?? [] as $source => $destination) {
+                $prepared = $source;
+                if ($isDebuginfo) {
+                    foreach ($payload->metadata()['prepared'] ?? [] as $relative => $entry) {
+                        if (isset($entry['debug']) && in_array($source, [BUILD_ROOT_PATH . '/debug/' . $relative . '.debug', BUILD_ROOT_PATH . '/debug/' . basename($relative) . '.debug'], true)) {
+                            $prepared = BUILD_ROOT_PATH . '/' . $entry['debug']['path'];
+                            break;
+                        }
+                    }
+                } elseif (!is_link($source) && is_file($source) && file_get_contents($source, false, null, 0, 4) === "\x7fELF") {
+                    $prepared = $payload->prepareFile($source)['runtime'];
+                }
+                $files[$prepared] = $destination;
+            }
+            $config['files'] = $files;
+        }
         if (self::$sharedLibraries === null) {
+            return $config;
+        }
+        if ($package instanceof runtime_layout) {
+            self::$binaryDependencies = [];
             return $config;
         }
         self::$binaryDependencies = $isDebuginfo ? [] : self::getPayloadBinaryDependencies($config['files'] ?? []);
         if (!$isDebuginfo) {
+            if (!$package instanceof runtime_layout) {
+                $config['depends'][] = 'php-zts-runtime-layout';
+            }
+            if (!self::isPhpIndependent($package)) {
+                $capability = self::getSharedRuntimeCapability();
+                if ($package->getName() === self::getPrefix() . '-cli') {
+                    $config['provides_unversioned'][] = $capability;
+                    $config['conflicts'] = array_values(array_unique([...($config['conflicts'] ?? []), ...self::migrationConflicts()]));
+                    $cutoffs = getenv('SPP_MIGRATION_CUTOFFS') ?: BUILD_ROOT_PATH . '/migration-cutoffs.json';
+                    if (is_file($cutoffs)) {
+                        $config['files'][$cutoffs] = '/usr/share/php-zts/migration/cutoffs.json';
+                    }
+                    if (self::$packageType === 'apk') {
+                        $config['provides_unversioned'][] = self::getPrefix() . '-shared-runtime=1';
+                    }
+                } else {
+                    $config['depends'][] = $capability;
+                }
+                if (self::$packageType === 'apk' && in_array($package->getName(), [self::getPrefix() . '-curl', self::getPrefix() . '-fileinfo'], true)) {
+                    $config['apk_install_if'] = [self::getPrefix() . '-cli', self::getPrefix() . '-shared-runtime=1'];
+                }
+            }
             $id = $package instanceof library ? $package->getLibraryId() : null;
             $config['depends'] = array_values(array_unique([
                 ...($config['depends'] ?? []),
                 ...self::$sharedLibraries->dependenciesForPackage($config['files'] ?? [], self::$packageType, $id, $config['dlopen_dependencies'] ?? []),
             ]));
-            self::recordConsumer($package->getName(), $config['files'] ?? [], $id, $config['dlopen_dependencies'] ?? []);
+            if (self::isPhpIndependent($package)) {
+                self::recordConsumer($package->getName(), $config['files'] ?? [], $id, $config['dlopen_dependencies'] ?? []);
+            } else {
+                $config['files'] = array_merge($config['files'] ?? [], self::consumerMetadataFiles($package->getName(), $config['files'] ?? [], $config['dlopen_dependencies'] ?? []));
+            }
         }
         return $config;
     }
@@ -595,15 +1150,104 @@ class CreatePackages
         if (self::$sharedLibraries === null) {
             return;
         }
-        $dependencies = self::$sharedLibraries->dependenciesForFiles($files, $id, $dlopen);
+        $name = self::$packageType === 'deb' ? str_replace('_', '-', $name) : $name;
+        $libraries = $id === null ? self::consumerLibraryIds($files, $dlopen)
+            : array_column(self::$sharedLibraries->dependenciesForFiles($files, $id, $dlopen), 'id');
         self::$consumerManifest[$name] = [
+            ...(self::$packageType === 'apk' && $id === null ? self::consumerAliasMetadata($name, $files) : []),
             'php_version' => $id === null ? (defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : null) : null,
             'architecture' => self::$sharedLibraries->architecture(),
-            'libraries' => array_column($dependencies, 'id'),
+            'libraries' => $libraries,
             'files' => $files,
         ];
         $path = DIST_PATH . '/' . self::$packageType . '/shared-library-consumers.json';
         file_put_contents($path, json_encode(['schema' => 1, 'consumers' => self::$consumerManifest], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+    }
+
+    public static function consumerMetadataFiles(string $name, array $files, array $dlopen = []): array
+    {
+        if (self::$sharedLibraries === null) {
+            return [];
+        }
+        $name = self::$packageType === 'deb' ? str_replace('_', '-', $name) : $name;
+        if (!preg_match('/^[a-z0-9][a-z0-9+_.-]*$/D', $name)) {
+            throw new RuntimeException('Invalid PHP consumer package name');
+        }
+        self::recordConsumer($name, $files, null, $dlopen);
+        $version = defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : self::getPhpVersionAndArchitecture()[0];
+        if (!preg_match('/^(\d+\.\d+)(?:\D|$|\.\d)/', $version, $match)) {
+            throw new RuntimeException('Invalid PHP consumer stream');
+        }
+        $metadata = ['schema' => 1, 'name' => $name, 'php_stream' => $match[1],
+            'architecture' => self::$sharedLibraries->architecture(), 'libraries' => self::$consumerManifest[$name]['libraries']];
+        if (self::$packageType === 'apk') {
+            $metadata = array_merge($metadata, self::consumerAliasMetadata($name, $files));
+        }
+        $directory = TEMP_DIR . '/consumer-metadata/' . self::$packageType;
+        if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) {
+            throw new RuntimeException('Cannot create PHP consumer metadata directory');
+        }
+        $path = $directory . '/' . $name . '.json';
+        $contents = json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        if (file_put_contents($path, $contents) !== strlen($contents)) {
+            throw new RuntimeException('Cannot persist PHP consumer metadata');
+        }
+        return [$path => '/usr/share/php-zts/consumers/' . $name . '.json'];
+    }
+
+    private static function consumerAliasMetadata(string $name, array $files): array
+    {
+        $metadata = ApkRuntimeAliases::metadata($name);
+        if ($metadata === []) {
+            return [];
+        }
+        $modules = [];
+        foreach ($files as $source => $destination) {
+            if (str_contains($destination, '/modules/')
+                && preg_match('/^' . preg_quote($metadata['extension'], '/') . '(?:-[A-Za-z0-9._-]+)?\.so$/D', basename($destination))
+                && is_file($source)) {
+                $modules[] = $source;
+            }
+        }
+        if (count($modules) !== 1) {
+            throw new RuntimeException('APK extension alias must own exactly one runtime module');
+        }
+        return [...$metadata, 'module_sha256' => hash_file('sha256', $modules[0])];
+    }
+
+    private static function consumerLibraryIds(array $files, array $dlopen): array
+    {
+        $scan = $files;
+        foreach (self::payloadFiles($files) as $file) {
+            if (!is_file($file) || file_get_contents($file, false, null, 0, 4) !== "\x7fELF") {
+                continue;
+            }
+            $dynamic = new Process(['readelf', '--wide', '--dynamic', $file]);
+            $dynamic->mustRun();
+            preg_match_all('/\(NEEDED\).*\[(libphp(?:-[a-zA-Z0-9.-]+)?\.so)\]/', $dynamic->getOutput(), $needed);
+            foreach ($needed[1] as $soname) {
+                $runtime = realpath(BUILD_LIB_PATH . '/' . $soname);
+                if ($runtime === false) {
+                    throw new RuntimeException('Missing linked PHP runtime: ' . $soname);
+                }
+                $scan[$runtime] = self::runtimeLibdir() . '/' . $soname;
+            }
+        }
+        $pending = array_column(self::$sharedLibraries->dependenciesForFiles($scan, null, $dlopen), 'id');
+        $ids = [];
+        while ($pending !== []) {
+            $id = array_pop($pending);
+            if (isset($ids[$id])) {
+                continue;
+            }
+            $ids[$id] = true;
+            foreach (self::$sharedLibraries->dependenciesForFiles(self::$sharedLibraries->getPackageFiles($id), $id) as $dependency) {
+                $pending[] = $dependency['id'];
+            }
+        }
+        $result = array_keys($ids);
+        sort($result);
+        return $result;
     }
 
     private static function createRpmPackage(package $package, string $phpVersion, string $architecture, bool $isDebuginfo = false): void
@@ -616,7 +1260,7 @@ class CreatePackages
 
         // For RPM packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
-        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
+        $fullPhpVersion = self::isPhpIndependent($package) ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $rpmVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
@@ -624,13 +1268,12 @@ class CreatePackages
             $rpmVersion = self::getTaggedPackageVersion('rpm', $phpVersion);
         }
 
+        $rpmVersion = self::migrationPackageVersion('rpm', $name, $rpmVersion, $architecture);
+
         // Calculate iteration for RPM (--iteration override > --bump remote query > local)
         $baseIteration = self::resolveIteration($name, $rpmVersion, $architecture, 'rpm');
 
-        // Add distribution version to iteration for RPM metadata
-        $distVersion = self::getDistVersion();
-        $iteration = $distVersion !== '' ? "{$baseIteration}.{$distVersion}" : $baseIteration;
-        $distSuffix = $distVersion !== '' ? ".{$distVersion}" : '';
+        $iteration = $baseIteration;
         $packageFile = DIST_RPM_PATH . "/{$name}-{$rpmVersion}-{$iteration}.{$architecture}.rpm";
 
         $fpmArgs = [...[
@@ -652,7 +1295,7 @@ class CreatePackages
         ], ...$extraArgs];
 
         // Ensure non-CLI packages depend on the same PHP major.minor as php-zts-cli (ignore iteration/patch)
-        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
+        if (!self::isPhpIndependent($package) && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -754,7 +1397,7 @@ class CreatePackages
 
         if (isset($config['files']) && is_array($config['files'])) {
             foreach ($config['files'] as $source => $dest) {
-                if (file_exists($source)) {
+                if (file_exists($source) || is_link($source)) {
                     if (str_starts_with($source, BUILD_BIN_PATH . '/') &&
                         is_executable($source) &&
                         basename($source) !== basename($dest)) {
@@ -819,13 +1462,15 @@ class CreatePackages
         // For DEB packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
         // e.g., redis 6.0.2+php85 is higher than redis 6.0.2+php83
-        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
+        $fullPhpVersion = self::isPhpIndependent($package) ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $debVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
             $debVersion = self::getTaggedPackageVersion('deb', $phpVersion);
         }
+
+        $debVersion = self::migrationPackageVersion('deb', $name, $debVersion, $debArch);
 
         // Calculate iteration for DEB (--iteration override > --bump remote query > local)
         $iteration = self::resolveIteration($name, $debVersion, $debArch, 'deb');
@@ -858,7 +1503,7 @@ class CreatePackages
 
         // Ensure non-CLI packages depend on the same PHP major.minor as php-zts-cli (ignore iteration/patch)
         // IMPORTANT: Use the actual PHP runtime version, not the package's own version (extensions have their own versioning)
-        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
+        if (!self::isPhpIndependent($package) && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -972,7 +1617,7 @@ class CreatePackages
 
         if (isset($config['files']) && is_array($config['files'])) {
             foreach ($config['files'] as $source => $dest) {
-                if (file_exists($source)) {
+                if (file_exists($source) || is_link($source)) {
                     // Check if this is a binary that needs its debug link fixed
                     // Only fix binaries in BUILD_BIN_PATH that are being renamed
                     if (str_starts_with($source, BUILD_BIN_PATH . '/') &&
@@ -1027,7 +1672,7 @@ class CreatePackages
 
         // For APK packages, append PHP version to package version for extensions
         // This ensures proper version ordering when the same extension version is built for different PHP versions
-        $fullPhpVersion = $package instanceof library ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
+        $fullPhpVersion = self::isPhpIndependent($package) ? $phpVersion : self::getPhpVersionAndArchitecture()[0];
         $apkVersion = $phpVersion;
 
         // If package version differs from PHP version, it's an extension - append PHP version
@@ -1035,7 +1680,7 @@ class CreatePackages
             $apkVersion = self::getTaggedPackageVersion('apk', $phpVersion);
         }
 
-        $apkVersion = self::toApkVersion($apkVersion);
+        $apkVersion = self::migrationPackageVersion('apk', $name, self::toApkVersion($apkVersion), $architecture);
 
         // Calculate iteration for APK (--iteration override > --bump remote query > local)
         $iteration = self::resolveIteration($name, $apkVersion, $architecture, 'apk');
@@ -1099,11 +1744,15 @@ class CreatePackages
             }
         }
 
+        if (!$isDebuginfo && !empty($config['apk_scripts'])) {
+            $nfpmConfig['apk']['scripts'] = $config['apk_scripts'];
+        }
+
         // Build dependencies
         $depends = [];
 
         // Ensure non-CLI packages depend on the same PHP major.minor
-        if (!$package instanceof library && $name !== self::getPrefix() . '-cli') {
+        if (!self::isPhpIndependent($package) && $name !== self::getPrefix() . '-cli') {
             [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
             if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
                 $maj = (int)$m[1];
@@ -1183,13 +1832,19 @@ class CreatePackages
         }
         if (isset($config['conflicts']) && is_array($config['conflicts'])) {
             $nfpmConfig['conflicts'] = $config['conflicts'];
+            foreach ($config['conflicts'] as $conflict) {
+                if (is_string($conflict) && preg_match('/^[a-z0-9][a-z0-9+_.-]*(?:[<>]=?|=)[0-9][A-Za-z0-9.+_:-]*$/D', $conflict)) {
+                    $nfpmConfig['depends'][] = '!' . $conflict;
+                }
+            }
+            $nfpmConfig['depends'] = array_values(array_unique($nfpmConfig['depends'] ?? []));
         }
 
         // Build contents (files)
         $contents = [];
         if (isset($config['files']) && is_array($config['files'])) {
             foreach ($config['files'] as $source => $dest) {
-                if (file_exists($source)) {
+                if (file_exists($source) || is_link($source)) {
                     // Fix debug link for renamed binaries
                     if (str_starts_with($source, BUILD_BIN_PATH . '/') &&
                         is_executable($source) &&
@@ -1258,6 +1913,22 @@ class CreatePackages
             throw new RuntimeException("nfpm package creation failed: " . $nfpmProcess->getErrorOutput());
         }
 
+        $metadataArgs = [];
+        if (!$isDebuginfo && !empty($config['apk_install_if'])) {
+            $metadataArgs = ['--install-if', implode(' ', $config['apk_install_if'])];
+        }
+        if (isset($config['apk_provider_priority'])) {
+            if (!is_int($config['apk_provider_priority']) || $config['apk_provider_priority'] < 0 || $config['apk_provider_priority'] > 65535) {
+                throw new RuntimeException('Invalid APK provider priority');
+            }
+            $metadataArgs = [...$metadataArgs, '--provider-priority', (string) $config['apk_provider_priority']];
+        }
+        if ($metadataArgs !== []) {
+            $metadata = new Process(['python3', BASE_PATH . '/bin/apk-control-metadata', $outputFile, ...$metadataArgs]);
+            $metadata->setTimeout(null);
+            $metadata->mustRun();
+        }
+
         // Clean up config file
         @unlink($nfpmConfigFile);
     }
@@ -1279,6 +1950,10 @@ class CreatePackages
     private static function getPhpVersionAndArchitecture(): array
     {
         if (!empty(self::$versionArch)) {
+            return self::$versionArch;
+        }
+        if (($payload = BuildPayload::load(BUILD_ROOT_PATH)) !== null) {
+            self::$versionArch = [self::normalizeVersion($payload->phpVersion()), $payload->architecture()];
             return self::$versionArch;
         }
         $basePhpVersion = SPP_PHP_VERSION;
@@ -1460,6 +2135,9 @@ class CreatePackages
      */
     private static function fixBinaryDebugLink(string $sourceBinary, string $targetBinaryName): string
     {
+        if (($payload = BuildPayload::load(BUILD_ROOT_PATH)) !== null && $payload->isSealed()) {
+            return $payload->prepareFile($sourceBinary)['runtime'];
+        }
         // Extract just the filename from the target path
         $targetFilename = basename($targetBinaryName);
         $newDebugFileName = $targetFilename . '.debug';
@@ -1610,7 +2288,7 @@ class CreatePackages
                     $next = max($next, self::getRemoteNextIteration($base . '-debuginfo', $version, $architecture, $packageType));
                 }
             } else {
-                $next = self::getNextIteration($base, $version, $architecture, $packageType);
+                $next = max(self::getNextIteration($base, $version, $architecture, $packageType), self::migrationNextIteration($base, $version, $architecture, $packageType));
             }
             self::$resolvedIterations[$key] = (string)$next;
         }
@@ -1635,32 +2313,29 @@ class CreatePackages
         $maxIteration = ($packageType === 'apk') ? -1 : 0;
 
         if ($packageType === 'rpm') {
-            $dist = self::getDistVersion();
-            if ($dist === '') {
-                throw new RuntimeException("--bump: unable to determine RPM dist version (el8/el9/...) for {$name}");
-            }
             $baseUrl = getenv('SPP_RPM_REPO_URL') ?: 'https://rpm.henderkes.com';
-            $url = rtrim($baseUrl, '/') . "/{$architecture}/{$dist}/";
-            [$code, $body] = self::httpGet($url);
-            if ($code === 404) {
-                return $maxIteration + 1;
-            }
-            if ($code !== 200 || $body === null) {
-                throw new RuntimeException("--bump: failed to fetch RPM index {$url} (HTTP {$code})");
-            }
-            // {name}-{version}-{iteration}[.{phpSuffix}][.{dist}].{arch}.rpm
             $pattern = '#' . preg_quote($name, '#') . '-' . preg_quote($version, '#')
                 . '-(\d+)(?:\.[^."/]+){0,2}\.' . preg_quote($architecture, '#') . '\.rpm#';
-            if (preg_match_all($pattern, $body, $matches)) {
-                foreach ($matches[1] as $it) {
-                    $maxIteration = max($maxIteration, (int)$it);
+            foreach (['el8', 'el9', 'el10'] as $repository) {
+                $url = rtrim($baseUrl, '/') . "/{$architecture}/{$repository}/";
+                [$code, $body] = self::httpGet($url);
+                if ($code === 404) {
+                    continue;
+                }
+                if ($code !== 200 || $body === null) {
+                    throw new RuntimeException("--bump: failed to fetch RPM index {$url} (HTTP {$code})");
+                }
+                if (preg_match_all($pattern, $body, $matches)) {
+                    foreach ($matches[1] as $it) {
+                        $maxIteration = max($maxIteration, (int)$it);
+                    }
                 }
             }
             return $maxIteration + 1;
         }
 
         $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
-        $hosts = str_starts_with($name, 'php-zts-lib-')
+        $hosts = (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')
             ? array_values(array_filter(array_map('trim', explode(',', getenv('SPP_FORGEJO_HOSTS') ?: $host . ',https://git.static-php.dev'))))
             : [$host];
         foreach (array_unique($hosts) as $forgejoHost) {
@@ -1669,16 +2344,25 @@ class CreatePackages
         return $maxIteration + 1;
     }
 
-    private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host): int
+    private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
     {
         $maxIteration = $packageType === 'apk' ? -1 : 0;
+        if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')) {
+            foreach (array_unique([self::getForgejoOwner($name), '82', '83', '84', '85', '86']) as $streamOwner) {
+                $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $host, $streamOwner) - 1);
+            }
+            return $maxIteration + 1;
+        }
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
-        $owner = self::getForgejoOwner($name);
+        $owner ??= self::getForgejoOwner($name);
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {
             $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}&limit=1000&page={$page}";
             [$code, $body] = self::httpGet($url);
+            if ($code === 404 && $page === 1 && $owner === 'libs') {
+                return $maxIteration + 1;
+            }
             if ($code !== 200 || $body === null) {
                 throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
             }
@@ -1729,7 +2413,7 @@ class CreatePackages
      */
     private static function getForgejoOwner(?string $name = null): string
     {
-        if ($name !== null && str_starts_with($name, 'php-zts-lib-')) {
+        if ($name !== null && (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')) {
             return getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs';
         }
         $override = getenv('SPP_FORGEJO_OWNER');
@@ -1758,7 +2442,7 @@ class CreatePackages
         // listing is far smaller/faster than the HTML autoindex (e.g. 0.8MB/2s vs 4MB/120s);
         // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
         // both payloads, so the same regex extracts iterations either way.
-        $arguments = ['curl', '-sSL', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
+        $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
         if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
             $owner = rawurldecode($m[1]);
             $password = $owner === (getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs')
@@ -1788,6 +2472,11 @@ class CreatePackages
         // Return the prefix set by the user, prepended with "php"
         // For example: "-zts" becomes "php-zts", "-zts8.5" becomes "php-zts8.5"
         return 'php' . self::$prefix;
+    }
+
+    public static function getSapiRecommendations(): array
+    {
+        return [self::getPrefix() . '-fileinfo', self::getPrefix() . '-curl'];
     }
 
     /**

@@ -28,11 +28,13 @@ class embed implements package
             'depends' => [
                 CreatePackages::getPrefix() . '-cli',
             ],
+            'recommends' => CreatePackages::getSapiRecommendations(),
             'provides' => $provides,
             'replaces' => $versionedConflicts,
             'conflicts' => $versionedConflicts,
             'files' => [
-                BUILD_LIB_PATH . '/' . $libphp => getLibdir() . '/' . $libphp,
+                BUILD_LIB_PATH . '/' . $libphp => getLibdir() . '/php-zts/lib/' . $libphp,
+                CreatePackages::stageSymlink('php-zts/lib/' . $libphp, $libphp) => getLibdir() . '/' . $libphp,
             ]
         ];
     }
@@ -52,7 +54,7 @@ class embed implements package
         if (!file_exists($src)) {
             return [];
         }
-        $target = '/usr/lib/debug' . getLibdir() . '/' . $libName . '.debug';
+        $target = '/usr/lib/debug' . getLibdir() . '/php-zts/lib/' . $libName . '.debug';
         return [
             'depends' => [CreatePackages::getPrefix() . '-embed'],
             'files' => [

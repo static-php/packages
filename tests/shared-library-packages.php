@@ -94,11 +94,11 @@ try {
     file_put_contents($root . '/consumer.c', "extern int fixture_base(void);\nint fixture_consumer(void) { return fixture_base(); }\n");
     file_put_contents(BUILD_ROOT_PATH . '/licenses/base', 'Fixture MIT license');
     file_put_contents(BUILD_ROOT_PATH . '/licenses/consumer', 'Fixture MIT license');
-    $libdir = getLibdir() . '/php-zts/lib';
+    $libdir = '/usr/lib/php-zts/lib';
     command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base.so.1', $root . '/base.c']);
     symlink('libfixture-base.so.1', BUILD_LIB_PATH . '/libfixture-base.so');
     command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base']);
-    $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => 'x86_64', 'libc' => 'glibc', 'runtime_libdir' => $libdir, 'libraries' => []];
+    $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => 'x86_64', 'libc' => $type === 'apk' ? 'musl' : 'glibc', 'runtime_libdir' => $libdir, 'libraries' => []];
     foreach (['base', 'consumer'] as $id) {
         $relative = 'lib/libfixture-' . $id . '.so.1';
         $output = command(['readelf', '--wide', '--dynamic', BUILD_ROOT_PATH . '/' . $relative]);
@@ -119,7 +119,7 @@ try {
         $oldConsumer = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'fixture-consumer') && !str_contains(basename($file), '-debuginfo')));
         $oldHeader = packageHeader($oldConsumer, $type);
         $manifest = json_decode(file_get_contents(BUILD_ROOT_PATH . '/shared-libraries.json'), true, flags: JSON_THROW_ON_ERROR);
-        $oldFloor = $manifest['libraries']['fixture-base']['package_versions'][$type];
+        $oldFloor = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->getPackageVersion('fixture-base', $type);
         file_put_contents($root . '/base.c', "int fixture_base(void) { return 42; }\nint fixture_added(void) { return 42; }\n");
         file_put_contents($root . '/consumer.c', "extern int fixture_added(void);\nint fixture_consumer(void) { return fixture_added(); }\n");
         command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base.so.1', $root . '/base.c']);
@@ -154,7 +154,7 @@ try {
     check(str_contains($headers['consumer'], 'php-zts-lib-fixture-base'), 'Direct library dependency missing');
     check(str_contains($headers['consumer'], 'php-zts-lib-fixture-base-abi-7'), 'Private ABI dependency missing');
     $manifest = json_decode(file_get_contents(BUILD_ROOT_PATH . '/shared-libraries.json'), true, flags: JSON_THROW_ON_ERROR);
-    $newFloor = $manifest['libraries']['fixture-base']['package_versions'][$type];
+    $newFloor = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->getPackageVersion('fixture-base', $type);
     check($newFloor !== $oldFloor && str_contains($newFloor, $type === 'apk' ? '-r2' : '-2'), 'Resolved library revision was not persisted');
     $requirement = static fn (string $version): string => match ($type) {
         'deb' => 'php-zts-lib-fixture-base (>= ' . $version . ')',
@@ -178,7 +178,7 @@ try {
                 check(str_contains($header, "depend = {$name}={$version}\n"), "Incorrect exact debuginfo dependency: {$header}");
             }
         }
-        installApkFixture($root . '/installed-libraries', $artifacts, [
+        installApkFixture($root . '/installed-libraries', [...$artifacts, ...array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'php-zts-runtime-layout'))], [
             'php-zts-lib-fixture-base' => '1.19-r2',
             'php-zts-lib-fixture-base-debuginfo' => '1.19-r2',
             'php-zts-lib-fixture-consumer' => '1.2.3-r2',

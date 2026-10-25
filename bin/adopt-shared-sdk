@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""Relocate deployment paths in a copied SDK while retaining actual build inputs."""
+
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+OLD = '/usr/lib64/php-zts/lib'
+NEW = '/usr/lib/php-zts/lib'
+
+
+def digest(path):
+    if path.is_symlink():
+        return hashlib.sha256(('symlink:' + os.readlink(path)).encode()).hexdigest()
+    with path.open('rb') as stream:
+        result = hashlib.sha256()
+        while block := stream.read(1024 * 1024):
+            result.update(block)
+        return result.hexdigest()
+
+
+def rooted(root, relative):
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '..' in Path(relative).parts:
+        raise RuntimeError('Invalid SDK path: ' + repr(relative))
+    path = root / relative
+    try:
+        path.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as error:
+        raise RuntimeError('Missing or escaping SDK file: ' + relative) from error
+    if not path.is_file():
+        raise RuntimeError('SDK path is not a file: ' + relative)
+    return path
+
+
+def run(arguments):
+    return subprocess.check_output(arguments, stderr=subprocess.STDOUT, text=True)
+
+
+def elf(path):
+    if path.is_symlink():
+        return None
+    with path.open('rb') as stream:
+        if stream.read(4) != b'\x7fELF':
+            return None
+    text = run(['readelf', '--wide', '--file-header', '--dynamic', '--version-info', str(path)])
+    needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', text)
+    soname = re.search(r'\(SONAME\).*?\[([^\]]+)\]', text)
+    runpath = re.search(r'\(RUNPATH\).*?\[([^\]]*)\]', text)
+    rpath = re.search(r'\(RPATH\).*?\[([^\]]*)\]', text)
+    if 'GLIBC_PRIVATE' in text:
+        raise RuntimeError('GLIBC_PRIVATE in copied SDK: ' + str(path))
+    versions = re.findall(r'\bGLIBC_(\d+(?:\.\d+)+)\b', text)
+    if any(tuple(map(int, version.split('.'))) > (2, 28) for version in versions):
+        raise RuntimeError('EL8 glibc floor exceeded: ' + str(path))
+    return {'needed': needed, 'soname': soname[1] if soname else None,
+            'runpath': runpath[1].split(':') if runpath and runpath[1] else [],
+            'rpath': rpath[1].split(':') if rpath and rpath[1] else [],
+            'text_sha256': hashlib.sha256(run(['readelf', '--wide', '--hex-dump=.text', str(path)]).encode()).hexdigest()}
+
+
+def mapped(value):
+    if isinstance(value, str):
+        return value.replace('/usr/lib64/php-zts/', '/usr/lib/php-zts/')
+    if isinstance(value, list):
+        return [mapped(item) for item in value]
+    if isinstance(value, dict):
+        return {key: mapped(item) for key, item in value.items()}
+    return value
+
+
+def write(path, value):
+    contents = json.dumps(value, sort_keys=True, indent=2) + '\n'
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(contents)
+    temporary.replace(path)
+
+
+@contextmanager
+def relocation_transaction(root):
+    provenance = root / 'provenance/sdk-relocation'
+    had_provenance = provenance.exists()
+    backups = {}
+    with tempfile.TemporaryDirectory(prefix='.sdk-relocation-', dir=root.parent) as directory:
+        temporary = Path(directory)
+        def backup(relative):
+            if relative not in backups:
+                source = root / relative
+                target = temporary / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.check_call(['cp', '--reflink=auto', '--preserve=mode,timestamps', str(source), str(target)])
+                backups[relative] = target
+        try:
+            yield backup
+        except BaseException:
+            for relative, path in backups.items():
+                path.replace(root / relative)
+            if not had_provenance and provenance.exists():
+                shutil.rmtree(provenance)
+            raise
+
+
+def adopt(root):
+    root = root.resolve(strict=True)
+    with relocation_transaction(root) as backup:
+        return adopt_copy(root, backup)
+
+
+def adopt_copy(root, backup):
+    manifest_path = root / 'shared-libraries.json'
+    ownership_path = root / '.shared-library-ownership.json'
+    manifest = json.loads(manifest_path.read_text())
+    ownership = json.loads(ownership_path.read_text())
+    if manifest.get('schema') != 1 or manifest.get('linkage') != 'shared' or manifest.get('libc', 'glibc') != 'glibc':
+        raise RuntimeError('A shared glibc SDK is required')
+    if manifest.get('pending_rebuilds'):
+        raise RuntimeError('Cannot adopt an incomplete ABI transition')
+    if manifest.get('runtime_libdir') != OLD:
+        raise RuntimeError('Expected an unconverted legacy lib64 SDK')
+    libraries = manifest.get('libraries', {})
+    if not libraries or set(libraries) != set(ownership.get('libraries', {})):
+        raise RuntimeError('Manifest and source ownership must cover identical libraries')
+    records = {}
+    files = set()
+    for name, entry in libraries.items():
+        owned = ownership['libraries'][name]
+        if entry.get('source_hash') != owned.get('source_hash'):
+            raise RuntimeError('Source identity mismatch: ' + name)
+        for relative in entry['files']:
+            path = rooted(root, relative)
+            actual = digest(path)
+            if entry.get('file_hashes', {}).get(relative) != actual or owned.get('file_hashes', {}).get(relative) != actual:
+                raise RuntimeError('Original SDK file hash mismatch: ' + relative)
+            files.add(relative)
+    provenance = root / 'provenance/sdk-relocation'
+    if provenance.exists():
+        raise RuntimeError('SDK relocation provenance already exists')
+    provenance.mkdir(parents=True)
+    originals = {}
+    for name in ['shared-libraries.json', '.shared-library-ownership.json', 'shared-library-build-inputs.json', '.build.json']:
+        source = root / name
+        if source.is_file():
+            target = provenance / ('original-' + name.lstrip('.'))
+            shutil.copy2(source, target)
+            originals[name] = digest(source)
+    for relative in sorted(files):
+        path = rooted(root, relative)
+        before = elf(path)
+        if before is None:
+            continue
+        search = before['runpath'] + before['rpath']
+        if any(value not in [OLD, NEW] and not re.fullmatch(r'\$\{?ORIGIN\}?(?:/[A-Za-z0-9_.+-]+)*', value) for value in search):
+            raise RuntimeError('Unexpected deployment search path: ' + relative)
+        target = list(dict.fromkeys([NEW] + [value for value in search if value not in [OLD, NEW]]))
+        old_hash = digest(path)
+        if before['runpath'] != target or before['rpath']:
+            backup(relative)
+            subprocess.check_call(['patchelf', '--set-rpath', ':'.join(target), str(path)])
+        after = elf(path)
+        if any(before[field] != after[field] for field in ['needed', 'soname', 'text_sha256']):
+            raise RuntimeError('Loader relocation changed compiled code or dependencies: ' + relative)
+        records[relative] = {'before_sha256': old_hash, 'after_sha256': digest(path),
+                             'text_sha256': after['text_sha256'], 'needed': after['needed'],
+                             'soname': after['soname'], 'runpath': after['runpath']}
+    for data in [manifest, ownership]:
+        if 'runtime_libdir' in data:
+            data['runtime_libdir'] = NEW
+        for entry in data['libraries'].values():
+            if 'runtime_libdir' in entry:
+                entry['runtime_libdir'] = NEW
+            if isinstance(entry.get('runtime_assets'), (list, dict)):
+                entry['runtime_assets'] = mapped(entry['runtime_assets'])
+            if isinstance(entry.get('files'), dict):
+                entry['files'] = mapped(entry['files'])
+            for relative in entry['files']:
+                entry.setdefault('file_hashes', {})[relative] = digest(rooted(root, relative))
+            for relative, details in entry.get('elf', {}).items():
+                if relative in records:
+                    details['runpath'] = records[relative]['runpath']
+            entry['deployment_relocation'] = {'from': OLD, 'to': NEW, 'compiled_paths_retained': True}
+    manifest['deployment_relocation'] = {'schema': 1, 'proof': 'provenance/sdk-relocation/proof.json',
+                                        'legacy_private_alias_required': True}
+    proof = {'schema': 1, 'kind': 'validated-legacy-runtime-relocation', 'architecture': manifest['architecture'],
+             'from': OLD, 'to': NEW, 'original_metadata_sha256': originals,
+             'elf_files': records, 'compiled_source_toolchain_recipe_identity_preserved': True,
+             'build_input_state_rewritten': False, 'static_cpp_runtime_repaired': False,
+             'required_runtime_aliases': {'rpm': '/usr/lib/php-zts -> ../lib64/php-zts',
+                                          'deb': '/usr/lib64/php-zts -> ../lib/php-zts'}}
+    write(provenance / 'proof.json', proof)
+    backup('shared-libraries.json')
+    backup('.shared-library-ownership.json')
+    write(manifest_path, manifest)
+    write(ownership_path, ownership)
+    for name, expected in originals.items():
+        if name not in ['shared-libraries.json', '.shared-library-ownership.json'] and digest(root / name) != expected:
+            raise RuntimeError('Actual compiler/recipe input identity changed: ' + name)
+    return {'schema': 1, 'root': str(root), 'libraries': len(libraries), 'elfs': len(records),
+            'proof': str(provenance / 'proof.json'), 'recompiled_libraries': 0,
+            'production_ready': False, 'remaining': 'Repair/rebuild affected static-C++ runtime consumers and normal ABI validation.'}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--copied-sdk', action='store_true', help='Confirm ROOT is a mutable extracted/copy SDK, not the retained original')
+    args = parser.parse_args()
+    if not args.copied_sdk:
+        parser.error('Only operate on a mutable SDK copy; specify --copied-sdk')
+    print(json.dumps(adopt(args.root), indent=2))
+
+
+if __name__ == '__main__':
+    main()

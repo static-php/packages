@@ -18,8 +18,13 @@ class devel implements package
 
         $phpConfigContent = file_get_contents($phpConfigPath);
 
-        $builtDir = BASE_PATH . '/buildroot';
-        $phpConfigContent = str_replace([$builtDir, '/app/buildroot', BUILD_ROOT_PATH], '/usr', $phpConfigContent);
+        $buildPrefixes = [BASE_PATH . '/buildroot', '/app/buildroot', BUILD_ROOT_PATH];
+        if (preg_match('/^prefix=([\'\"])(\/[^\r\n\'\"]+)\1\s*$/m', $phpConfigContent, $match)) {
+            $buildPrefixes[] = rtrim($match[2], '/');
+        }
+        $buildPrefixes = array_values(array_unique(array_filter($buildPrefixes, static fn (string $path): bool => $path !== '' && $path !== '/')));
+        usort($buildPrefixes, static fn (string $left, string $right): int => strlen($right) <=> strlen($left));
+        $phpConfigContent = str_replace($buildPrefixes, '/usr', $phpConfigContent);
 
         $binarySuffix = getBinarySuffix();
         $sharedLibrarySuffix = getSharedLibrarySuffix();
@@ -30,6 +35,8 @@ class devel implements package
                 '/^libs=.*$/m',
                 '/^program_prefix=.*$/m',
                 '/^program_suffix=.*$/m',
+                '/^lib_dir=.*$/m',
+                '/^extension_dir=.*$/m',
             ],
             [
                 'prefix="/usr"',
@@ -37,6 +44,8 @@ class devel implements package
                 'libs=""',
                 'program_prefix=""',
                 'program_suffix="' . $binarySuffix . '"',
+                'lib_dir="' . getLibdir() . '"',
+                'extension_dir="' . getModuledir() . '"',
             ],
             $phpConfigContent
         );
@@ -46,7 +55,7 @@ class devel implements package
         // libphp filename with shared library suffix: libphp-zts-85.so, libphp-nts-84.so
         $libName = 'libphp' . $sharedLibrarySuffix . '.so';
         $phpConfigContent = str_replace('libphp.so', $libName, $phpConfigContent);
-        $phpConfigContent = preg_replace('/^ldflags=.*$/m', 'ldflags="-lpthread -Wl,--enable-new-dtags -Wl,-rpath,' . getLibdir() . '/php-zts/lib"', $phpConfigContent);
+        $phpConfigContent = preg_replace('/^ldflags=.*$/m', 'ldflags="-lpthread -L' . getLibdir() . '/php-zts/lib -Wl,--enable-new-dtags -Wl,-rpath,' . CreatePackages::runtimeLibdir() . '"', $phpConfigContent);
 
         // For APK, sed is in /bin/sed instead of /usr/bin/sed
         if (defined('SPP_TYPE') && SPP_TYPE === 'apk') {
@@ -61,31 +70,23 @@ class devel implements package
 
         $phpizeContent = file_get_contents($phpizePath);
 
-        $phpizeContent = str_replace([$builtDir, '/app/buildroot', BUILD_ROOT_PATH], '/usr', $phpizeContent);
+        $phpizeContent = str_replace($buildPrefixes, '/usr', $phpizeContent);
 
         $phpizeContent = preg_replace(
             [
                 '/^prefix=.*$/m',
                 '/^datarootdir=.*$/m',
+                '/^phpdir=.*$/m',
+                '/^includedir=.*$/m',
             ],
             [
                 'prefix="/usr"',
                 'datarootdir="/' . CreatePackages::getPrefix() . '"',
+                'phpdir="' . getPhpLibdir() . '/build"',
+                'includedir="/usr/include/' . CreatePackages::getPrefix() . '"',
             ],
             $phpizeContent
         );
-        $phpizeContent = str_replace(
-            [
-                'lib/php`',
-                '"`eval echo ${prefix}/include`/php"'
-            ],
-            [
-                str_replace('/usr/', '', getPhpLibdir()) . '`',
-                '"`eval echo ${prefix}/include`/' . CreatePackages::getPrefix() . '"'
-            ],
-            $phpizeContent
-        );
-
         // For APK, sed is in /bin/sed instead of /usr/bin/sed
         if (defined('SPP_TYPE') && SPP_TYPE === 'apk') {
             $phpizeContent = str_replace('/usr/bin/sed', '/bin/sed', $phpizeContent);
@@ -132,20 +133,27 @@ class devel implements package
         // 2. libphp-zts.so -> libphp-zts-85.so
         $afterInstallScript = <<<BASH
 #!/bin/sh
-# Create libphp.so symlink
+# Replace only aliases belonging to this PHP stream; relative targets survive old removal hooks.
+if [ -L {$libdir}/libphp.so ] && [ "\$(readlink {$libdir}/libphp.so)" = "{$libdir}/{$libphpVersioned}" ]; then
+    ln -sf {$libphpVersioned} {$libdir}/libphp.so
+fi
+if [ -L {$libdir}/{$libphpWithBinarySuffix} ] && [ "\$(readlink {$libdir}/{$libphpWithBinarySuffix})" = "{$libdir}/{$libphpVersioned}" ]; then
+    ln -sf {$libphpVersioned} {$libdir}/{$libphpWithBinarySuffix}
+fi
 if [ ! -e {$libdir}/libphp.so ]; then
-    ln -sf {$libdir}/{$libphpVersioned} {$libdir}/libphp.so
+    ln -sf {$libphpVersioned} {$libdir}/libphp.so
 fi
 if [ ! -e {$libdir}/{$libphpWithBinarySuffix} ]; then
-    ln -sf {$libdir}/{$libphpVersioned} {$libdir}/{$libphpWithBinarySuffix}
+    ln -sf {$libphpVersioned} {$libdir}/{$libphpWithBinarySuffix}
 fi
 BASH;
         $afterRemoveScript = <<<BASH
 #!/bin/sh
-if [ -L {$libdir}/libphp.so ] && [ "\$(readlink {$libdir}/libphp.so)" = "{$libdir}/{$libphpVersioned}" ]; then
+case "\${1:-}" in upgrade|failed-upgrade|1|2) exit 0 ;; esac
+if [ -L {$libdir}/libphp.so ] && [ "\$(readlink {$libdir}/libphp.so)" = "{$libphpVersioned}" ]; then
     rm -f {$libdir}/libphp.so
 fi
-if [ -L {$libdir}/{$libphpWithBinarySuffix} ] && [ "\$(readlink {$libdir}/{$libphpWithBinarySuffix})" = "{$libdir}/{$libphpVersioned}" ]; then
+if [ -L {$libdir}/{$libphpWithBinarySuffix} ] && [ "\$(readlink {$libdir}/{$libphpWithBinarySuffix})" = "{$libphpVersioned}" ]; then
     rm -f {$libdir}/{$libphpWithBinarySuffix}
 fi
 BASH;

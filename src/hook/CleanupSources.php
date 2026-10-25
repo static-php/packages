@@ -53,6 +53,11 @@ class CleanupSources
         if (!is_dir($source)) {
             return;
         }
+        $phpSource = defined('SOURCE_PATH') ? realpath(SOURCE_PATH . '/php-src') : false;
+        $resolved = realpath($source);
+        if ($phpSource !== false && $resolved !== false && ($resolved === $phpSource || str_starts_with($resolved, $phpSource . '/'))) {
+            return;
+        }
         echo "Cleaning up source directory for shared extension: {$package->getExtensionName()} (preserving license files)\n";
 
         $iterator = new RecursiveIteratorIterator(

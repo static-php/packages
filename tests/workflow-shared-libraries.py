@@ -62,9 +62,10 @@ class SourcePlanTests(unittest.TestCase):
             self.assertTrue(all(request['full'] for request in result['requests'].values()))
 
     def test_pie_changes_rebuild_only_pie(self):
-        current = dict(self.metadata, pie_version='2.0')
-        result = source.plan({}, {}, self.metadata, current, configuration='same')
-        self.assertTrue(all(request == {'full': False, 'packages': ['pie']} for request in result['requests'].values()))
+        for current in [dict(self.metadata, pie_version='2.0'), dict(self.metadata, pie_sha256='new-frozen-bytes')]:
+            result = source.plan({}, {}, self.metadata, current, configuration='same')
+            self.assertEqual(result['requests'], {})
+            self.assertTrue(all(request == {'full': False, 'packages': ['pie']} for request in result['package_requests'].values()))
 
     def test_binary_only_artifacts_do_not_break_change_detection(self):
         result = source.plan({}, {'pkg-config': {'source': None, 'binary': {}}}, self.metadata, self.metadata, configuration='same', library_ids={'zlib'})
@@ -105,14 +106,14 @@ class SourcePlanTests(unittest.TestCase):
         current['source']['config']['time'] = 'changed configuration'
         self.assertEqual(self.plan({'pkg-config': previous}, {'pkg-config': current})['library_build_inputs'], ['pkg-config'])
 
-    def test_irrelevant_go_changes_do_not_rebuild_libraries_and_extensions_stay_partial(self):
+    def test_go_changes_rebuild_frankenphp_without_libraries_or_php_core(self):
         previous = {'go-xcaddy': {'binary': {'linux-x86_64': {'hash': 'old'}}}, 'ext-imagick': {'source': {'hash': 'old'}}}
         current = {'go-xcaddy': {'binary': {'linux-x86_64': {'hash': 'new'}}}, 'ext-imagick': {'source': {'hash': 'new'}}}
         result = self.plan(previous, current)
         self.assertEqual(result['library_build_inputs'], [])
         self.assertEqual(result['libraries'], [])
-        self.assertTrue(all(request == {'full': False, 'packages': ['imagick']} for request in result['requests'].values()))
-        self.assertEqual(self.plan({'go-xcaddy': previous['go-xcaddy']}, {'go-xcaddy': current['go-xcaddy']})['requests'], {})
+        self.assertTrue(all(request == {'full': False, 'packages': ['frankenphp', 'imagick']} for request in result['requests'].values()))
+        self.assertTrue(all(request == {'full': False, 'packages': ['frankenphp']} for request in self.plan({'go-xcaddy': previous['go-xcaddy']}, {'go-xcaddy': current['go-xcaddy']})['requests'].values()))
 
     def test_unclassified_inputs_and_required_tools_win_over_exclusions(self):
         self.inventory['irrelevant_artifacts'].append('pkg-config')
@@ -166,8 +167,8 @@ class SourcePlanTests(unittest.TestCase):
                 self.assertEqual(len(targets), 1)
                 self.assertEqual([value['php-version'] for value in matrix], workflow.STREAMS if breaking else [])
 
-    def test_real_hook_patch_registry_and_packaging_changes_request_full_builds(self):
-        for name in ['src/hook/Php86Performance.php', 'config/patches/php86-performance-prs.patch', 'spc.registry.yml', 'src/step/CreatePackages.php']:
+    def test_real_hook_patch_and_registry_changes_request_full_builds(self):
+        for name in ['src/hook/Php86Performance.php', 'config/patches/php86-performance-prs.patch', 'spc.registry.yml']:
             with self.subTest(path=name), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
                 root = Path(temporary)
                 path = root / name
@@ -307,20 +308,29 @@ class CacheAndCohortTests(unittest.TestCase):
         for selected in ['zlib', '']:
             with self.subTest(selected=selected), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
                 root = Path(temporary)
-                for directory in ['bin', 'shims', 'buildroot/usr/share/php-zts/libraries/abi/zlib']:
+                for directory in ['bin', 'shims', 'buildroot/usr/share/php-zts/libraries/abi/zlib', '.github/actions/shared-libraries']:
                     (root / directory).mkdir(parents=True)
+                for name in ['incremental-build.py', 'workflow.py']:
+                    shutil.copy2(ROOT / '.github/actions/shared-libraries' / name, root / '.github/actions/shared-libraries' / name)
+                (root / '.github/actions/shared-libraries/source-plan.py').write_text('''import sys
+from pathlib import Path
+a=sys.argv[1:];Path(a[a.index('--output')+1]).write_text('{}')
+''')
                 (root / 'buildroot/usr/share/php-zts/libraries/abi/zlib/libz.so.1.xml').write_text('<abi-corpus/>')
                 (root / 'bin/shared-library-plan').write_text('''import json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
 def flag(name): return args[args.index(name)+1]
-if args[0]=='baseline':
+if args[0]=='stage-publication-retries':
+    Path(flag('--destination')).mkdir(parents=True,exist_ok=True)
+    Path(flag('--output')).write_text(json.dumps({'remaining_libraries':[os.environ['SELECTED']] if os.environ['SELECTED'] else [],'layout_required':False}))
+elif args[0]=='baseline':
     Path(flag('--output')).mkdir(parents=True)
 elif args[0]=='prepare':
     if '--request' in args:
         assert Path(flag('--request')).is_file(), 'Missing request passed to planner'
     Path(flag('--output')).write_text(json.dumps({'libraries':[os.environ['SELECTED']] if os.environ['SELECTED'] else []}))
-    Path(flag('--manifest-output')).write_text(json.dumps({'libraries':{'zlib':{'package_versions':{'deb':'1.3.1-1'}}}}))
+    Path(flag('--manifest-output')).write_text(json.dumps({'schema':1,'linkage':'shared','libraries':{'zlib':{'package_versions':{'deb':'1.3.1-1'}}}}))
 ''')
                 for name in ['git', 'composer']:
                     path = root / 'shims' / name
@@ -328,7 +338,10 @@ elif args[0]=='prepare':
                     path.chmod(0o755)
                 php = root / 'shims/php'
                 php.write_text('''#!/bin/sh
-if [ "$1" = bin/spp ] && [ "$2" = package ]; then
+if [ "$1" = bin/build-payload ] && [ "$2" = manifest ]; then
+    while [ "$1" != --output ]; do shift; done
+    cp buildroot/shared-libraries.json "$2"
+elif [ "$1" = bin/spp ] && [ "$2" = package ]; then
     printf '%s' '{"libraries":{"zlib":{"package_versions":{"deb":"1.3.1-2"}}}}' > buildroot/shared-libraries.json
     mkdir -p dist/deb
     printf archive > dist/deb/zlib.deb
@@ -354,6 +367,10 @@ fi
             helper.parent.mkdir(parents=True)
             shutil.copy2(ROOT / '.github/actions/shared-libraries/workflow.py', helper)
             (root / 'stage/abi/example/libexample.so.1.xml').write_text('<abi-corpus/>')
+            (helper.parent / 'glibc.py').write_text('''from pathlib import Path
+assert Path('buildroot/usr/share/php-zts/libraries/abi/example/libexample.so.1.xml').is_file()
+assert 'planned_epoch' in Path('buildroot/shared-libraries.json').read_text()
+''')
             (root / 'tests/upgrade-guards.py').write_text('')
             for name in ['git', 'composer']:
                 path = root / 'shims' / name
@@ -558,24 +575,24 @@ class ArtifactReceiptTests(unittest.TestCase):
 
 class WorkflowContractTests(unittest.TestCase):
     def workflows(self):
-        for name in ['build-rpm-modular-packages.yml', 'build-deb-forgejo.yml', 'build-apk-forgejo.yml']:
+        for name in ['build-rpm-modular-packages.yml', 'build-apk-forgejo.yml']:
             path = ROOT / '.github/workflows' / name
             yield name, yaml.safe_load(path.read_text())
 
     def test_builds_stage_and_publication_checks_the_whole_cohort(self):
         for name, data in self.workflows():
-            for job_name in ['build-libs', 'build']:
+            for job_name in (['build-libs', 'build-payload', 'package'] if 'rpm' in name else ['build-libs', 'build']):
                 runs = '\n'.join(step.get('run', '') for step in data['jobs'][job_name]['steps'])
                 self.assertNotIn(' upload ', runs, name)
                 self.assertNotIn('rsync ', runs, name)
             publish = data['jobs']['publish']['steps']
-            preflight = next(index for index, step in enumerate(publish) if step['name'] == 'Verify complete cohort and all downgrade guards')
-            upload = next(index for index, step in enumerate(publish) if step['name'].startswith(('Upload complete', 'Publish consumers')))
+            preflight = next(index for index, step in enumerate(publish) if step['name'] in ['Verify complete cohort and all downgrade guards', 'Verify complete cohort and all upgrade guards'])
+            upload = next(index for index, step in enumerate(publish) if step['name'].startswith(('Upload complete', 'Publish consumers', 'Publish DEB', 'Stage and promote')))
             self.assertLess(preflight, upload)
             self.assertIn('!cancelled()', data['jobs']['publish']['if'])
 
     def test_uniquely_owned_staging_artifacts_can_be_replaced_on_rerun(self):
-        names = {'Stage pinned builder', 'Stage target plan', 'Stage library packages', 'Stage consumer packages'}
+        names = {'Stage pinned builder', 'Stage target plan', 'Stage library packages', 'Stage consumer packages', 'Stage common SDK metadata', 'Stage common SDK buildroot', 'Stage RPM library packages', 'Stage DEB library packages', 'Stage sealed common payload', 'Stage validated consumer packages'}
         for workflow_name, data in self.workflows():
             artifact_names = []
             for job in data['jobs'].values():
@@ -583,8 +600,8 @@ class WorkflowContractTests(unittest.TestCase):
                     if step.get('name') in names:
                         self.assertTrue(step['with'].get('overwrite'), workflow_name + ': ' + step['name'])
                         artifact_names.append(step['with']['name'])
-            self.assertEqual(len(artifact_names), 4)
-            self.assertEqual(len(set(artifact_names)), 4)
+            self.assertEqual(len(artifact_names), 8 if 'rpm' in workflow_name else 5)
+            self.assertEqual(len(set(artifact_names)), len(artifact_names))
 
     def test_source_is_downloaded_before_buildroot_cache(self):
         for name, data in self.workflows():
@@ -596,13 +613,40 @@ class WorkflowContractTests(unittest.TestCase):
         for name, data in self.workflows():
             setup = data['jobs']['setup-matrix']
             self.assertIn('downloads-run-id', setup['outputs'])
-            for job_name in ['build-libs', 'build']:
+            for job_name in (['build-libs', 'build-payload'] if 'rpm' in name else ['build-libs', 'build']):
                 step = next(step for step in data['jobs'][job_name]['steps'] if step['name'] == 'Download pinned source snapshot')
                 self.assertEqual(step['with']['run_id'], '${{ needs.setup-matrix.outputs.downloads-run-id }}', name)
 
     def test_planned_full_build_overrides_manual_package_filter(self):
-        for _, data in self.workflows():
-            self.assertEqual(data['jobs']['build']['env']['PACKAGES'], '${{ matrix.packages }}')
+        for name, data in self.workflows():
+            job = 'build-payload' if 'rpm' in name else 'build'
+            self.assertEqual(data['jobs'][job]['env']['PACKAGES'], '${{ matrix.packages }}')
+
+    def test_glibc_has_only_el8_producers_and_format_only_consumers(self):
+        result = subprocess.check_output([sys.executable, str(ROOT / '.github/actions/shared-libraries/workflow.py'),
+                                          'setup', '--type=glibc', '--architectures=amd64,arm64'], text=True)
+        values = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
+        self.assertEqual(len(values), 2)
+        self.assertEqual({value['alma'] for value in values}, {'8'})
+        self.assertEqual({value['arch'] for value in values}, {'x86_64', 'arm64'})
+        self.assertTrue(all('rhel-8' in value['image'] for value in values))
+        data = dict(self.workflows())['build-rpm-modular-packages.yml']
+        script = '\n'.join(step.get('run', '') for step in data['jobs']['package']['steps'])
+        self.assertIn('glibc-package', script)
+        self.assertNotIn('bin/spp all', script)
+        self.assertIn('migration-upgrade-containers.py', script)
+        self.assertIn('--library-only', script)
+
+    def test_glibc_validation_only_cannot_publish_or_save_release_caches(self):
+        data = dict(self.workflows())['build-rpm-modular-packages.yml']
+        self.assertIn('inputs.publish == true', data['jobs']['publish']['if'])
+        cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
+        self.assertIn('inputs.publish == true', cache['if'])
+        self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
+        publish = data['jobs']['publish']['steps']
+        names = [step['name'] for step in publish]
+        self.assertLess(names.index('Verify native ordinary upgrade receipts'), names.index('Sign RPM packages'))
+        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Stage and promote canonical RPM generation'))
 
     def test_alpine_keeps_actions_on_glibc_host(self):
         data = dict(self.workflows())['build-apk-forgejo.yml']

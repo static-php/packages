@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+helper=/usr/libexec/php-zts/runtime-services
+[ -x "$helper" ] || exit 0
+case "${1-}" in
+    pre-commit) "$helper" begin ;;
+    post-commit) "$helper" finish ;;
+esac

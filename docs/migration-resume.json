@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "state": "restart_ready",
+  "merge_ready": false,
+  "objective": "Finish the EL8 shared-library migration locally: one glibc build per architecture, identical common RPM/DEB ELFs, native musl SDK, automatic existing-client upgrades, and validation before any separately authorized publication.",
+  "repository": "/home/m/packages",
+  "branch": "feat/el8-shared-migration",
+  "spc_repository": "/home/m/static-php-cli",
+  "spc_branch": "feat/pgo-v3",
+  "spc_commit": "fbff6898d85b56a172aedc47051fab09939c2a97",
+  "spc_commit_publicly_available": false,
+  "user_constraints": {
+    "public_actions": "No pushes or remote repository/package updates. User will merge when ready.",
+    "validation_php_streams": [
+      "8.2",
+      "8.6"
+    ],
+    "production_php_streams": [
+      "8.2",
+      "8.3",
+      "8.4",
+      "8.5",
+      "8.6"
+    ],
+    "aarch64": "QEMU/Docker validation required locally before any push; label emulated, do not claim native.",
+    "heavy_build_concurrency": 1,
+    "memory": "Windows needs RAM. Keep one build only, bounded low-memory package/metadata jobs, reclaim completed build cache when useful. Do not delete working data.",
+    "bump_default": false,
+    "source_archives": "Use the verified fresh PHP archives and frozen consumer cohort; never select the old PHP source tarball.",
+    "shell": "Use exec_command shell=/bin/sh, login=false. Bash startup triggers Oh My Posh cached init-script writes; do not edit user startup files.",
+    "cleanup": "Preserve existing user containers, files, caches and sessions. Remove only task-owned disposable resources."
+  },
+  "artifact_root": "/home/m/packages/dist/migration-implementation-2026-10-25",
+  "component_checkpoints": {
+    "glibc_packaging": "dist/migration-implementation-2026-10-25/resume/glibc-packaging.json",
+    "glibc_stable": "dist/migration-implementation-2026-10-25/resume/glibc-stable.json",
+    "el8_payload": "dist/migration-implementation-2026-10-25/resume/el8-migration.json",
+    "alpine": "dist/migration-implementation-2026-10-25/resume/alpine/alpine.json",
+    "package_core": "dist/migration-implementation-2026-10-25/resume/package-core.json",
+    "publication": "dist/migration-implementation-2026-10-25/resume/publication.json",
+    "source_plan": "dist/migration-implementation-2026-10-25/resume/source-plan.json",
+    "upgrade_harness": "dist/migration-implementation-2026-10-25/resume/upgrade-harness.json",
+    "alias_review": "dist/migration-implementation-2026-10-25/resume/alias-review.json"
+  },
+  "completed": {
+    "glibc_sdk": "67 ordinary libraries plus GCC runtime. 54 ordinary C libraries preserved; only 13 necessary C++ repairs rebuilt. Validated automatic and unchanged manual library selections rebuild zero libraries.",
+    "alpine_sdk": "67 ordinary libraries plus GCC runtime, finalized and archived; PHP builds reuse all providers.",
+    "destination_specific_builds": "OpenSSL only: Debian /etc/ssl and RPM /etc/pki/tls. Other glibc libraries share the EL8 binaries. Alpine is a separate musl build.",
+    "library_packages": "137 each for x86_64 RPM, DEB and APK. RPM/DEB common ELF/debug identity verified; only OpenSSL profile files differ.",
+    "gnu_php86": "Sealed PHP8.6.0RC4, FrankenPHP1.13.3 and74 shared modules; original7 known unsupported extensions only. All337 core files and351 protected raw ELFs unchanged during selected refresh.",
+    "alpine_php82": "Sealed PHP8.2.35, FrankenPHP1.13.3 and79 shared extensions, zero skips; no static C++ runtime contamination.",
+    "glibc_php82": "Core/all original modules sealed, but needs selected17-consumer refresh to current source versions and FrankenPHP1.13.3. No core or library rebuild is needed.",
+    "metadata_and_tools": "Producer/payload/source/ABI caches, frozen sources, exact typed ABI cache, revision floors, canonical RPM repo aliases, service and disabled-INI preservation are implemented with focused tests.",
+    "alpine_php86": "CLI, CGI, FPM and embed/libphp completed. Six shared modules completed; interrupted ClickHouse make/source/objects preserved. Resume via saved core checkpoint, do not rebuild libraries or discard completed core targets."
+  },
+  "not_complete": [
+    "Finish Alpine8.6 from safe recorded boundary without throwing away cached source/objects or rebuilding libraries.",
+    "Refresh only17 selected GNU8.2 consumer actors using the preserved verified core and newest partial-build safeguards.",
+    "Finish and validate APK physical aliases for amqp and igbinary, including publisher cutoff/cohort/baseline and freezer integration.",
+    "Generate real consumer packages and run actual static-to-shared ordinary upgrades for8.2/8.6 in RPM/DEB/APK; TLS/services and focusedEL9/10 checks.",
+    "Implement explicit local QEMU/emulation opt-in in harness while keeping default/native CI enforcement; build/test aarch64 EL8+Alpine SDKs and PHP8.2/8.6 under QEMU.",
+    "Final source/workflow checks and independent review; local completion commit. No public actions."
+  ],
+  "apk_transition": {
+    "physical_names": [
+      "php-zts-amqp-shared",
+      "php-zts-igbinary-shared"
+    ],
+    "logical_names_unchanged": [
+      "php-zts-amqp",
+      "php-zts-igbinary"
+    ],
+    "mechanism": "Versionless logical Provides, Replaces old real name, valid negative dependency !oldlogical>0 on aliases and CLI, provider_priority100. No install_if, policy-cap helper, sentinel, invented upstream version or index deletion.",
+    "central_config": "config/apk-runtime-aliases.json",
+    "proof": "dist/migration-implementation-2026-10-25/validation/historical-apk-direct-core-conflict.json",
+    "proof_scope": "All9 genuine historical installed/fresh/absent/world/add/delete/future/no-op controls passed using unchanged payloads. This is metadata mechanics, not a completed real shared-cohort migration.",
+    "pending": "Native package fixture still has synthetic99 values; replace with genuine historical cases and also test actual valid old8.2 packages. Publisher header-bound replacement/cutoff/cohort and effective baseline/freezer integration remains incomplete."
+  },
+  "source_notes": {
+    "fresh_cohort": "dist/migration-implementation-2026-10-25/frozen-consumer-refresh/source-records.json",
+    "refreshed_extensions": 16,
+    "frankenphp": "1.13.3",
+    "pie": "1.5.3",
+    "xdebug86": "Actual frozen source/runtime3.6.0alpha2-dev. Old inspector read stale package.xml alpha1; XDEBUG_VERSION macro detection is fixed, old448-candidate proof must not be reused for that phase.",
+    "known_php86_skips": [
+      "mysqlnd_ed25519",
+      "mysqlnd_parsec",
+      "sqlsrv",
+      "pdo_sqlsrv",
+      "redis",
+      "spx",
+      "swoole"
+    ]
+  },
+  "resume_order": [
+    "Read this file and every component checkpoint; check git status and the local checkpoint commit.",
+    "Restore only task-owned legacy /tmp aliases with resume/restore-paths.py if needed for recorded local source URLs. Do not rewrite compiled provenance.",
+    "Before any packaging/selected build, sync the frozen current repository helper code into its isolated project and regenerate Composer autoload files locally. Keep recorded source/configuration/core provenance unchanged.",
+    "Check Docker images and actual containers. Do not resume8.3/8.4/8.5 builds. Never run two heavy builds simultaneously.",
+    "Resume the remaining8.6 Alpine target and selected8.2 glibc refresh according to saved commands; package completed8.6 GNU payload with already-built libraries.",
+    "Complete APK aliases/cutoff/freezer before claiming installation success, then run real package upgrades, TLS and service tests.",
+    "Run required aarch64 QEMU builds/tests for8.2+8.6, report emulation honestly. No push without a new explicit instruction."
+  ],
+  "unknown_untracked_file": "hs_err_pid57892.log is preserved and excluded from checkpoint commit; ownership/task relevance not established.",
+  "running_task_builds": [],
+  "manual_path_restore_command": "python3 dist/migration-implementation-2026-10-25/resume/restore-paths.py --apply",
+  "checkpoint_checks": {
+    "python_syntax_files": 73,
+    "php_lint_files": 62,
+    "json_files": 2,
+    "errors": 0,
+    "note": "No new compilers/tests launched for checkpoint. Full package/runtime/QEMU verification remains pending.",
+    "literal_c_indentation": "Ev.php intentionally embeds upstream tab-indented C in PHP nowdocs. Checkpoint whitespace check disables only space-before-tab, without editing Git configuration."
+  },
+  "checkpoint_receipt_sha256": {
+    "dist/migration-implementation-2026-10-25/resume/glibc-packaging.json": "468ef62171fb5ae4d6c72ebf8db7f6d4aa724c111f265127122fbdbf0a4e1bd4",
+    "dist/migration-implementation-2026-10-25/resume/glibc-stable.json": "faf7c12dada4c5322c3a8ae66f1d17054fff6633551b52c6c7059456767c0bcf",
+    "dist/migration-implementation-2026-10-25/resume/el8-migration.json": "bd96859afc0f69f8ff1ea613e98b2b0e3c9d9799f3f43e8d1abb9953bad1b96f",
+    "dist/migration-implementation-2026-10-25/resume/alpine/alpine.json": "0c4f7048af802c1273fdd3d0f630d8a8420c2014b94309d08d46049e57a53833",
+    "dist/migration-implementation-2026-10-25/resume/package-core.json": "ac1ab93f0a23815abc7be93ffa03ed6a0cc3ca1843b323b5f0c1b78cdb98bbd7",
+    "dist/migration-implementation-2026-10-25/resume/publication.json": "914dddfd7b6213a3173d2b9e40bc407e4f68b7d0a9b1c35fbc5794ffb2fe8c84",
+    "dist/migration-implementation-2026-10-25/resume/source-plan.json": "dc0bab49951af0f9f1db29e1fd6272bfdf3b9421eb82b856687c45ad03072578",
+    "dist/migration-implementation-2026-10-25/resume/upgrade-harness.json": "df38152672196c0743c86a38e3f794dcf7180c15678256c3f11b891f9655f62d",
+    "dist/migration-implementation-2026-10-25/resume/alias-review.json": "3c79cc0c5839d75b6b47b175f118e9cd48e42e090aa8a98e35272f461e493b3e"
+  }
+}

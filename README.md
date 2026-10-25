@@ -11,14 +11,14 @@ From a checkout, configure the repository for an explicit PHP version (8.2–8.6
 sudo sh bin/install-repositories 8.5
 ```
 
-The script requires `curl`. It configures the PHP repository and the common library
-repository on Debian/Ubuntu and Alpine; RPM uses the existing Static PHP repository.
+The script requires `curl`. It configures the selected PHP repository, which also
+contains its shared-library dependencies; RPM uses the existing Static PHP repository.
 Refresh the package index before installing or upgrading. The script does not install
 PHP. PHP 8.6 must be selected explicitly because it is a prerelease stream.
 
-Existing DEB/APK users must run the repository setup once before upgrading to shared
-library packages. See [shared library packaging and migration](docs/shared-libraries.md)
-for installation commands and repository administration.
+Existing users keep their repository configuration and migrate through ordinary
+`apt upgrade`, `dnf upgrade` or `apk upgrade`. See
+[shared library packaging and migration](docs/shared-libraries.md) for details.
 
 ## Usage for developers
 
@@ -40,7 +40,9 @@ php bin/spp package --type=rpm --libs-only
 ```
 
 Use `--libraries=openssl,zlib` to select library packages; omit it for the complete
-configured set. The same commands support `--type=deb` and `--type=apk`.
+configured set. Compile glibc payloads on EL8 only, then package the same sealed binaries as RPM
+and DEB. Alpine uses its separate native-musl build. The shared glibc workflow
+produces both package formats without a second compilation.
 
 ### Parameters
 
@@ -57,4 +59,6 @@ configured set. The same commands support `--type=deb` and `--type=apk`.
 
 ## Docker images for debugging CI failures
 
-docker compose -f compose-debian.yaml run build "bin/spp all --phpv=8.4 --type=deb --debug"
+Debian images provide packaging and runtime-test tools; production glibc
+compilation runs in the EL8 builder. Use the shared glibc workflow with
+`publish=false` to build and validate without updating repositories.

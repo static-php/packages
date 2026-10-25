@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Copy library and development outputs without any previous PHP consumer payload."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+
+def read(path):
+    for attempt in range(5):
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            if attempt == 4:
+                raise
+
+
+def file_hash(path):
+    if path.is_symlink():
+        return hashlib.sha256(('symlink:' + os.readlink(path)).encode()).hexdigest()
+    result = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            result.update(block)
+    return result.hexdigest()
+
+
+def consumer(name):
+    return name == 'php' or name.startswith(('php-', 'ext-')) or name == 'frankenphp'
+
+
+def source_file(root, name):
+    if not isinstance(name, str) or not name or Path(name).is_absolute() or '..' in Path(name).parts:
+        raise RuntimeError('Unsafe SDK output path: ' + repr(name))
+    path = root / name
+    try:
+        path.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as error:
+        raise RuntimeError('Missing or escaping SDK output: ' + name) from error
+    if not path.is_file():
+        raise RuntimeError('SDK output is not a file: ' + name)
+    return path
+
+
+def copy_file(source, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink():
+        target.symlink_to(os.readlink(source))
+    else:
+        subprocess.check_call(['cp', '--reflink=auto', '--preserve=mode,timestamps', str(source), str(target)])
+
+
+def export(source, destination):
+    source = source.resolve(strict=True)
+    destination = destination.absolute()
+    if destination.exists() or destination.is_symlink() or destination == source or source in destination.parents:
+        raise RuntimeError('SDK destination must be a new directory outside the source SDK')
+    build = read(source / '.build.json')
+    manifest = read(source / 'shared-libraries.json')
+    ownership = read(source / '.shared-library-ownership.json')
+    if manifest.get('schema') != 1 or manifest.get('linkage') != 'shared' or manifest.get('pending_rebuilds'):
+        raise RuntimeError('A complete shared library SDK is required')
+    libraries = manifest['libraries']
+    if not set(libraries) <= ownership.get('libraries', {}).keys():
+        raise RuntimeError('Library SDK lacks ownership records')
+    kept = {name: record for name, record in build.items() if not consumer(name)}
+    removed = {relative for name, record in build.items() if consumer(name) for relative in record.get('files', [])}
+    files = {relative for record in kept.values() for relative in record.get('files', [])}
+    owned = set()
+    for entry in libraries.values():
+        owned.update(entry['files'])
+        owned.update(entry.get('license_files', []))
+        owned.update(entry.get('runtime_assets', {}))
+        files.update(entry.get('abi_dump', {}).values())
+    if removed & owned:
+        raise RuntimeError('Consumer cleanup intersects library ownership: ' + ','.join(sorted(removed & owned)))
+    files.update(owned)
+    forbidden = {name for name in files if name in ['bin/php', 'bin/phpize', 'bin/php-config', 'bin/frankenphp', 'lib/frankenphp']
+                 or name.startswith(('modules/', 'include/php/', 'lib/php/', 'lib/libphp'))}
+    if forbidden:
+        raise RuntimeError('Library records unexpectedly include PHP payload files: ' + ','.join(sorted(forbidden)))
+    for name in files:
+        source_file(source, name)
+    for identifier, entry in libraries.items():
+        for name, expected in entry.get('file_hashes', {}).items():
+            path = source_file(source, name)
+            actual = file_hash(path)
+            if actual != expected:
+                raise RuntimeError('Library output changed during SDK export: ' + identifier + '/' + name)
+    destination.mkdir(parents=True)
+    try:
+        for name in sorted(files):
+            copy_file(source / name, destination / name)
+        metadata = ['shared-libraries.json', '.shared-library-ownership.json', 'shared-library-build-inputs.json',
+                    'shared-library-deployment-compatibility.json']
+        for name in metadata:
+            if (source / name).is_file():
+                copy_file(source / name, destination / name)
+        for name in ['openssl-variants', 'provenance']:
+            if (source / name).is_dir():
+                shutil.copytree(source / name, destination / name, symlinks=True,
+                                ignore=shutil.ignore_patterns('cached-consumer') if name == 'provenance' else None)
+        (destination / '.build.json').write_text(json.dumps(kept, sort_keys=True, indent=2) + '\n')
+        proof = {'schema': 1, 'source': str(source), 'library_count': len(libraries), 'library_and_development_files': len(files),
+                 'removed_consumer_records': sorted(name for name in build if consumer(name)),
+                 'unowned_consumer_outputs_copied': False, 'library_ownership_intersection': [],
+                 'source_manifest_sha256': hashlib.sha256((source / 'shared-libraries.json').read_bytes()).hexdigest()}
+        (destination / 'library-sdk-export.json').write_text(json.dumps(proof, sort_keys=True, indent=2) + '\n')
+        return proof
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path, required=True)
+    parser.add_argument('--destination', type=Path, required=True)
+    args = parser.parse_args()
+    print(json.dumps(export(args.source, args.destination), indent=2))
+
+
+if __name__ == '__main__':
+    main()

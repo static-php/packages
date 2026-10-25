@@ -43,6 +43,7 @@ BASES = {
     'alma9': ('rpm', 'almalinux:9'),
     'alma10': ('rpm', 'almalinux:10'),
 }
+FULL_BASES = ('alma8', 'debian', 'alpine')
 PHP_VERSIONS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 HERE = Path(__file__).resolve().parent
 WARNING = re.compile(r'Unable to (?:load dynamic library|initialize module)|PHP Startup:|symbol lookup error|(?:module|extension|Cannot load).*already loaded', re.I)
@@ -253,13 +254,22 @@ def dependencies(kind, name):
 
 
 def assert_elf(kind, names, manifest=None):
-    private = Path('/usr/lib64/php-zts/lib' if kind == 'rpm' else '/usr/lib/php-zts/lib')
+    private = Path('/usr/lib/php-zts/lib')
+    physical = Path('/usr/lib64/php-zts/lib') if kind == 'rpm' else private
+    roots = {private, physical}
+    def is_private(path):
+        return any(root in path.parents for root in roots)
     elf_count = private_count = 0
     required_by_owner = {}
     manifest_sonames = set()
     soname_owners = {}
     if manifest:
         data = json.loads(Path(manifest).read_text())
+        declared = data.get('runtime_libdir', str(private))
+        if declared not in ('/usr/lib/php-zts/lib', '/usr/lib64/php-zts/lib'):
+            raise RuntimeError('Unsupported private library path in manifest')
+        private = Path(declared)
+        roots.add(private)
         libraries = data.get('libraries', {})
         if not isinstance(libraries, dict):
             libraries = {entry['id']: entry for entry in libraries}
@@ -285,13 +295,13 @@ def assert_elf(kind, names, manifest=None):
                 continue
         dynamic = run(['readelf', '-d', path]).stdout
         needed = re.findall(r'\(NEEDED\).*\[([^]]+)\]', dynamic)
-        if not needed and private not in path.parents:
+        if not needed and not is_private(path):
             if path.parent in (Path('/usr/bin'), Path('/usr/sbin')):
                 raise RuntimeError(f'{path}: statically linked executable in shared-library package build')
             continue
         elf_count += 1
-        private_needed = {name for name in needed if (private / name).exists() or name in manifest_sonames}
-        if private_needed or private in path.parents:
+        private_needed = {name for name in needed if any((root / name).exists() for root in roots) or name in manifest_sonames}
+        if private_needed or is_private(path):
             match = re.search(r'\(RUNPATH\).*\[([^]]+)\]', dynamic)
             if not match or str(private) not in match[1].split(':'):
                 raise RuntimeError(f'{path}: missing private DT_RUNPATH {private}')
@@ -305,11 +315,12 @@ def assert_elf(kind, names, manifest=None):
             raise RuntimeError(f'{path}: unresolved library\n{output}')
         # musl ldd reports PHP host symbols while examining extension DSOs. Their
         # actual load is checked under each SAPI below, after the PHP host exists.
-        if loaded.returncode and not (path.suffix == '.so' and private not in path.parents and 'Error relocating' in output):
+        if loaded.returncode and not (path.suffix == '.so' and not is_private(path) and 'Error relocating' in output):
             raise RuntimeError(f'{path}: ldd failed\n{output}')
         for soname in private_needed:
             expected = private / soname
-            if not re.search(r'(?:=>\s*)?' + re.escape(str(expected)) + r'(?:\s|$)', output):
+            permitted = {str(root / soname) for root in roots}
+            if not any(re.search(r'(?:=>\s*)?' + re.escape(value) + r'(?:\s|$)', output) for value in permitted):
                 raise RuntimeError(f'{path}: {soname} resolved outside {private}\n{output}')
             provider = soname_owners.get(soname)
             if provider and provider != owner:
@@ -341,13 +352,16 @@ def result_json(output, php):
     return data
 
 
-def extension_inventory(data, sapi, reference=None, builtins=()):
+def extension_inventory(data, sapi, reference=None, builtins=(), disabled=()):
     expected_sapi = {'CLI': 'cli', 'CGI': 'cgi-fcgi', 'FPM': 'fpm-fcgi', 'FrankenPHP': 'frankenphp'}.get(sapi)
     if expected_sapi and data.get('sapi') != expected_sapi:
         raise RuntimeError(f'{sapi}: expected SAPI {expected_sapi}, got {data.get("sapi")}')
     if not isinstance(data.get('ini_files'), list) or not isinstance(data.get('extensions'), list):
         raise RuntimeError(f'{sapi}: runtime probe omitted its extension/configuration inventory')
     directory = Path(data['extension_dir'])
+    disabled = {name.lower() for name in disabled}
+    registered = {value.lower() for value in data['extensions']}
+    mapped = {Path(path).resolve() for path in data.get('loaded_objects', [])}
     active = {}
     pattern = re.compile(r'''^\s*(zend_extension|extension)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s#]+))\s*(?:[;#].*)?$''', re.I)
     for filename in data['ini_files']:
@@ -368,14 +382,19 @@ def extension_inventory(data, sapi, reference=None, builtins=()):
     expected = {}
     for path in directory.glob('*.so'):
         real = path.resolve()
-        if real not in active:
-            raise RuntimeError(f'{sapi}: {path} has no active directive in PHP\'s loaded configuration')
         short = re.sub(r'-(?:zts|nts)[0-9.]*-\d{2,}$', '', path.stem)
         # SPC's only shared module display-name alias; addon switches such as
         # mbregex and swoole hooks do not produce independent extension DSOs.
         module = 'zend opcache' if short.lower() == 'opcache' else short.lower()
+        if module in disabled:
+            if real in active or module in registered or real in mapped:
+                raise RuntimeError(f'{sapi}: intentionally disabled extension {module} became active')
+            continue
+        if real not in active:
+            raise RuntimeError(f'{sapi}: {path} has no active directive in PHP\'s loaded configuration')
         expected[real] = (module, active[real])
-    registered = {value.lower() for value in data['extensions']}
+    if disabled & registered:
+        raise RuntimeError(f'{sapi}: intentionally disabled extensions registered: {sorted(disabled & registered)}')
     server_module = {'CGI': 'cgi-fcgi', 'FPM': 'cgi-fcgi', 'FrankenPHP': 'frankenphp'}.get(sapi)
     if server_module:
         if server_module not in registered:
@@ -394,7 +413,6 @@ def extension_inventory(data, sapi, reference=None, builtins=()):
     for feature in ('mbregex', 'password-argon2'):
         if feature in builtins and data.get('features', {}).get(feature) is not True:
             raise RuntimeError(f'{sapi}: advertised builtin feature unavailable: {feature}')
-    mapped = {Path(path).resolve() for path in data.get('loaded_objects', [])}
     for path, (module, is_zend) in expected.items():
         if module not in registered or (is_zend and module not in zend):
             raise RuntimeError(f'{sapi}: installed extension {path.name} did not register {module}')
@@ -470,7 +488,7 @@ def fcgi_request(port, script):
                 return output.decode(errors='replace')
 
 
-def sapi_checks(php, names, kind=None):
+def sapi_checks(php, names, kind=None, disabled=()):
     script = Path('/spp/shared-runtime.php')
     binary = Path('/usr/bin/php-zts')
     embed_paths = required_payloads(php, names, kind)
@@ -481,13 +499,13 @@ def sapi_checks(php, names, kind=None):
     if binary.is_file():
         cli = run([binary, script])
         data = result_json(cli.stdout + cli.stderr, php)
-        inventory = extension_inventory(data, 'CLI', builtins=builtins)
+        inventory = extension_inventory(data, 'CLI', builtins=builtins, disabled=disabled)
         sapis.append('cli')
     cgi = Path('/usr/bin/php-cgi-zts')
     if 'php-zts-cgi' in names:
         result = run([cgi, '-f', script], env=dict(os.environ, REDIRECT_STATUS='200', REQUEST_METHOD='GET',
                                                 SCRIPT_FILENAME=str(script), SCRIPT_NAME='/shared-runtime.php'))
-        extension_inventory(result_json(result.stdout + result.stderr, php), 'CGI', inventory, builtins)
+        extension_inventory(result_json(result.stdout + result.stderr, php), 'CGI', inventory, builtins, disabled)
         sapis.append('cgi')
     processes = []
     try:
@@ -503,7 +521,7 @@ def sapi_checks(php, names, kind=None):
             processes.append((process, log))
             for attempt in range(50):
                 try:
-                    extension_inventory(result_json(fcgi_request(19000, script), php), 'FPM', inventory, builtins)
+                    extension_inventory(result_json(fcgi_request(19000, script), php), 'FPM', inventory, builtins, disabled)
                     break
                 except (ConnectionError, OSError):
                     if process.poll() is not None or attempt == 49:
@@ -526,7 +544,7 @@ def sapi_checks(php, names, kind=None):
                     if response.status != 200:
                         raise RuntimeError(f'FrankenPHP HTTP {response.status}: {body}')
                     franken_data = result_json(body, php)
-                    extension_inventory(franken_data, 'FrankenPHP', inventory, builtins)
+                    extension_inventory(franken_data, 'FrankenPHP', inventory, builtins, disabled)
                     if data is None:
                         data = franken_data
                     break
@@ -975,10 +993,11 @@ def main():
             print(str(error), file=sys.stderr, flush=True)
     try:
         if args.fixtures_only:
-            for os_name in [args.os] if args.os else BASES:
+            for os_name in [args.os] if args.os else FULL_BASES:
                 validate(os_name, args.php or '8.4', None, fixtures_only=True)
         elif args.matrix_root:
-            for os_name, (kind, _) in BASES.items():
+            for os_name in FULL_BASES:
+                kind, _ = BASES[os_name]
                 for php in PHP_VERSIONS:
                     location = args.matrix_root / os_name / php
                     manifest = location / 'buildroot/shared-libraries.json'
@@ -987,8 +1006,10 @@ def main():
                              not args.skip_individual,
                              not args.skip_fixtures and php == PHP_VERSIONS[0])
         else:
+            compatibility_smoke = args.os not in FULL_BASES
             validate(args.os, args.php, args.artifacts, args.manifest,
-                     not args.skip_individual, not args.skip_fixtures)
+                     not args.skip_individual and not compatibility_smoke,
+                     not args.skip_fixtures and not compatibility_smoke)
     finally:
         if args.report:
             args.report.write_text(json.dumps({'cells': results}, indent=2) + '\n')

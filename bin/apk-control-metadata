@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Add APKv2 solver metadata before package signing, preserving its payload."""
+
+import argparse
+import copy
+import gzip
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tarfile
+import tempfile
+import zlib
+
+
+CHUNK_SIZE = 65536
+MAX_CONTROL_SIZE = 32 * 1024 * 1024
+DEPENDENCY = re.compile(r"!?[A-Za-z0-9_][A-Za-z0-9+_.:-]*(?:(?:[<>~]?=|[<>~])[A-Za-z0-9_][A-Za-z0-9+_.~:-]*)?\Z")
+
+
+def control_member(source):
+    decoder = zlib.decompressobj(31)
+    output = bytearray()
+    while not decoder.eof:
+        chunk = source.read(CHUNK_SIZE)
+        if not chunk:
+            raise ValueError("Truncated APK control gzip member")
+        output.extend(decoder.decompress(chunk, MAX_CONTROL_SIZE - len(output) + 1))
+        if len(output) > MAX_CONTROL_SIZE or decoder.unconsumed_tail:
+            raise ValueError("APK control archive exceeds the supported size")
+    offset = source.tell() - len(decoder.unused_data)
+    source.seek(offset)
+    return bytes(output), offset
+
+
+def read_control(content):
+    entries = []
+    names = set()
+    metadata = None
+    with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
+        for entry in archive:
+            if entry.name.startswith(".SIGN."):
+                raise ValueError("Signed APK input is not supported; update control metadata before signing")
+            if entry.name in names or not entry.isfile() or not entry.name.startswith(".") or "/" in entry.name:
+                raise ValueError("Unsupported or duplicate APK control entry: " + entry.name)
+            names.add(entry.name)
+            data = archive.extractfile(entry).read()
+            entries.append((entry, data))
+            if entry.name == ".PKGINFO":
+                metadata = data.decode("utf-8")
+    if metadata is None:
+        raise ValueError("APK control archive has no .PKGINFO")
+    fields = {}
+    for line in metadata.splitlines():
+        match = re.match(r"^([A-Za-z0-9_]+)\s*=\s*(.*)$", line)
+        if match:
+            fields.setdefault(match[1], []).append(match[2])
+    if any(len(fields.get(key, [])) != 1 for key in ["pkgname", "pkgver", "arch", "datahash"]):
+        raise ValueError("APK has missing or duplicate package identity/datahash fields")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", fields["datahash"][0]):
+        raise ValueError("APK datahash is not a SHA256 digest")
+    return entries, metadata, fields
+
+
+def validate_data(source, expected_hash):
+    digest = hashlib.sha256()
+    decoder = zlib.decompressobj(31)
+    while not decoder.eof:
+        chunk = source.read(CHUNK_SIZE)
+        if not chunk:
+            raise ValueError("Truncated or missing APK data gzip member")
+        digest.update(chunk)
+        pending = chunk
+        while pending and not decoder.eof:
+            decoder.decompress(pending, 1024 * 1024)
+            pending = decoder.unconsumed_tail
+    if decoder.unused_data or source.read(1):
+        raise ValueError("Unsigned APKv2 must contain exactly one control and one data gzip member")
+    actual_hash = digest.hexdigest()
+    if actual_hash != expected_hash.lower():
+        raise ValueError("APK datahash does not match its unchanged compressed payload")
+    return actual_hash
+
+
+def install_if_value(value):
+    predicates = value.split()
+    if not predicates or any(DEPENDENCY.fullmatch(predicate) is None for predicate in predicates):
+        raise ValueError("install_if must contain APK dependency predicates separated by spaces")
+    if len(predicates) != len(set(predicates)):
+        raise ValueError("install_if contains duplicate dependency predicates")
+    return " ".join(predicates)
+
+
+def updated_control(entries, metadata, fields, predicates, provider_priority=None):
+    additions = []
+    if predicates is not None:
+        previous = fields.get("install_if", [])
+        if len(previous) > 1:
+            raise ValueError("APK has duplicate install_if fields")
+        if previous:
+            if install_if_value(previous[0]) != predicates:
+                raise ValueError("APK already declares different install_if predicates")
+        else:
+            additions.append("install_if = " + predicates)
+    if provider_priority is not None:
+        previous = fields.get("provider_priority", [])
+        if len(previous) > 1:
+            raise ValueError("APK has duplicate provider_priority fields")
+        if previous:
+            if previous[0] != str(provider_priority):
+                raise ValueError("APK already declares a different provider_priority")
+        else:
+            additions.append("provider_priority = " + str(provider_priority))
+    if not additions:
+        return None
+    updated = metadata.rstrip("\n") + "\n" + "\n".join(additions) + "\n"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for entry, content in entries:
+            header = copy.copy(entry)
+            if entry.name == ".PKGINFO":
+                content = updated.encode("utf-8")
+                header.size = len(content)
+            archive.addfile(header, io.BytesIO(content))
+        # APK control tar members are cut before the tar end markers, so a
+        # concatenated gzip reader can continue into the data tar member.
+        end = buffer.tell()
+    return gzip.compress(buffer.getvalue()[:end], compresslevel=9, mtime=0)
+
+
+def rewrite(package, predicates=None, output=None, provider_priority=None):
+    package = Path(package)
+    destination = Path(output) if output is not None else package
+    if package.is_symlink() or destination.is_symlink():
+        raise ValueError("APK input/output must be regular archive paths")
+    predicates = install_if_value(predicates) if predicates is not None else None
+    if provider_priority is not None and (type(provider_priority) is not int or not 0 <= provider_priority <= 65535):
+        raise ValueError("provider_priority must be an integer between 0 and 65535")
+    if predicates is None and provider_priority is None:
+        raise ValueError("No APK control metadata was requested")
+    with package.open("rb") as source:
+        mode = stat.S_IMODE(os.fstat(source.fileno()).st_mode)
+        content, data_offset = control_member(source)
+        entries, metadata, fields = read_control(content)
+        payload_hash = validate_data(source, fields["datahash"][0])
+        control = updated_control(entries, metadata, fields, predicates, provider_priority)
+        changed = control is not None
+        if not changed and destination.resolve() == package.resolve():
+            return {"changed": False, "package": str(destination), "install_if": predicates, "datahash": payload_hash}
+        descriptor, temporary = tempfile.mkstemp(prefix="." + destination.name + ".", dir=destination.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                if control is None:
+                    source.seek(0)
+                    remaining = data_offset
+                    while remaining:
+                        chunk = source.read(min(CHUNK_SIZE, remaining))
+                        if not chunk:
+                            raise ValueError("APK changed while copying its control archive")
+                        target.write(chunk)
+                        remaining -= len(chunk)
+                else:
+                    target.write(control)
+                source.seek(data_offset)
+                copied_hash = hashlib.sha256()
+                while chunk := source.read(CHUNK_SIZE):
+                    copied_hash.update(chunk)
+                    target.write(chunk)
+                if copied_hash.hexdigest() != payload_hash:
+                    raise ValueError("APK payload changed while updating control metadata")
+                os.fchmod(target.fileno(), mode)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    return {"changed": changed, "package": str(destination), "install_if": predicates, "datahash": payload_hash}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("package", type=Path)
+    parser.add_argument("--install-if")
+    parser.add_argument("--provider-priority", type=int)
+    parser.add_argument("--output", type=Path)
+    arguments = parser.parse_args()
+    try:
+        result = rewrite(arguments.package, arguments.install_if, arguments.output, arguments.provider_priority)
+    except (OSError, ValueError, tarfile.TarError, zlib.error) as error:
+        parser.exit(2, str(error) + "\n")
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

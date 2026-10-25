@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     printf 'Usage: %s <8.2|8.3|8.4|8.5|8.6>\n' "$0"
-    printf '%s\n' 'Configure the PHP ZTS and common library repositories. Run as root.'
+    printf '%s\n' 'Configure the selected PHP ZTS repository, including its shared libraries. Run as root.'
 }
 
 fail() {
@@ -30,10 +30,6 @@ esac
 [ -n "$root" ] || [ "$(id -u)" -eq 0 ] || fail 'Run this script as root.'
 host=${SPP_FORGEJO_HOST:-https://pkg.henderkes.com}
 host=${host%/}
-libs_owner=${SPP_LIBS_OWNER:-libs}
-case $libs_owner in
-    ''|*[!a-zA-Z0-9_.-]*) fail 'Invalid SPP_LIBS_OWNER.' ;;
-esac
 case $host in
     http://*|https://*) ;;
     *) fail 'SPP_FORGEJO_HOST must be an HTTP or HTTPS URL.' ;;
@@ -71,13 +67,13 @@ fetch() {
 
 case $type in
     deb)
-        for owner in "$version" "$libs_owner"; do
+        for owner in "$version"; do
             fetch "$host/api/packages/$owner/debian/repository.key" "$temporary/$owner.asc"
             grep -q '^-----BEGIN PGP PUBLIC KEY BLOCK-----' "$temporary/$owner.asc" \
                 || fail "Invalid Debian repository key for $owner."
         done
         mkdir -p "$root/etc/apt/keyrings" "$root/etc/apt/sources.list.d"
-        for owner in "$version" "$libs_owner"; do
+        for owner in "$version"; do
             keyfile="/etc/apt/keyrings/henderkes$owner.asc"
             install -m 0644 "$temporary/$owner.asc" "$root$keyfile"
             printf 'deb [signed-by=%s] %s/api/packages/%s/debian php-zts main\n' \
@@ -87,7 +83,7 @@ case $type in
         printf '%s\n' 'Repositories configured. Run apt-get update, then install or upgrade PHP ZTS.'
         ;;
     apk)
-        for owner in "$version" "$libs_owner"; do
+        for owner in "$version"; do
             mkdir "$temporary/$owner"
             (cd "$temporary/$owner" && curl -fLsS -OJ "$host/api/packages/$owner/alpine/key")
             set -- "$temporary/$owner"/*
@@ -104,7 +100,7 @@ case $type in
         repositories="$root/etc/apk/repositories"
         [ ! -f "$repositories" ] || cat "$repositories" > "$temporary/repositories"
         : >> "$temporary/repositories"
-        for owner in "$version" "$libs_owner"; do
+        for owner in "$version"; do
             set -- "$temporary/$owner"/*
             install -m 0644 "$1" "$root/etc/apk/keys/${1##*/}"
             repository="$host/api/packages/$owner/alpine/main/php-zts"

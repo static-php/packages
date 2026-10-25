@@ -5,8 +5,8 @@ namespace staticphp\package;
 use RuntimeException;
 use staticphp\package;
 use staticphp\step\CreatePackages;
+use staticphp\util\BuildPayload;
 use staticphp\util\TwigRenderer;
-use Symfony\Component\Process\Process;
 
 class pie implements package
 {
@@ -16,35 +16,11 @@ class pie implements package
         return 'pie' . getBinarySuffix();
     }
 
-    /**
-     * Return the PIE application version (e.g., 1.3.1) parsed from `pie.phar -V`.
-     * CreatePackages will use this as the package version when available.
-     */
     public function getVersion(): string
     {
-        // Ensure artifacts exist and get the staged phar path
-        [$pharSource] = $this->prepareArtifacts();
-
-        $proc = new Process(['php', $pharSource, '-V'], env: self::getCleanEnvironment());
-        $proc->setTimeout(2);
-        $proc->run();
-        if (!$proc->isSuccessful()) {
-            // Include both stdout and stderr for parsing attempt/fallback
-            $output = $proc->getOutput() . "\n" . $proc->getErrorOutput();
-        } else {
-            $output = $proc->getOutput() . "\n" . $proc->getErrorOutput();
-        }
-
-        // Example: "🥧 PHP Installer for Extensions (PIE) 1.3.1"
-        if (preg_match('/\(PIE\)\s+([0-9][0-9A-Za-z.-]*)/u', $output, $m)) {
-            return $m[1];
-        }
-        if (preg_match('/PIE\s+([0-9][0-9A-Za-z.-]*)/u', $output, $m)) {
-            return $m[1];
-        }
-
-        throw new RuntimeException('Unable to detect PIE version from output: ' . trim($output));
+        return $this->frozenArtifact()[1];
     }
+
     public function getFpmConfig(): array
     {
         [$pharSource, $wrapperSource] = $this->prepareArtifacts();
@@ -95,29 +71,9 @@ class pie implements package
         return 'PHP Installer for Extensions (PIE)';
     }
 
-    /**
-     * Get environment without Xdebug variables that would cause connection attempts
-     */
-    private static function getCleanEnvironment(): array
-    {
-        $env = $_SERVER;
-
-        // Explicitly disable Xdebug-related environment variables
-        // Must be set to empty/0, not unset, as they inherit from parent
-        $env['XDEBUG_SESSION'] = '';
-        $env['XDEBUG_CONFIG'] = '';
-        $env['XDEBUG_MODE'] = 'off';
-        $env['PHP_IDE_CONFIG'] = '';
-
-        return $env;
-    }
-
     private function prepareArtifacts(): array
     {
-        $pharPath = DOWNLOAD_PATH . '/pie.phar';
-        if (!file_exists($pharPath)) {
-            $this->downloadLatestPiePhar($pharPath);
-        }
+        [$pharPath] = $this->frozenArtifact();
 
         // Render the pie wrapper script using Twig template
         $binarySuffix = getBinarySuffix();
@@ -134,52 +90,46 @@ class pie implements package
         return [$pharPath, $wrapperPath];
     }
 
-    private function downloadLatestPiePhar(string $targetPath): void
+    private function frozenArtifact(): array
     {
-        // Resolve the asset URL for `pie.phar` from the latest stable GitHub release.
-        $headers = self::githubAuthHeaders();
-        $body = default_shell()->executeCurl(
-            'https://api.github.com/repos/php/pie/releases/latest',
-            headers: $headers,
-        );
-        $data = json_decode((string) $body, true);
-        if (!is_array($data) || empty($data['assets']) || !is_array($data['assets'])) {
-            throw new RuntimeException('PIE: failed to fetch latest release metadata from GitHub.');
-        }
-        $assetUrl = null;
-        foreach ($data['assets'] as $asset) {
-            if (isset($asset['name'], $asset['url']) && preg_match('/^pie\.phar$/', $asset['name'])) {
-                $assetUrl = $asset['url'];
-                break;
+        $payloadRoot = defined('BUILD_ROOT_PATH') ? BUILD_ROOT_PATH : '';
+        $sealedMetadata = $payloadRoot . '/packaging/pie/metadata.json';
+        if ($payloadRoot !== '' && (is_file($sealedMetadata) || is_file($payloadRoot . '/packaging/pie/pie.phar'))) {
+            $payload = BuildPayload::load($payloadRoot, true);
+            if (!$payload->isSealed()) {
+                throw new RuntimeException('PIE packaging requires a sealed producer payload');
             }
+            $metadataPath = $sealedMetadata;
+            $pharPath = $payloadRoot . '/packaging/pie/pie.phar';
+            $metadata = $this->readMetadata($metadataPath);
+        } else {
+            $metadataPath = BASE_PATH . '/downloads/.spc-meta.json';
+            $snapshot = $this->readMetadata($metadataPath);
+            $metadata = ['version' => $snapshot['pie_version'] ?? null, 'sha256' => $snapshot['pie_sha256'] ?? null];
+            $pharPath = BASE_PATH . '/downloads/pie.phar';
         }
-        if ($assetUrl === null) {
-            throw new RuntimeException('PIE: no pie.phar asset found in latest release.');
+        $version = preg_replace('/^[vV](?=\d)/', '', (string) ($metadata['version'] ?? ''));
+        $sha256 = $metadata['sha256'] ?? null;
+        if (!preg_match('/^\d+\.\d+\.\d+[A-Za-z0-9.+~-]*$/D', $version)
+            || !is_string($sha256) || !preg_match('/^[a-f0-9]{64}$/D', $sha256)
+            || !is_file($pharPath)) {
+            throw new RuntimeException('PIE must be frozen with its version and SHA256 in the source snapshot before packaging');
         }
-
-        // GitHub's asset endpoints redirect to a signed S3 URL when the
-        // `application/octet-stream` Accept header is used.
-        default_shell()->executeCurlDownload(
-            $assetUrl,
-            $targetPath,
-            headers: array_merge($headers, ['Accept: application/octet-stream']),
-        );
-
-        if (!file_exists($targetPath)) {
-            throw new RuntimeException('PIE download did not produce expected file: ' . $targetPath);
+        if (!hash_equals($sha256, hash_file('sha256', $pharPath))) {
+            throw new RuntimeException('Frozen PIE archive SHA256 mismatch: ' . $pharPath);
         }
+        return [$pharPath, $version];
     }
 
-    /** @return list<string> */
-    private static function githubAuthHeaders(): array
+    private function readMetadata(string $path): array
     {
-        $token = getenv('GITHUB_TOKEN') ?: getenv('GH_TOKEN');
-        if (!is_string($token) || $token === '') {
-            return [];
+        if (!is_file($path)) {
+            throw new RuntimeException('Missing frozen PIE metadata: ' . $path);
         }
-        return [
-            'Authorization: Bearer ' . $token,
-            'X-GitHub-Api-Version: 2022-11-28',
-        ];
+        $metadata = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($metadata)) {
+            throw new RuntimeException('Invalid frozen PIE metadata: ' . $path);
+        }
+        return $metadata;
     }
 }

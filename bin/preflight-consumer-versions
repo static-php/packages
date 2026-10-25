@@ -1,0 +1,281 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use staticphp\Command\TestCommand;
+use staticphp\step\CreatePackages;
+use staticphp\util\ApkRuntimeAliases;
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+function preflightOptions(): array
+{
+    $options = getopt('', ['type:', 'candidates:', 'baseline-manifest:', 'architecture:', 'output:', 'bump', 'iteration:']);
+    foreach (['type', 'candidates', 'architecture', 'output'] as $required) {
+        if (!isset($options[$required]) || !is_string($options[$required]) || $options[$required] === '') {
+            throw new RuntimeException('Missing --' . $required);
+        }
+    }
+    if (!in_array($options['type'], ['rpm', 'deb', 'apk'], true)) {
+        throw new RuntimeException('Unknown package type');
+    }
+    $paths = $options['baseline-manifest'] ?? [];
+    $options['baseline-manifest'] = is_array($paths) ? $paths : [$paths];
+    if ($options['baseline-manifest'] === []) {
+        throw new RuntimeException('At least one --baseline-manifest is required');
+    }
+    $options['bump'] = array_key_exists('bump', $options);
+    if (isset($options['iteration']) && (!is_string($options['iteration']) || !preg_match('/^\d+$/D', $options['iteration']))) {
+        throw new RuntimeException('--iteration must be a nonnegative package revision');
+    }
+    return $options;
+}
+
+function preflightArch(string $architecture): string
+{
+    return match ($architecture) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $architecture};
+}
+
+function preflightBaseVersion(string $type, string $version): string
+{
+    $version = preg_replace('/^\d+:/', '', $version);
+    return preg_replace($type === 'apk' ? '/-r\d+$/' : '/-[^-]+$/', '', $version);
+}
+
+function preflightVersionStream(string $type, string $version, ?string $ownerStream): ?string
+{
+    $version = preflightBaseVersion($type, $version);
+    $pattern = match ($type) {
+        'rpm' => '/_(8[2-6])(?=[.~+]|$)/',
+        'deb' => '/\+php(8[2-6])(?=[.~+]|$)/',
+        'apk' => '/p(8[2-6])(?=[._]|$)/',
+    };
+    if (preg_match($pattern, $version, $match)) {
+        return $match[1][0] . '.' . $match[1][1];
+    }
+    if ($type !== 'rpm' && $ownerStream !== null) {
+        return $ownerStream;
+    }
+    return preg_match('/^(8\.[2-6])(?:[.~]|$)/', $version, $match) ? $match[1] : null;
+}
+
+function preflightNumericUpstream(string $version): string
+{
+    $version = preg_replace('/^\d+:/', '', $version);
+    if (!preg_match('/^(\d+(?:\.\d+)+)/', $version, $match)) {
+        throw new RuntimeException('Cannot identify numeric upstream version: ' . $version);
+    }
+    return $match[1];
+}
+
+
+function preflightHighestVersion(array $versions, callable $compare): ?string
+{
+    $highest = null;
+    foreach ($versions as $version) {
+        if ($highest === null || $compare($version, $highest) > 0) {
+            $highest = $version;
+        }
+    }
+    return $highest;
+}
+
+function preflightPublished(array $paths, string $type, string $architecture): array
+{
+    $result = [];
+    foreach ($paths as $path) {
+        if (!is_string($path) || !is_file($path)) {
+            throw new RuntimeException('Missing captured baseline manifest');
+        }
+        $value = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        if (isset($value['type']) && $value['type'] !== $type) {
+            continue;
+        }
+        if (isset($value['architecture']) && preflightArch($value['architecture']) !== preflightArch($architecture)) {
+            continue;
+        }
+        $packages = array_merge($value['packages'] ?? [], $value['published_packages'] ?? []);
+        foreach ($value['consumer_versions'] ?? [] as $stream => $consumers) {
+            foreach ($consumers as $name => $version) {
+                $packages[] = ['name' => $name, 'version' => $version, 'php_stream' => $stream];
+            }
+        }
+        foreach ($packages as $package) {
+            if (!is_array($package) || !is_string($package['name'] ?? null) || !is_string($package['version'] ?? null)) {
+                throw new RuntimeException('Malformed captured package version');
+            }
+            $arch = $package['architecture'] ?? $package['arch'] ?? $architecture;
+            if (!in_array($arch, ['all', 'noarch'], true) && preflightArch($arch) !== preflightArch($architecture)) {
+                continue;
+            }
+            $stream = $package['php_stream'] ?? preflightVersionStream($type, $package['version'], $value['php_stream'] ?? null);
+            if ($stream === null) {
+                continue;
+            }
+            $version = $package['version'];
+            if ($type === 'rpm' && !str_contains($version, ':')) {
+                $version = (string) ($package['epoch'] ?? '0') . ':' . $version;
+            }
+            $result[$stream][$package['name']][$version] = true;
+        }
+    }
+    return $result;
+}
+
+function preflightConsumerVersions(array $options): array
+{
+    $type = $options['type'];
+    $architecture = $options['architecture'];
+    $paths = $options['baseline-manifest'];
+    $published = preflightPublished($paths, $type, $architecture);
+    $input = json_decode((string) file_get_contents($options['candidates']), true, 512, JSON_THROW_ON_ERROR);
+    $candidates = $input['candidates'] ?? $input;
+    if (!is_array($candidates) || !array_is_list($candidates) || $candidates === []) {
+        throw new RuntimeException('Expected a nonempty candidates list');
+    }
+    $runtime = new ReflectionProperty(CreatePackages::class, 'versionArch');
+    $iteration = new ReflectionMethod(CreatePackages::class, 'migrationNextIteration');
+    $command = (new ReflectionClass(TestCommand::class))->newInstanceWithoutConstructor();
+    $native = new ReflectionMethod(TestCommand::class, 'comparePackageVersions');
+    $compare = static fn (string $left, string $right): int => $native->invoke($command, $type, $left, $right);
+    $receipt = ['schema' => 1, 'type' => $type, 'architecture' => $architecture,
+        'baselines' => array_map(static fn (string $path): array => ['path' => $path, 'sha256' => hash_file('sha256', $path)], $paths),
+        'revision_policy' => ['bump' => $options['bump'] ?? false, 'iteration' => $options['iteration'] ?? null],
+        'candidates' => [], 'rejected' => []];
+    $seen = [];
+    foreach ($candidates as $candidate) {
+        foreach (['php_stream', 'name', 'upstream_version', 'php_version'] as $field) {
+            if (!is_array($candidate) || !is_string($candidate[$field] ?? null) || $candidate[$field] === '') {
+                throw new RuntimeException('Candidate is missing ' . $field);
+            }
+        }
+        $stream = $candidate['php_stream'];
+        $name = $type === 'deb' ? str_replace('_', '-', $candidate['name']) : $candidate['name'];
+        $logicalName = $name;
+        if ($type === 'apk') {
+            $logicalName = $candidate['logical_name'] ?? ApkRuntimeAliases::logicalName($name);
+            if (!is_string($logicalName)) {
+                throw new RuntimeException('Invalid candidate logical package identity');
+            }
+            $physicalName = ApkRuntimeAliases::physicalName($logicalName);
+            if (!in_array($name, [$logicalName, $physicalName], true)) {
+                throw new RuntimeException('Candidate package alias differs from the central configuration');
+            }
+            $name = $physicalName;
+            $extension = ApkRuntimeAliases::extension($name);
+            if ($extension !== null && isset($candidate['component']) && $candidate['component'] !== $extension) {
+                throw new RuntimeException('Candidate alias source component differs from the central configuration');
+            }
+        }
+        if (!preg_match('/^8\.[2-6]$/D', $stream) || !preg_match('/^[a-z0-9][a-z0-9+_.-]*$/D', $name)) {
+            throw new RuntimeException('Invalid candidate package identity');
+        }
+        $key = $stream . '/' . $name;
+        if (isset($seen[$key])) {
+            throw new RuntimeException('Duplicate candidate package: ' . $key);
+        }
+        $seen[$key] = true;
+        $php = CreatePackages::normalizeVersion($candidate['php_version']);
+        if (!preg_match('/^(\d+\.\d+)(?:[.~]|$)/', $php, $match) || $match[1] !== $stream) {
+            throw new RuntimeException('Candidate PHP version differs from its stream: ' . $key);
+        }
+        $runtime->setValue(null, [$php, $architecture]);
+        $upstream = CreatePackages::normalizeVersion($candidate['upstream_version']);
+        $base = $upstream === $php ? ($type === 'apk' ? CreatePackages::toApkVersion($php) : $php)
+            : CreatePackages::getTaggedPackageVersion($type, $upstream);
+        $base = CreatePackages::migrationPackageVersion($type, $name, $base, $architecture);
+        $minimumMigration = $iteration->invoke(null, $name, $base, $architecture, $type);
+        $revision = $minimumMigration;
+        if ($options['bump'] ?? false) {
+            $revision = $type === 'apk' ? 0 : 1;
+            foreach (array_keys($published[$stream][$name] ?? []) as $old) {
+                if (preflightBaseVersion($type, $old) === $base && preg_match($type === 'apk' ? '/-r(\d+)$/' : '/-(\d+)(?:\.[A-Za-z0-9.+_~]+)?$/', $old, $release)) {
+                    $revision = max($revision, (int) $release[1] + 1);
+                }
+            }
+        }
+        if (isset($options['iteration'])) {
+            $revision = (int) $options['iteration'];
+        }
+        $version = $base . ($type === 'apk' ? '-r' : '-') . $revision;
+        if (isset($candidate['version'])) {
+            if (!is_string($candidate['version']) || preflightBaseVersion($type, $candidate['version']) !== $base) {
+                throw new RuntimeException('Explicit candidate version differs from the production source version: ' . $key);
+            }
+            $version = $candidate['version'];
+        }
+        $record = array_merge($candidate, ['name' => $name, 'version' => $version, 'production_base_version' => $base,
+            'migration_minimum_iteration' => $minimumMigration, 'packaging_iteration' => $revision,
+            'published_versions' => array_keys($published[$stream][$name] ?? [])]);
+        if ($logicalName !== $name) {
+            $record['logical_name'] = $logicalName;
+            $record['published_source_versions'] = [];
+            foreach (array_unique([$logicalName, $name]) as $sourceName) {
+                $highest = preflightHighestVersion(array_keys($published[$stream][$sourceName] ?? []), $compare);
+                if ($highest === null) {
+                    continue;
+                }
+                $record['published_source_versions'][$sourceName] = $highest;
+                $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($highest));
+                $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $highest);
+                $currentUpstream = CreatePackages::migrationUpstreamVersion($type, $base) ?? $upstream;
+                $phase = $oldUpstream === null ? 0 : $compare(CreatePackages::toApkVersion($currentUpstream), CreatePackages::toApkVersion($oldUpstream));
+                if ($numeric < 0 || $phase < 0) {
+                    $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'logical_name' => $logicalName,
+                        'candidate' => $version, 'published' => $highest,
+                        'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'upstream-phase-rollback'];
+                }
+            }
+        }
+        foreach ($record['published_versions'] as $old) {
+            $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($old));
+            $ordering = $compare($version, $old);
+            if ($numeric < 0 || $ordering < 0) {
+                $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'candidate' => $version,
+                    'published' => $old, 'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'native-version-downgrade'];
+            }
+        }
+        $receipt['candidates'][] = $record;
+    }
+    $receipt['passed'] = $receipt['rejected'] === [];
+    return $receipt;
+}
+
+if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
+    $previous = getenv('SPP_BASELINE_MANIFESTS');
+    try {
+        $options = preflightOptions();
+        putenv('SPP_BASELINE_MANIFESTS=' . json_encode($options['baseline-manifest'], JSON_THROW_ON_ERROR));
+        $result = preflightConsumerVersions($options);
+        $output = $options['output'];
+        if (!is_dir(dirname($output)) && !mkdir(dirname($output), 0755, true) && !is_dir(dirname($output))) {
+            throw new RuntimeException('Cannot create preflight receipt directory');
+        }
+        $temporary = tempnam(dirname($output), '.consumer-version-preflight-');
+        if ($temporary === false) {
+            throw new RuntimeException('Cannot stage preflight receipt');
+        }
+        try {
+            file_put_contents($temporary, json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+            if (!rename($temporary, $output)) {
+                throw new RuntimeException('Cannot save preflight receipt');
+            }
+        } finally {
+            if (file_exists($temporary)) {
+                unlink($temporary);
+            }
+        }
+        if (!$result['passed']) {
+            foreach ($result['rejected'] as $rejection) {
+                fwrite(STDERR, $rejection['php_stream'] . ' ' . $rejection['name'] . ': ' . $rejection['reason'] . ' (' . $rejection['candidate'] . ' < ' . $rejection['published'] . ")\n");
+            }
+        }
+        exit($result['passed'] ? 0 : 3);
+    } catch (Throwable $error) {
+        fwrite(STDERR, 'Consumer version preflight failed: ' . $error->getMessage() . "\n");
+        exit(1);
+    } finally {
+        $previous === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previous);
+    }
+}

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Build and install the real x86_64 shared-library package matrix locally.
+"""Historical validation utilities; the multi-distro compilation entrypoint is retired.
 
-python3 tests/build-shared-matrix.py --spc ~/static-php-cli \
-    --downloads ./downloads --report docs/shared-library-validation.md
-
-Each distro owns a disposable source copy, downloads, caches and containers.
-Only the bounded summary written to --report survives completion or failure.
-The required php-zts-shared-test-<os>-debug builder images must already exist.
+The active glibc workflow builds once on EL8 and packages the same payload as
+RPM and DEB. Use shared-runtime-containers.py for packaged runtime validation.
 """
 
 import argparse
@@ -467,61 +463,10 @@ def csv(value, allowed, label):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--spc', required=True, type=Path)
-    parser.add_argument('--downloads', required=True, type=Path)
-    parser.add_argument('--library-matrix-root', type=Path,
-                        help='Reuse prepared ROOT/<os>/{buildroot,dist/<format>} library baselines for PHP-only reruns')
-    parser.add_argument('--project', type=Path, default=ROOT)
-    parser.add_argument('--os', type=lambda value: csv(value, FORMATS, 'OS targets'), default=list(FORMATS))
-    parser.add_argument('--php-versions', type=lambda value: csv(value, STREAMS, 'PHP versions'), default=list(STREAMS))
-    parser.add_argument('--jobs', type=int, default=1, help='Distro builds in parallel')
-    parser.add_argument('--build-concurrency', type=int, default=4, help='Compiler jobs per distro')
-    parser.add_argument('--abi-jobs', type=int, default=1, help='Concurrent memory-intensive library ABI preparations')
-    parser.add_argument('--report', type=Path, default=ROOT / 'docs/shared-library-validation.md')
-    parser.add_argument('--image-prefix', default='php-zts-shared-test-')
-    args = parser.parse_args()
-    if args.jobs < 1 or args.build_concurrency < 1 or args.abi_jobs < 1:
-        parser.error('--jobs, --build-concurrency and --abi-jobs must be positive')
-    args.spc, args.downloads, args.project = args.spc.resolve(), args.downloads.resolve(), args.project.resolve()
-    for required in (args.spc / 'bin/spc', args.spc / 'vendor/autoload.php', args.project / 'vendor/autoload.php', args.downloads / '.spc-meta.json'):
-        if not required.is_file():
-            parser.error('Required input missing: ' + str(required))
-    metadata = json.loads((args.downloads / '.spc-meta.json').read_text())
-    for php in set(args.php_versions) | {'8.4'}:
-        if not isinstance(metadata.get('php_versions', {}).get(php), str):
-            parser.error('Pinned downloads metadata has no PHP ' + php)
-    if args.library_matrix_root:
-        args.library_matrix_root = args.library_matrix_root.resolve()
-        try:
-            for os_name in args.os:
-                library_baseline(args.library_matrix_root, os_name)
-        except StageFailure as error:
-            parser.error(str(error))
-    for os_name in args.os:
-        image = args.image_prefix + os_name + '-debug'
-        inspected = subprocess.run(['docker', 'image', 'inspect', image], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                   universal_newlines=True)
-        if inspected.returncode:
-            parser.error('Required builder image unavailable: ' + image + '\n' + inspected.stderr)
-    cancelled = threading.Event()
-    def stop(signum, frame):
-        cancelled.set()
-        announce('Stopping matrix validation and cleaning task resources...')
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    run_id = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    results = []
-    requested = len(args.os) * len(args.php_versions)
-    abi_slots = threading.Semaphore(args.abi_jobs)
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(Target(args, os_name, cancelled, abi_slots).execute) for os_name in args.os]
-        for future in as_completed(futures):
-            results.append(future.result())
-            write_report(args.report, results, run_id, requested)
-    passed = sum(cell['ok'] for target in results for cell in target['cells'])
-    announce(f'Matrix validation: {passed}/{requested} real PHP/distro combinations passed. Report: {args.report}')
-    return 0 if len(results) == len(args.os) and all(target['ok'] for target in results) else 1
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.error('The legacy multi-distro build matrix is retired. Use the single-EL8 producer in '
+                 '.github/workflows/build-rpm-modular-packages.yml; validate its sealed package artifacts '
+                 'with tests/shared-runtime-containers.py and tests/migration-upgrade-containers.py.')
 
 
 if __name__ == '__main__':

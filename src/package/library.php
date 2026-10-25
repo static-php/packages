@@ -7,6 +7,7 @@ namespace staticphp\package;
 use RuntimeException;
 use staticphp\package;
 use staticphp\util\SharedLibraries;
+use staticphp\util\BuildPayload;
 
 final class library implements package
 {
@@ -62,7 +63,11 @@ final class library implements package
         $files[$metadataPath] = '/usr/share/php-zts/libraries/' . $this->id . '.json';
         return [
             'files' => $files,
-            'depends' => $this->libraries->dependenciesForPackage($files, defined('SPP_TYPE') ? SPP_TYPE : 'rpm', $this->id),
+            'depends' => array_values(array_unique([
+                'php-zts-runtime-layout',
+                ...($this->id === 'openssl' ? ['ca-certificates'] : []),
+                ...$this->libraries->dependenciesForPackage($files, defined('SPP_TYPE') ? SPP_TYPE : 'rpm', $this->id),
+            ])),
             'provides' => [],
             'provides_unversioned' => [$this->libraries->abiCapability($this->id)],
         ];
@@ -85,6 +90,15 @@ final class library implements package
         $files = $this->libraries->getPackageFiles($this->id);
         foreach ($files as $source => $destination) {
             if (is_link($source) || file_get_contents($source, false, null, 0, 4) !== "\x7fELF") {
+                continue;
+            }
+            if (($payload = BuildPayload::load($this->libraries->getRoot())) !== null && $payload->isSealed()) {
+                $prepared = $payload->prepareFile($source);
+                unset($files[$source]);
+                $files[$prepared['runtime']] = $destination;
+                if ($prepared['debug'] !== null) {
+                    $this->debugFiles[$prepared['debug']] = '/usr/lib/debug' . $destination . '.debug';
+                }
                 continue;
             }
             $relative = substr($source, strlen($this->libraries->getRoot()) + 1);

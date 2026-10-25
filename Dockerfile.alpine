@@ -80,13 +80,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
 COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
 RUN GCC_VERSION="${GCC_VERSION}" /usr/local/bin/build-gcc-runtime
 
-# Older toolchain archives contain a static-only linker script here.
-RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.so.6" ]; then \
-            ln -sf libstdc++.so.6 "$d/libstdc++.so"; \
-        fi; \
-    done && \
-    ln -sf gcc /opt/gcc/bin/cc && \
+RUN ln -sf gcc /opt/gcc/bin/cc && \
     echo 'export PATH=/opt/gcc/bin:$PATH' > /etc/profile.d/gcc16.sh && \
     command -v gcc | grep -q /opt/gcc && \
     gcc -dumpfullversion | tee /dev/stderr | grep -qx "${GCC_VERSION}" && \

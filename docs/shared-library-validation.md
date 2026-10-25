@@ -1,5 +1,8 @@
 # Shared library validation
 
+This records the earlier, separate-platform builds. The single-EL8 migration uses
+the producer and upgrade checks described in [shared libraries](shared-libraries.md).
+
 The native x86_64 matrix **passed on 2026-10-23**: 25/25 verified cells across Alpine 3.21, Debian 11 and AlmaLinux 8/9/10, PHP 8.2–8.6. Arm64 execution is deferred.
 
 The final archive gate passed: 5,495 per-cell package references, 2,775 distinct compressed archives and 2,095 independent consumer checks. Each native consumer was installed, removed and reinstalled.
@@ -70,11 +73,11 @@ python3 -B tests/shared-runtime-containers.py --os alma8 --php 8.4 \
     --manifest /path/to/buildroot/shared-libraries.json
 ```
 
-The reusable build driver is `tests/build-shared-matrix.py`. With its five prepared
-`php-zts-shared-test-<distro>-debug` builder images and the pinned downloads available,
-`--jobs 1 --build-concurrency 8 --abi-jobs 1` runs the full matrix one distro at a time.
-The completed validation used temporary bounded recovery runners, retaining only
-verified packages between compilation and runtime checks.
+The old `tests/build-shared-matrix.py` build entrypoint is retired. Use
+`build-rpm-modular-packages.yml` with `publish=false` for the shared EL8 RPM/DEB
+producer, and `build-apk-forgejo.yml` for native Alpine. The historical validation
+above used temporary bounded recovery runners, retaining only verified packages
+between compilation and runtime checks.
 
 Final host checks passed: 46 workflow tests, 38 production VM/PNG regressions,
 5 installer tests, 5 repository-version tests, revision/autoload fixtures and syntax

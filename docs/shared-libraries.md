@@ -1,126 +1,131 @@
 # Shared runtime libraries
 
-PHP ZTS packages use private shared runtime libraries, one package per upstream
-library, named `php-zts-lib-<library-id>`. They have upstream library versions and
-package revisions independent of the selected PHP stream. Shared GCC runtime files
-belong to `php-zts-lib-gcc-runtime`.
+PHP ZTS uses private shared libraries named `php-zts-lib-<library-id>`. Their
+versions and revisions are independent of PHP. Shared compiler runtimes belong
+to `php-zts-lib-gcc-runtime`; the host still supplies glibc, its loader and NSS.
 
-The runtime directory is `/usr/lib64/php-zts/lib` on RPM systems and
-`/usr/lib/php-zts/lib` on Debian and Alpine. Consumers and libraries carry this
-directory in their ELF runtime search path. These files do not replace the system's
-libraries. Headers and linker metadata stay in the buildroot; runtime assets such as
-providers and plugins are included with the library that needs them.
+## One glibc producer
 
-Fileinfo ships as a shared extension. RPM and DEB CLI packages recommend the
-matching Fileinfo package without requiring it. APK has no equivalent weak
-recommendation; install its Fileinfo package explicitly when needed.
+EL8 is the only glibc compilation platform, with native x86_64 and arm64 jobs.
+One PHP-independent SDK feeds all PHP streams. Each PHP/core/extension/FrankenPHP
+payload is compiled once per stream and architecture, then packaged as RPM and
+DEB without changing its common ELF bytes. EL9, EL10 and Debian do not compile
+separate production payloads. Alpine retains its separate native-musl producer.
 
-## Configure repositories and migrate
+The logical runtime directory is `/usr/lib/php-zts/lib`; modules use
+`/usr/lib/php-zts/modules`. RPM retains its real `/usr/lib64/php-zts` tree and a
+package-owned canonical alias. DEB uses the real canonical tree and a compatibility
+alias for retained libraries with compiled legacy lib64 plugin paths. The runtime
+layout package owns these aliases, detects conflicting existing paths, and is a
+hard dependency of libraries and PHP consumers. The embed DSO lives in the private
+library tree, with legacy public linker names preserved.
 
-Existing Debian/Ubuntu and Alpine installations need the common library repository
-**before** their first upgrade to shared PHP packages. From this checkout, run:
+OpenSSL has two EL8-built runtime profiles: `/etc/pki/tls` for RPM and `/etc/ssl`
+for DEB. Both use the same source/toolchain, headers, SONAMEs and verified symbol
+and type ABI. PHP, cURL and FrankenPHP remain common. Profile changes are isolated
+from unrelated library build inputs. Runtime data, engines and providers stay
+with their owning library.
 
-```sh
-sudo sh bin/install-repositories 8.5
-```
+`bin/build-payload` records and seals source versions, architecture, enabled and
+skipped extensions, PHP module ABI, build configuration, common ELF/debug hashes
+and packaging assets. Package-only stages consume that record instead of
+regenerating compiler settings from their host. Package revision state lives in
+sidecars rather than rewriting the compiled SDK.
 
-Pass the installed PHP stream explicitly: `8.2`, `8.3`, `8.4`, `8.5`, or `8.6`.
-Compact owner names (`82`–`86`) also work. The setup is safe to rerun. It preserves
-other repository entries and fails if either signing key cannot be downloaded.
-Use the following commands for the relevant package manager:
+## Existing installations
 
-| Format | Refresh and install |
+Keep existing repository URLs, signing keys, package names and PHP module streams.
+Private library packages are available in each existing DEB/APK owner `82`–`86`;
+clients do not add a separate `libs` repository or rerun an installer.
+
+| Format | Ordinary upgrade |
 | --- | --- |
-| DEB | `apt-get update` then `apt-get install php-zts-cli` |
-| APK | `apk update` then `apk add php-zts-cli` |
-| RPM | `dnf module switch-to php-zts:static-8.5` then `dnf install php-zts-cli` |
+| DEB | `apt update && apt upgrade` |
+| DEB scripts | `apt-get update && apt-get upgrade --with-new-pkgs` |
+| RPM | `dnf upgrade` |
+| APK | `apk update && apk upgrade` |
 
-For existing installations, refresh metadata and use the normal package-manager
-upgrade command instead of installing the CLI again. Review the proposed transaction.
-PHP 8.6 remains an explicitly selected prerelease stream.
+Plain `apt-get upgrade` can hold the update because it refuses new dependency
+packages. PHP 8.6 remains an opt-in prerelease stream. Supported baselines are
+Debian 11+, Alpine 3.21+, and EL8–10.
 
-DEB uses `https://pkg.henderkes.com/api/packages/<stream>/debian` and
-`https://pkg.henderkes.com/api/packages/libs/debian`, both with distribution `php-zts`
-and component `main`. Each owner has a separate key in `/etc/apt/keyrings`, referenced
-by `signed-by` in its source file. APK uses the corresponding
-`/api/packages/<owner>/alpine/main/php-zts` URLs and the signing-key filenames supplied
-by Forgejo. RPM keeps the existing `rpm.henderkes.com` repository and module streams;
-library packages are outside the PHP modules.
+Fileinfo and cURL are shared extensions. RPM/DEB SAPIs recommend both; APK uses
+native `install_if` metadata tied to the shared-runtime capability. Defaults retain
+these features, while explicit weak-dependency/selection opt-outs remain possible.
 
-`bin/install-repositories` is the local setup script. Updating the separately hosted
-`https://files.henderkes.com/install.sh` requires an authorized publication step.
-Until that update is published, use the script from this checkout for the common
-library repository.
+New modules require the matching shared PHP generation and module ABI. Core
+migration constraints prevent an installed old extension from being silently left
+in an incompatible mixed set. A published extension missing from the candidate
+cohort blocks that migration; `allow-shared-ext-failure` does not authorize loss
+of an installed feature.
 
-## Compatible updates and ABI changes
+## One RPM repository
 
-Packages depend on the private libraries used by their own payloads, with minimum
-versions and private ABI capabilities. A compatible library update can install
-independently of PHP. A breaking ABI update changes its private capability and requires
-the affected libraries, extensions, SAPIs, and PHP streams to upgrade together.
+Each architecture has one canonical `<arch>/el8/` repository, one RPM archive set,
+and one primary/module metadata generation. Existing `<arch>/el9/` and
+`<arch>/el10/` URL subtrees alias that repository. `createrepo_static` records EL8
+only as a build requirement, not a runtime platform restriction.
 
-There is one installed ABI per library and one flat private runtime directory. The
-package solver must retain the old set while an incomplete replacement set is
-available. Do not force a breaking library update past unsatisfied dependencies.
-Release preparation compares the previous and candidate ABI and rebuilds the reverse
-dependency closure; an uncertain comparison or missing consumer blocks the transition.
+New RPM releases are plain integers, without `.el8`, `.el9` or `.el10` suffixes.
+The initial migration compares native EVRs against all three historical baselines:
+removing a suffix at the same revision would sort lower. Legacy extension Version
+spellings are preserved when necessary for the first shared replacement.
 
-## Build and release administration
+`bin/canonical-rpm-repository` stages a complete immutable primary/module generation
+and promotes it atomically under a lock. Alias cutover retains historical RPM and
+hash-named metadata URLs for cached clients. Stream names/defaults stay unchanged;
+module publication versions increase monotonically.
 
-Build and package libraries without compiling PHP:
+## Incremental builds and validation
+
+The glibc entrypoint is `build-rpm-modular-packages.yml`; it produces both formats.
+The DEB workflow delegates to it rather than starting a second compiler pipeline.
+For example, after the branch is available to Actions:
 
 ```sh
-php bin/spp build --type=rpm --libs-only
-php bin/spp package --type=rpm --libs-only
+gh workflow run build-rpm-modular-packages.yml \
+    -f libraries=curl,zlib -f architectures=x86_64 -f publish=false
 ```
 
-Substitute `deb` or `apk` as needed. `--libraries=openssl,zlib` selects library packages;
-omitting it selects the configured library set. Packaging consumes the mandatory
-`buildroot/shared-libraries.json` manifest, which records library ownership, source
-versions, runtime files, SONAMEs, dependencies, and build identity.
+`libraries` selects a library-only incremental request. Source/version changes
+build only those libraries and genuine ABI dependents. OpenSSL expands to its
+required profiles. Compatible library updates do not rebuild PHP. Package-only
+changes reuse sealed PHP payloads; extension-only changes reuse the verified core.
+`bump` defaults to false; explicit iterations take precedence. `publish=false`
+builds and tests without repository or release-cache writes.
 
-PHP and extension builds consume the library buildroot produced by that stage.
-`bin/spp` automatically runs SPC with `--use-existing-libraries` for those builds,
-so missing or incompatible library inputs fail instead of rebuilding libraries.
-Keep the complete buildroot, including headers, linker metadata and ownership
-manifests, when reusing a library set for another PHP stream.
+To bump just the selected library package revisions, add `-f bump=true` to the
+example above. An unchanged compatible SDK is repackaged without recompilation.
+Changed sources or recipes rebuild the selected libraries and required dependents.
 
-Builder images require real DWARF4 information in GCC's `libgcc_s`, `libstdc++`, and
-available optional runtimes such as `libatomic` and `libgomp`, plus `COPYING3` and
-`COPYING.RUNTIME` under `/opt/gcc/share/licenses/gcc`. Source toolchain builds retain
-runtime debugging information while stripping compiler
-binaries. An older stripped toolchain archive triggers a matching-version native
-GCC source build and installs its runtime libraries without replacing the selected
-compiler. This fallback builds compiler support too, so it can take substantially
-longer than using a refreshed toolchain archive. `SPP_GCC_BUILD_JOBS` limits its
-parallelism. `bin/build-gcc-runtime --check` verifies an installed toolchain without
-downloading or rebuilding it. The toolchain workflow verifies these requirements
-before preparing new archives.
+The full matrix covers unique sets: RPM10 + DEB10 + APK10, across five PHP streams
+and two native architectures. PHP-independent library/ABI checks are reused.
+Additional EL9/EL10 and newer-client checks focus on compatibility and unchanged
+legacy URLs instead of repeating the complete extension/profile matrix.
 
-Package workflows accept `mode=full|incremental` and optional `libraries` selections.
-The pinned `spc-download` snapshot carries the build plan. A compatible library-only
-change builds its library packages without selecting every PHP stream; an ABI break
-adds affected consumers to the build. A full run retains the normal complete build.
+`bin/freeze-migration-baseline.py` freezes real published archives and their
+checksums. `tests/migration-upgrade-containers.py` installs those packages through
+a signed disposable HTTP repository, runs ordinary upgrades, verifies actual
+version advancement/dependencies/features/configuration, and checks a second
+no-op upgrade. Its local mirror key is established before the old installation;
+production signing/download verification remains a separate publication gate.
+`--profile all` and independent extension profiles require a complete frozen
+baseline. `--library-only` checks that PHP versions remain unchanged.
 
-The prepared Composer lock pins SPC revision
-`4c7bcbd6da79dfc47ae425128a0c1c74b6ccdb67`. This revision has been committed locally;
-CI cannot fetch it until it is published to the configured SPC remote. That
-publication requires separate authorization and has not been performed. Local
-validation selects the checkout through `SPP_SPC_ROOT` and `SPP_SPC_BINARY`.
+`tests/runtime-service-containers.py` exercises real systemd/OpenRC service state,
+requests and mapped executable/library identities across core and library-only
+upgrades, including stopped/disabled state. Native arm64 validation requires the
+GitHub runners; local x86_64 results do not establish arm64 or minimum-kernel
+compatibility.
 
-Before the first public release, provision a public Forgejo owner named `libs` on
-**both** `git.henderkes.com` and `git.static-php.dev`, and configure the
-`FORGEJO_LIBS_PASSWORD` Actions secret with upload access to that owner on both hosts.
-Existing PHP owner credentials remain in use for their PHP streams. The common
-owner must provide Debian and Alpine signing keys and use the same distribution,
-branch, and repository names as the PHP owners. Do not expose a breaking library set
-until its complete affected consumer set has passed installation and upgrade checks.
+GCC assets must contain genuine DWARF4 type information, licenses and a development
+selector that links shared libstdc++. `bin/build-gcc-runtime --check` verifies them;
+repair builds matching target runtimes only when needed. A validated SDK import
+records actual old compiler/recipe identities and deployment relocation separately,
+so compatible C-only libraries survive a layout or runtime-asset repair.
 
-Owner creation, secret configuration, package uploads, repository publication, and
-replacing the public installer are separate external administration actions requiring
-explicit authorization. The repository setup script does not perform them.
-
-For local repository fixtures, the setup script supports `SPP_FORGEJO_HOST`,
-`SPP_LIBS_OWNER` (default `libs`), and `SPP_RPM_REPO_URL`. `SPP_INSTALL_ROOT` and
-`SPP_INSTALL_TYPE=deb|apk|rpm` redirect configuration to a test root. Run the isolated
-installer checks with `python3 tests/install-repositories.py`.
+The SPC lock currently pins local revision
+`fbff6898d85b56a172aedc47051fab09939c2a97`; remote CI needs that revision available
+from its configured source. No push, package upload, repository promotion or
+public installer replacement is performed by local preparation. Those operations
+require explicit authorization.

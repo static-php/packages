@@ -161,6 +161,25 @@ class RuntimeHarness(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'not mapped'):
                 harness['extension_inventory'](dict(data, loaded_objects=[]), 'CLI')
 
+    def test_intentionally_disabled_shared_module_is_absent_in_every_sapi(self):
+        with TemporaryDirectory(prefix='spp-disabled-inventory-') as directory:
+            root = Path(directory)
+            module = root / 'imagick-zts-86.so'
+            module.touch()
+            ini = root / '30-imagick.ini.disabled'
+            ini.write_text('extension=imagick-zts-86\n; user choice\n')
+            data = {'sapi': 'cli', 'extension_dir': str(root), 'ini_files': [],
+                    'extensions': ['standard'], 'zend_extensions': [], 'loaded_objects': []}
+            result = harness['extension_inventory'](data, 'CLI', disabled=['imagick'])
+            self.assertEqual(result['files'], set())
+            for changed in [dict(data, extensions=['standard', 'imagick']),
+                            dict(data, loaded_objects=[str(module)]),
+                            dict(data, ini_files=[str(ini)])]:
+                with self.assertRaisesRegex(RuntimeError, 'intentionally disabled'):
+                    harness['extension_inventory'](changed, 'CLI', disabled=['imagick'])
+            with self.assertRaisesRegex(RuntimeError, 'no active directive'):
+                harness['extension_inventory'](data, 'CLI')
+
     def test_zend_aliases_and_mysqlnd_plugins_need_real_registered_modules(self):
         with TemporaryDirectory(prefix='spp-extension-inventory-') as scratch:
             root = Path(scratch)
@@ -266,10 +285,11 @@ class RuntimeHarness(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, dynamic if command[0] == 'readelf' else resolved, '')
             with patch.dict(scope, {'payload': lambda kind, names: files, 'run': inspected, 'dependencies': dependencies}):
                 for kind in ('deb', 'rpm', 'apk'):
-                    private = '/usr/lib64/php-zts/lib' if kind == 'rpm' else '/usr/lib/php-zts/lib'
+                    private = '/usr/lib/php-zts/lib'
                     dynamic = '\n'.join('(NEEDED) Shared library: [' + soname + ']' for soname in providers.values())
                     dynamic += '\n(RUNPATH) Library runpath: [' + private + ']\n'
-                    resolved = '\n'.join(soname + ' => ' + private + '/' + soname + ' (0x1)' for soname in providers.values())
+                    resolved_root = '/usr/lib64/php-zts/lib' if kind == 'rpm' else private
+                    resolved = '\n'.join(soname + ' => ' + resolved_root + '/' + soname + ' (0x1)' for soname in providers.values())
                     answer[0] = dependency_text(kind, required)
                     before = len(queries)
                     self.assertEqual(harness['assert_elf'](kind, [owner], manifest),
@@ -745,24 +765,28 @@ class MatrixDriver(unittest.TestCase):
                 self.assertIn('reuse library baseline', result['error'])
                 self.assertFalse(result.get('cleanup_errors'), result)
 
-    def test_reused_baselines_are_preflighted_for_every_selected_target(self):
-        with TemporaryDirectory(prefix='spp-library-preflight-') as scratch:
-            root = Path(scratch)
-            self.reused_baseline(root / 'baselines')
-            for name in ['project/vendor/autoload.php', 'spc/vendor/autoload.php', 'spc/bin/spc']:
-                path = root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('')
-            (root / 'downloads').mkdir()
-            (root / 'downloads/.spc-meta.json').write_text(json.dumps({'php_versions': {'8.2': '8.2.33', '8.4': '8.4.24'}}))
-            arguments = ['build-shared-matrix.py', '--spc', str(root / 'spc'), '--project', str(root / 'project'),
-                         '--downloads', str(root / 'downloads'), '--library-matrix-root', str(root / 'baselines'),
-                         '--os', 'debian,alma9', '--php-versions', '8.2']
-            with patch.object(sys, 'argv', arguments), patch.object(subprocess, 'run', side_effect=AssertionError('Docker invoked before all baseline inputs validated')), patch('sys.stderr', new_callable=io.StringIO) as errors:
-                with self.assertRaises(SystemExit) as error:
-                    matrix['main']()
-            self.assertEqual(error.exception.code, 2)
-            self.assertIn('alma9/buildroot/shared-libraries.json', errors.getvalue())
+    def test_default_runtime_matrix_has_one_rpm_set_and_extra_els_are_smokes(self):
+        calls = []
+        def cell(*arguments, **options):
+            calls.append((arguments, options))
+            return {'ok': True}
+        with patch.dict(scope, {'cell': cell, 'run': lambda *args, **kwargs: subprocess.CompletedProcess([], 0, '', '')}), patch.object(sys, 'argv', ['shared-runtime-containers.py', '--matrix-root', '/unused']), patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(harness['main'](), 0)
+        self.assertEqual(len(calls), 15)
+        self.assertEqual({arguments[0] for arguments, _ in calls}, {'alma8', 'debian', 'alpine'})
+        calls.clear()
+        with patch.dict(scope, {'cell': cell, 'run': lambda *args, **kwargs: subprocess.CompletedProcess([], 0, '', '')}), patch.object(sys, 'argv', ['shared-runtime-containers.py', '--os', 'alma10', '--php', '8.6', '--artifacts', '/unused']), patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(harness['main'](), 0)
+        self.assertEqual(calls[0][0][-2:], (False, False))
+
+    def test_retired_multidistro_builder_cannot_start_another_compile(self):
+        arguments = ['build-shared-matrix.py', '--os', 'debian,alma9', '--php-versions', '8.2']
+        with patch.object(sys, 'argv', arguments), patch.object(subprocess, 'run', side_effect=AssertionError('Retired builder invoked Docker')), patch('sys.stderr', new_callable=io.StringIO) as errors:
+            with self.assertRaises(SystemExit) as error:
+                matrix['main']()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn('legacy multi-distro build matrix is retired', errors.getvalue())
+        self.assertIn('single-EL8 producer', errors.getvalue())
 
     def test_reused_baseline_is_private_and_every_requested_php_cell_runs(self):
         with TemporaryDirectory(prefix='spp-library-reuse-') as scratch:

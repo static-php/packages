@@ -11,15 +11,18 @@ $cache = new ReflectionProperty(CreatePackages::class, 'httpCache');
 foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
     $pages = [];
     foreach (['first' => 2, 'second' => 7] as $host => $revision) {
-        $url = "https://{$host}.invalid/api/v1/packages/common?type={$registryType}&limit=1000&page=";
-        $suffix = $type === 'deb' ? '-' . $revision : '-r' . $revision;
-        $pages[$url . '1'] = [200, json_encode([['name' => 'unrelated', 'version' => '1.0-999']])];
-        $pages[$url . '2'] = [200, json_encode([['name' => 'php-zts-lib-openssl', 'version' => '3.6.0' . $suffix]])];
-        $pages[$url . '3'] = [200, '[]'];
+        foreach (['common', '82', '83', '84', '85', '86'] as $owner) {
+            $url = "https://{$host}.invalid/api/v1/packages/{$owner}?type={$registryType}&limit=1000&page=";
+            $ownerRevision = $host === 'second' && $owner === '85' ? 11 : $revision;
+            $suffix = $type === 'deb' ? '-' . $ownerRevision : '-r' . $ownerRevision;
+            $pages[$url . '1'] = [200, json_encode([['name' => 'unrelated', 'version' => '1.0-999']])];
+            $pages[$url . '2'] = [200, json_encode([['name' => 'php-zts-lib-openssl', 'version' => '3.6.0' . $suffix]])];
+            $pages[$url . '3'] = [200, '[]'];
+        }
     }
     $cache->setValue(null, $pages);
-    if (CreatePackages::getRemoteNextIteration('php-zts-lib-openssl', '3.6.0', 'x86_64', $type) !== 8) {
-        throw new RuntimeException("Missed {$type} library revisions across hosts or used a PHP owner");
+    if (CreatePackages::getRemoteNextIteration('php-zts-lib-openssl', '3.6.0', 'x86_64', $type) !== 12) {
+        throw new RuntimeException("Missed {$type} library revisions across hosts or stream owners");
     }
 }
 echo "Passed shared library revision lookup across both registries without PHP.\n";

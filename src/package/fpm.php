@@ -4,6 +4,7 @@ namespace staticphp\package;
 
 use staticphp\package;
 use staticphp\step\CreatePackages;
+use staticphp\util\RuntimeServices;
 
 class fpm implements package
 {
@@ -46,6 +47,9 @@ class fpm implements package
             $serviceContents
         );
         file_put_contents(TEMP_DIR . '/php-fpm.service', $serviceContents);
+        $openrc = str_replace(['@binary_suffix@', '@confdir@'], [$binarySuffix, getConfdir()], file_get_contents(INI_PATH . '/php-fpm.openrc'));
+        file_put_contents(TEMP_DIR . '/php-fpm.openrc', $openrc);
+        chmod(TEMP_DIR . '/php-fpm.openrc', 0755);
 
         // Process www.conf to replace ALL hardcoded paths
         $wwwContents = file_get_contents(INI_PATH . '/www.conf');
@@ -68,19 +72,28 @@ class fpm implements package
         file_put_contents(TEMP_DIR . '/www.conf', $wwwContents);
 
         $versionedConflicts = CreatePackages::getVersionedConflicts('-fpm');
+        $type = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
+        $files = [
+            TEMP_DIR . '/php-fpm.conf' => getConfdir() . '/php-fpm.conf',
+            TEMP_DIR . '/www.conf' => getConfdir() . '/fpm.d/www.conf',
+            BUILD_BIN_PATH . '/php-fpm' => '/usr/sbin/php-fpm' . $binarySuffix,
+        ];
+        $files += $type === 'apk'
+            ? [TEMP_DIR . '/php-fpm.openrc' => '/etc/init.d/php-fpm' . $binarySuffix]
+            : [TEMP_DIR . '/php-fpm.service' => '/usr/lib/systemd/system/php-fpm' . $binarySuffix . '.service'];
+        $files += RuntimeServices::descriptor('fpm', 'php-fpm' . $binarySuffix, '/usr/sbin/php-fpm' . $binarySuffix, getConfdir() . '/php-fpm.conf');
         return [
             'depends' => [
                 CreatePackages::getPrefix() . '-cli',
+                ...($type === 'rpm' ? ['shadow-utils'] : ($type === 'deb' ? ['passwd'] : [])),
             ],
+            'recommends' => CreatePackages::getSapiRecommendations(),
             'provides' => [],
             'replaces' => $versionedConflicts,
             'conflicts' => $versionedConflicts,
-            'files' => [
-                TEMP_DIR . '/php-fpm.conf' => getConfdir() . '/php-fpm.conf',
-                TEMP_DIR . '/www.conf' => getConfdir() . '/fpm.d/www.conf',
-                TEMP_DIR . '/php-fpm.service' => '/usr/lib/systemd/system/php-fpm' . getBinarySuffix() . '.service',
-                BUILD_BIN_PATH . '/php-fpm' => '/usr/sbin/php-fpm' . getBinarySuffix(),
-            ],
+            'files' => $files,
+            'config-files' => [getConfdir() . '/php-fpm.conf', getConfdir() . '/fpm.d/www.conf'],
+            'apk_scripts' => $type === 'apk' ? RuntimeServices::apkScripts('php-fpm' . $binarySuffix) : [],
             'empty_directories' => [
                 getConfdir() . '/fpm.d/',
                 '/var/log/' . CreatePackages::getPrefix() . '/php-fpm',
@@ -94,7 +107,7 @@ class fpm implements package
 
     public function getFpmExtraArgs(): array
     {
-        return [];
+        return RuntimeServices::serviceArgs(defined('SPP_TYPE') ? SPP_TYPE : 'rpm', 'php-fpm' . getBinarySuffix());
     }
 
     public function getDebuginfoFpmConfig(): array

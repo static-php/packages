@@ -20,7 +20,7 @@ on:
             bump:
                 description: "Bump package revisions above published packages"
                 type: boolean
-                default: true
+                default: false
             php_versions:
                 description: "Optional: PHP streams (comma-separated); ABI transitions include all affected streams"
                 default: ""
@@ -30,6 +30,10 @@ on:
             packages:
                 description: "Optional: PHP package selection"
                 default: ""
+            publish:
+                description: "Publish verified packages (false builds and tests only)"
+                type: boolean
+                default: false
             debug_tmate:
                 description: "Open tmate on failure"
                 type: boolean
@@ -87,11 +91,10 @@ jobs:
                 id: matrix
                 env:
                     ARCHITECTURES: ${{ inputs.architectures }}
-                    ALMA_VERSIONS: ${{ inputs.alma_versions }}
                     PHP_VERSIONS: ${{ inputs.php_versions }}
                 run: |
                     python3 .github/actions/shared-libraries/workflow.py setup --type=apk \
-                        --architectures "$ARCHITECTURES" --alma-versions "$ALMA_VERSIONS" \
+                        --architectures "$ARCHITECTURES" \
                         --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
 
     resolve-builders:
@@ -188,7 +191,7 @@ jobs:
             PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
@@ -219,8 +222,9 @@ jobs:
                     docker pull "$IMAGE"
             -   name: Prepare Composer cache
                 run: mkdir -p ~/.cache/composer
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+            -   name: Restore Composer downloads
+                id: composer-cache
+                uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
                     key: composer-${{ hashFiles('**/composer.lock') }}
@@ -232,30 +236,33 @@ jobs:
                 id: cache-key
                 env:
                     FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
-                run: echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+                    COMPATIBILITY: ${{ steps.fingerprint.outputs.compatibility }}
+                run: |
+                    echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+                    echo "seed-key=buildroot-shared-seed-$TYPE-$TARGET-$COMPATIBILITY" >> "$GITHUB_OUTPUT"
             -   name: Restore buildroot cache
                 id: cache
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: restore
                     key: ${{ steps.cache-key.outputs.key }}
-            -   name: Build shared libraries
-                if: steps.cache.outputs.cache-hit != 'true'
+                    seed-key: ${{ steps.cache-key.outputs.seed-key }}
+            -   name: Extract restored buildroot
+                if: steps.cache.outputs.cache-hit == 'true' || steps.cache.outputs.seed-hit == 'true'
+                run: tar --zstd -xf buildroot.tar.zst
+            -   name: Build changed shared libraries
                 run: bash .github/actions/shared-libraries/run.sh libs
+            -   name: Classify ABI and package shared libraries
+                run: bash .github/actions/shared-libraries/run.sh classify
             -   name: Pack buildroot
-                if: steps.cache.outputs.cache-hit != 'true'
                 run: tar --zstd -cf buildroot.tar.zst buildroot
             -   name: Save buildroot cache
-                if: steps.cache.outputs.cache-hit != 'true'
+                if: inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: save
                     key: ${{ steps.cache-key.outputs.key }}
-            -   name: Extract cached buildroot
-                if: steps.cache.outputs.cache-hit == 'true'
-                run: tar --zstd -xf buildroot.tar.zst
-            -   name: Classify ABI and package shared libraries
-                run: bash .github/actions/shared-libraries/run.sh classify
+                    seed-key: ${{ steps.cache-key.outputs.seed-key }}
             -   name: Record target and buildroot
                 env:
                     CACHE_KEY: ${{ steps.cache-key.outputs.key }}
@@ -269,6 +276,14 @@ jobs:
                     path: |
                         stage/shared-library-plan.json
                         stage/target.json
+                    retention-days: 1
+            -   name: Stage common SDK buildroot
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-sdk-buildroot-apk-${{ matrix.target }}
+                    path: buildroot.tar.zst
+                    compression-level: 0
                     retention-days: 1
             -   name: Stage library packages
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -287,6 +302,12 @@ jobs:
                 if: ${{ failure() && inputs.debug_tmate == true }}
                 uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
                 timeout-minutes: 30
+            -   name: Save Composer downloads
+                if: inputs.publish == true && steps.composer-cache.outputs.cache-hit != 'true'
+                uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
 
     compute-build-matrix:
         needs: [setup-matrix, build-libs]
@@ -330,7 +351,7 @@ jobs:
         if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
-            contents: read
+            contents: write
             packages: read
             actions: read
         defaults:
@@ -348,9 +369,13 @@ jobs:
             LIBRARIES: ${{ inputs.libraries || '' }}
             PHP_VERSIONS: ${{ inputs.php_versions || '' }}
             PACKAGES: ${{ matrix.packages }}
+            COMPILE: ${{ matrix.compile }}
+            COMPILE_PACKAGES: ${{ matrix.compile-packages }}
+            ABI_REBUILD_LIBRARIES: ${{ matrix.abi-rebuild-libraries }}
+            LIBRARY_ONLY: ${{ matrix.library-only || false }}
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
@@ -384,27 +409,75 @@ jobs:
                 with:
                     name: shared-libs-apk-${{ matrix.target }}
                     path: stage
-            -   name: Read buildroot key
-                id: cache-key
-                run: echo "key=$(cat stage/cache-key)" >> "$GITHUB_OUTPUT"
-            -   name: Restore exact buildroot
-                uses: ./.github/actions/buildroot-cache
+            -   name: Download exact common SDK
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-                    fail-on-cache-miss: true
+                    name: shared-sdk-buildroot-apk-${{ matrix.target }}
             -   name: Extract buildroot
                 run: tar --zstd -xf buildroot.tar.zst
             -   name: Prepare Composer cache
                 run: mkdir -p ~/.cache/composer
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+            -   name: Restore Composer downloads
+                id: composer-cache
+                uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
                     key: composer-${{ hashFiles('**/composer.lock') }}
                     restore-keys: composer-
+            -   name: Compute sealed PHP cache identity
+                if: matrix.library-only != true
+                id: payload-cache-key
+                run: |
+                    cp stage/shared-libraries.json buildroot/shared-libraries.json
+                    bash .github/actions/shared-libraries/run.sh payload-key | tee stage/payload-cache-inputs
+                    key=$(sed -n 's/^key=//p' stage/payload-cache-inputs)
+                    seed=$(sed -n 's/^seed-key=//p' stage/payload-cache-inputs)
+                    printf '%s\n' "$key" > stage/payload-cache-key
+                    printf '%s\n' "$seed" > stage/payload-cache-seed-key
+                    cat stage/payload-cache-inputs >> "$GITHUB_OUTPUT"
+                    echo "cache-key=$key-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+            -   name: Restore sealed PHP payload
+                if: matrix.library-only != true
+                id: payload-cache
+                uses: ./.github/actions/buildroot-cache
+                with:
+                    mode: restore
+                    key: ${{ steps.payload-cache-key.outputs.cache-key }}
+                    seed-key: ${{ (!matrix.abi-break || (matrix.compile && !matrix.abi-core-rebuild)) && steps.payload-cache-key.outputs.seed-key || '' }}
+                    path: php-payload-cache.tar.zst
             -   name: Build and test PHP packages
                 run: bash .github/actions/shared-libraries/run.sh php
+            -   name: Save sealed PHP payload cache
+                if: inputs.publish == true && matrix.library-only != true && steps.payload-cache.outputs.cache-current != 'true'
+                uses: ./.github/actions/buildroot-cache
+                with:
+                    mode: save
+                    key: ${{ steps.payload-cache-key.outputs.cache-key }}
+                    seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
+                    path: php-payload-cache.tar.zst
+            -   name: Freeze actual published baseline
+                run: bash .github/actions/shared-libraries/run.sh freeze-baseline
+            -   name: Prepare real library revision for service validation
+                if: matrix.runtime-checks == true
+                run: bash .github/actions/shared-libraries/run.sh prepare-runtime
+            -   name: Verify ordinary APK upgrade
+                env:
+                    RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
+                    TLS_CHECKS: ${{ matrix.tls-checks }}
+                run: |
+                    args=()
+                    if [[ "$RUNTIME_CHECKS" == true ]]; then args+=(--services --library-artifacts stage/runtime-libraries); fi
+                    if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
+                    profile=all
+                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only); profile=cli,fpm,frankenphp;
+                    else
+                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
+                        if [[ "$mode" == shared ]]; then args+=(--partial-consumers); else args+=(--individual-profiles); fi
+                    fi
+                    python3 tests/migration-upgrade-containers.py --type apk --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/apk --baseline-dir stage/published-baseline --report dist/apk/native-upgrade-receipt.json --profile "$profile" "${args[@]}"
+                    native_args=()
+                    if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
+                    python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type apk --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report dist/apk/native-upgrade-receipt.json --plan stage/shared-library-plan.json --packages dist/apk --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output dist/apk/shared-library-upgrade-receipt.json "${native_args[@]}"
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}
                 env:
@@ -421,7 +494,7 @@ jobs:
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
-                    name: shared-consumers-apk-${{ matrix.target }}-php${{ matrix.php-version }}
+                    name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-apk-${{ matrix.target }}-php${{ matrix.php-version }}
                     path: dist/apk
                     retention-days: 1
             -   name: Upload logs on failure
@@ -434,11 +507,17 @@ jobs:
                 if: ${{ failure() && inputs.debug_tmate == true }}
                 uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
                 timeout-minutes: 30
+            -   name: Save Composer downloads
+                if: inputs.publish == true && steps.composer-cache.outputs.cache-hit != 'true'
+                uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('**/composer.lock') }}
 
     publish:
         name: Publish (${{ matrix.target }})
-        needs: [compute-build-matrix, build]
-        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        needs: [setup-matrix, compute-build-matrix, build]
+        if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: read
@@ -461,7 +540,7 @@ jobs:
             PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+            BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
@@ -482,6 +561,8 @@ jobs:
                 with:
                     pattern: shared-*-apk-${{ matrix.target }}*
                     path: cohort
+            -   name: Verify native ordinary upgrade receipts
+                run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
             -   name: Verify complete cohort and all downgrade guards
                 run: bash .github/actions/shared-libraries/run.sh publish
             -   name: Publish consumers then libraries on host 1

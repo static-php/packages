@@ -70,38 +70,13 @@ class TwigRenderer
         // Use Twig to render the craft.yml template
         $loader = new FilesystemLoader(BASE_PATH . '/config/templates');
         $twig = new Environment($loader);
-        $majorOsVersion = trim((string) shell_exec('rpm -E %rhel 2>/dev/null')) ?: null;
-
-        if ($majorOsVersion === null || $majorOsVersion === '') {
-            // Try Ubuntu / Debian detection
-            $lsb = trim((string) shell_exec('. /etc/os-release && echo $VERSION')) ?: null;
-            if ($lsb !== null && $lsb !== '') {
-                // Use full version string, e.g. "22.04"
-                $majorOsVersion = $lsb;
-            }
-        }
-
-        if ($majorOsVersion === null || $majorOsVersion === '') {
-            $sppTarget = (string) SPP_TARGET; // null when no --target (gcc toolchain path)
-            if (str_contains($sppTarget, '.2.17')) {
-                $majorOsVersion = '7';
-            } elseif (str_contains($sppTarget, '.2.28')) {
-                $majorOsVersion = '8';
-            } elseif (str_contains($sppTarget, '.2.34')) {
-                $majorOsVersion = '9';
-            } elseif (str_contains($sppTarget, '.2.39')) {
-                $majorOsVersion = '10';
-            } else {
-                $majorOsVersion = '99'; // other OS = pretend we're on el10
-            }
-        }
 
         // Prepare template variables
         // Get the binary suffix (e.g., "-zts", "-nts", "-zts8.5")
         $binarySuffix = defined('SPP_PREFIX') ? SPP_PREFIX : '-zts';
         $prefix = "php$binarySuffix";
         $packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
-        $libdir = $packageType === 'rpm' ? '/usr/lib64' : '/usr/lib';
+        $majorOsVersion = $packageType === 'apk' ? '99' : '8';
 
 
         $sharedLibrarySuffix = getSharedLibrarySuffix();
@@ -117,9 +92,9 @@ class TwigRenderer
             'prefix' => $prefix,
             'release_suffix' => str_replace_first('-', '', $sharedLibrarySuffix),
             'confdir' => '/etc/' . $prefix,
-            'type' => $packageType,
-            'moduledir' => $libdir . '/' . $prefix . '/modules',
-            'shared_libdir' => $libdir . '/php-zts/lib',
+            'type' => $packageType === 'apk' ? 'apk' : 'rpm',
+            'moduledir' => '/usr/lib/' . $prefix . '/modules',
+            'shared_libdir' => '/usr/lib/php-zts/lib',
             'filter_libraries' => $libraries,
             // Optional filter: when provided, craft.yml will include only selected packages
             // across extensions/shared-extensions/sapi, while always including cli SAPI.

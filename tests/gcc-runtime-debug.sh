@@ -14,6 +14,8 @@ case $1 in
     -dumpfullversion) printf '16.2.0\n' ;;
     -print-file-name=libgcc_s.so.1|-print-file-name=libstdc++.so.6)
         printf '%s\n' "$GCC_RUNTIME_FIXTURE" ;;
+    -print-file-name=libstdc++.so)
+        printf '%s\n' "${GCC_RUNTIME_SELECTOR_FIXTURE:-$GCC_RUNTIME_FIXTURE}" ;;
     -print-file-name=libatomic.so.1)
         printf '%s\n' "${GCC_RUNTIME_OPTIONAL_FIXTURE:-libatomic.so.1}" ;;
     -print-file-name=*) printf '%s\n' "${1#-print-file-name=}" ;;
@@ -46,6 +48,23 @@ if check "$temporary/dwarf4.so" "$temporary/dwarf5.so" > "$temporary/check.log" 
     printf 'Incorrectly accepted DWARF5 optional runtime\n' >&2
     exit 1
 fi
+mkdir -p "$temporary/prefix/lib64"
+cp "$temporary/dwarf4.so" "$temporary/prefix/lib64/libstdc++.so.6"
+printf 'INPUT(libstdc++.a)\n' > "$temporary/prefix/lib64/libstdc++.so"
+if GCC_RUNTIME_SELECTOR_FIXTURE="$temporary/prefix/lib64/libstdc++.so" \
+    check "$temporary/prefix/lib64/libstdc++.so.6" > "$temporary/check.log" 2>&1; then
+    printf 'Incorrectly accepted static C++ development selector\n' >&2
+    exit 1
+fi
+grep -q 'development selector must resolve to shared' "$temporary/check.log"
+grep -qx 'INPUT(libstdc++.a)' "$temporary/prefix/lib64/libstdc++.so"
+before=$(sha256sum "$temporary/prefix/lib64/libstdc++.so.6")
+SPP_GCC_PREFIX="$temporary/prefix" \
+    GCC_RUNTIME_FIXTURE="$temporary/prefix/lib64/libstdc++.so.6" \
+    GCC_RUNTIME_SELECTOR_FIXTURE="$temporary/prefix/lib64/libstdc++.so" \
+    bash "$repository/bin/build-gcc-runtime"
+[[ $(readlink "$temporary/prefix/lib64/libstdc++.so") == libstdc++.so.6 ]]
+[[ $(sha256sum "$temporary/prefix/lib64/libstdc++.so.6") == "$before" ]]
 if [[ -f /etc/alpine-release ]]; then
     readelf --debug-dump=info "$temporary/dwarf4.so" | awk '
         /^[[:space:]]*Version:/ { versions[$2]++ }
@@ -53,4 +72,4 @@ if [[ -f /etc/alpine-release ]]; then
     '
     printf 'Mixed musl startup assembly DWARF5 and runtime C DWARF4 accepted.\n'
 fi
-printf 'GCC runtime DWARF validation passed.\n'
+printf 'GCC shared selector and runtime DWARF validation passed.\n'
