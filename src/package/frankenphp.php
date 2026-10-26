@@ -142,8 +142,12 @@ class frankenphp implements package
             '--description', "FrankenPHP - The Modern PHP Webserver",
             '--license', $this->getLicense(),
             '--config-files', '/etc/frankenphp/Caddyfile',
-            '--provides', 'frankenphp',
         ];
+
+        if ($name !== 'frankenphp') {
+            $fpmArgs[] = '--provides';
+            $fpmArgs[] = 'frankenphp = ' . $rpmVersion . '-' . $rpmRelease;
+        }
 
         foreach ($versionedConflicts as $conflict) {
             $fpmArgs[] = '--conflicts';
