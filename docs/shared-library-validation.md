@@ -1,7 +1,26 @@
 # Shared library validation
 
-This records the earlier, separate-platform builds. The single-EL8 migration uses
-the producer and upgrade checks described in [shared libraries](shared-libraries.md).
+The single-EL8 migration passed native x86_64 validation on 2026-10-26 for PHP
+8.2.35 and 8.6.0RC4. The [current validation report](shared-library-migration-validation.json)
+binds all six RPM/DEB/APK cohorts, 475 ordinary-upgrade profiles and the focused
+EL9/EL10 CLI checks to their exact package inventories and result receipts.
+
+The checks use genuine published static packages through signed disposable local
+repositories. They cover automatic library installation, cURL/fileinfo defaults
+and opt-outs, individual extensions, disabled configuration, installed development
+tools, TLS trust, real systemd/OpenRC state, compatible library-only updates and
+unchanged-upgrade behavior. Shared library/profile lifecycle checks run once per
+format and are reused only with verified operational identity. Targeted corrections
+and retries are recorded explicitly instead of claiming repeated full-suite runs.
+
+RPM and DEB retain identical consumer ELF/debug bytes: 174 files for PHP 8.2 and
+158 for PHP 8.6. A combined 473-archive RPM assembly passed with one canonical
+library/layout set. PHP 8.6 records seven unsupported extensions; PHP 8.2 skips none.
+ARM validation remains deferred by the user. No pushes or public repository/package
+updates were performed. Build and upgrade usage is described in
+[shared libraries](shared-libraries.md).
+
+The separate-platform matrix below records the earlier 2026-10-23 validation.
 
 The native x86_64 matrix **passed on 2026-10-23**: 25/25 verified cells across Alpine 3.21, Debian 11 and AlmaLinux 8/9/10, PHP 8.2–8.6. Arm64 execution is deferred.
 

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "state": "resumed_local_validation_in_progress",
+  "state": "x86_64_migration_validated_local_only",
   "merge_ready": false,
   "objective": "Finish the EL8 shared-library migration locally: one glibc build per architecture, identical common RPM/DEB ELFs, native musl SDK, automatic existing-client upgrades, and validation before any separately authorized publication.",
   "repository": "/home/m/packages",
@@ -22,7 +22,7 @@
       "8.5",
       "8.6"
     ],
-    "aarch64": "QEMU/Docker validation required locally before any push; label emulated, do not claim native.",
+    "aarch64": "DEFERRED per user; do not resume ARM work without a new instruction.",
     "heavy_build_concurrency": 1,
     "memory": "Windows needs RAM. Keep one build only, bounded low-memory package/metadata jobs, reclaim completed build cache when useful. Do not delete working data.",
     "bump_default": false,
@@ -49,22 +49,16 @@
     "alpine_sdk": "67 ordinary libraries plus GCC runtime, finalized and archived; PHP builds reuse all providers.",
     "destination_specific_builds": "OpenSSL only: Debian /etc/ssl and RPM /etc/pki/tls. Other glibc libraries share the EL8 binaries. Alpine is a separate musl build.",
     "library_packages": "137 each for x86_64 RPM, DEB and APK. RPM/DEB common ELF/debug identity verified; only OpenSSL profile files differ.",
-    "gnu_php86": "RPM and DEB consumer candidates ready:297 archives per format including reused libraries;158 consumer ELF/debug files identical across formats. Only approved OpenSSL library profiles differ.",
-    "alpine_php82": "314 immutable APK candidates ready,137 library archives reused;82 shared module DSOs verified. Swoole repaired by relinking retained objects; new thin cache verified with original compilation provenance.",
-    "glibc_php82": "Core/all original modules sealed, but needs selected17-consumer refresh to current source versions and FrankenPHP1.13.3. No core or library rebuild is needed.",
+    "gnu_php86": "Final297-archive RPM and DEB cohorts validated:75ordinary profiles per format, installed SAPI/development tools, defaults/opt-outs, and explicit verified reuse of unique-format TLS/service/library-only proofs.158common consumer ELF/debug files remain identical.",
+    "alpine_php82": "Final314-archive APK cohort passed84ordinaryprofiles,TLS,OpenRClifecycle,library-only updatesandblacklistoptout. Existinglibraries reused.",
+    "glibc_php82": "Final313-archive RPM and DEB cohorts validated:83ordinary profiles per format, realservice/core/library-only updates, defaults/opt-outs andTLS.174commonconsumerELF/debug files remain identical;originalcore andSDK reused.",
     "metadata_and_tools": "Producer/payload/source/ABI caches, frozen sources, exact typed ABI cache, revision floors, canonical RPM repo aliases, service and disabled-INI preservation are implemented with focused tests.",
-    "alpine_php86": "CLI, CGI, FPM and embed/libphp completed. Six shared modules completed; interrupted ClickHouse make/source/objects preserved. Resume via saved core checkpoint, do not rebuild libraries or discard completed core targets.",
-    "apk_aliases": "Physical amqp/igbinary aliases, archive-bound publication/freezer/cohort handling and source rollback guards implemented. Genuine historical native fixtures pass. Actual full shared-package upgrades remain pending.",
-    "qemu_harness": "Explicit local --allow-emulation mode implemented;native CI guard retained,engine/guest/image/binfmt identities bound. Actual ARM builds remain pending."
+    "alpine_php86": "Final298-archive APK cohort passed75ordinaryprofilesandblacklistoptout;137library/layoutarchives identical to82supportits unique-format lifecycle/TLS reuse.74modules andknown7skips.",
+    "apk_aliases": "Native current-cohort static-to-shared migrations for82/86 passed withphysicalaliases,logicalreplacement metadata,disabledconfiguration andfresh/absent/world controls.",
+    "qemu_harness": "Explicit local --allow-emulation mode implemented;native CI guard retained,engine/guest/image/binfmt identities bound. Actual ARM builds remain pending.",
+    "rpm_repository": "Actualproductionassembler verifiedone473-archive set acrossPHP82/86 usingonecanonical137-package library/layout set. Collisionguard retained;originalarchives unchanged."
   },
-  "not_complete": [
-    "Finish budget reductions and remeasure before starting one heavy build;reserve room for its transient output and bounded test containers.",
-    "Compile only17 selected GNU8.2 consumers from the preserved core and SDK;prepared script and Swoole hook are ready.",
-    "Resume Alpine8.6 completed-core checkpoint,remaining modules and FrankenPHP without discarding objects or rebuilding libraries.",
-    "Run real ordinary static-to-shared upgrades for8.2/8.6 RPM,DEB,APK;TLS/services once per unique format/architecture and focusedEL9/EL10 compatibility.",
-    "Prepare repaired ARM64 toolchain and build/test EL8+Alpine SDK/PHP8.2+8.6 under explicit QEMU mode,one heavy build at a time.",
-    "Final verification and local completion commit;no push or public repository/package update authorized."
-  ],
+  "not_complete": [],
   "apk_transition": {
     "physical_names": [
       "php-zts-amqp-shared",
@@ -77,8 +71,8 @@
     "mechanism": "Versionless logical Provides, Replaces old real name, valid negative dependency !oldlogical>0 on aliases and CLI, provider_priority100. No install_if, policy-cap helper, sentinel, invented upstream version or index deletion.",
     "central_config": "config/apk-runtime-aliases.json",
     "proof": "dist/migration-implementation-2026-10-25/validation/historical-apk-direct-core-conflict.json",
-    "proof_scope": "All9 genuine historical installed/fresh/absent/world/add/delete/future/no-op controls passed using unchanged payloads. This is metadata mechanics, not a completed real shared-cohort migration.",
-    "pending": "Implementation and metadata/native fixtures complete. Real shared APK package upgrade, disabled-module, TLS and service checks remain pending."
+    "proof_scope": "Metadata fixtures and actual314-archive PHP8.2 shared cohort migration verified;84ordinary profiles plus TLS,services,zlib-only upgrade andweak optout. See validation/native-apk-8.2-complete.json.",
+    "pending": "PHP8.2 complete. PHP8.6 APK remains to finish compilation,packaging and native upgrade validation."
   },
   "source_notes": {
     "fresh_cohort": "dist/migration-implementation-2026-10-25/frozen-consumer-refresh/source-records.json",
@@ -97,15 +91,10 @@
     ]
   },
   "resume_order": [
-    "Read this file and every component checkpoint; check git status and the local checkpoint commit.",
-    "Restore only task-owned legacy /tmp aliases with resume/restore-paths.py if needed for recorded local source URLs. Do not rewrite compiled provenance.",
-    "Before any packaging/selected build, sync the frozen current repository helper code into its isolated project and regenerate Composer autoload files locally. Keep recorded source/configuration/core provenance unchanged.",
-    "Check Docker images and actual containers. Do not resume8.3/8.4/8.5 builds. Never run two heavy builds simultaneously.",
-    "Resume the remaining8.6 Alpine target and selected8.2 glibc refresh according to saved commands; package completed8.6 GNU payload with already-built libraries.",
-    "Complete APK aliases/cutoff/freezer before claiming installation success, then run real package upgrades, TLS and service tests.",
-    "Run required aarch64 QEMU builds/tests for8.2+8.6, report emulation honestly. No push without a new explicit instruction."
+    "Read the current validation report and latest candidate paths; all requested x86_64 builds/tests are finished.",
+    "Reuse sealed payloads, compiled SDKs and verified archives; do not restart completed builds. Restore duplicate working copies only through recorded restore maps if needed.",
+    "ARM stays deferred until explicitly requested. No remote publication without a new explicit instruction."
   ],
-  "unknown_untracked_file": "hs_err_pid57892.log is preserved and excluded from checkpoint commit; ownership/task relevance not established.",
   "running_task_builds": [],
   "manual_path_restore_command": "python3 dist/migration-implementation-2026-10-25/resume/restore-paths.py --apply",
   "checkpoint_checks": {
@@ -129,22 +118,77 @@
     "dist/migration-implementation-2026-10-25/resume/alias-review.json": "3c79cc0c5839d75b6b47b175f118e9cd48e42e090aa8a98e35272f461e493b3e"
   },
   "resume_progress": {
-    "updated_at": "2026-10-25T21:02:36.140058+00:00",
-    "disk_last_actual_bytes": 133913423872,
-    "disk_last_actual_at": "2026-10-25T20:57:40Z",
-    "disk_last_actual_note": "Before subsequent SDK/buildroot/worker retirements; remeasure once they finish.",
+    "updated_at": "2026-10-26T10:16:45.496450+00:00",
+    "disk_last_actual_bytes": 104977076224,
+    "disk_last_actual_at": "2026-10-26T10:16:45.496450+00:00",
+    "disk_last_actual_note": "Finalsingleboundedmeasurement afterdisposablecleanup;104.977GB retainedartifacts,10GBconservativeDockerallowance.",
     "disk_receipt": "dist/migration-implementation-2026-10-25/resume/disk-actual-after-tranches.json",
     "archive_receipts": "dist/migration-implementation-2026-10-25/resume/retained-out-of-scope/",
     "candidate_ready": [
-      "packages/rpm/x86_64/8.6/ready.json",
-      "packages/deb/x86_64/8.6/ready.json",
-      "packages/apk/x86_64/8.2/ready.json"
+      "packages/franken-provides-r1/rpm/x86_64/8.2/ready.json",
+      "packages/franken-provides-r1/rpm/x86_64/8.6/ready.json",
+      "packages/deb-services-r1/deb/x86_64/8.2/ready.json",
+      "packages/deb-services-r1/deb/x86_64/8.6/ready.json",
+      "packages/apk/x86_64/8.2/ready.json",
+      "packages/apk/x86_64/8.6/ready.json"
     ],
     "native_commands": "dist/migration-implementation-2026-10-25/validation/native-run-plan.json",
-    "gnu82_next": "python3 dist/migration-implementation-2026-10-25/resume/gnu82-refresh.py build",
+    "gnu82_next": "COMPLETE: no further build orpackage work required.",
     "alpine86_recovery": "dist/migration-implementation-2026-10-25/resume/alpine/resume86.py",
     "arm64_preparation": "dist/migration-implementation-2026-10-25/resume/arm64/el8-commands.json",
     "no_public_changes": true,
-    "active_heavy_compiler": null
+    "active_heavy_compiler": null,
+    "native_focused_alma10": "PASS: originalactualCLIupgrade,26installedarchiveSHAidentitiesboundtofinalcohort in validation/alma10-final-cohort-carryover.json",
+    "arm_preparation": "Deferred per user;retained ARM image/container remain stopped.",
+    "alpine86_preparation": "COMPLETE: sealedproducerandnativeAPK86validation. No activecompilers.",
+    "native_deb86": "COMPLETE: validation/native-deb-8.6-services-successor-complete.json",
+    "native_apk82": "COMPLETE: validation/native-apk-8.2-complete.json",
+    "gnu86_devel_successor": "Both corrected 297-archive cohorts ready;296 archives reused unchanged per format,only devel updated (RPMrevision5,DEBrevision7). All1294producerELF/debug files unchanged;158crossformat identities preserved. Original cohorts retained.",
+    "memory_reclaim": "Completed-build cache released;activeRAM2.9GiB,cache1.9GiB,free26GiB. No processesstopped orfilesremoved.",
+    "remaining_packaging_reserve_bytes": 0,
+    "native_parallel_groups": 0,
+    "native_disk_reservation_bytes": 0,
+    "native_rpm82": "COMPLETE: validation/native-rpm-8.2-complete.json",
+    "native_deb82": "COMPLETE: validation/native-deb-8.2-complete.json",
+    "native_apk86": "COMPLETE: validation/native-apk-8.6-complete.json",
+    "native_rpm86": "COMPLETE: validation/native-rpm-8.6-complete.json",
+    "native_focused_alma9": "PASS: validation/native-rpm-8.6-alma9-focused.json"
+  },
+  "local_code_checkpoint": "09f2d94",
+  "live_archive_policy": "Compression and duplicate retirement are active; original task trees are removed only after full byte/metadata archive comparison or canonical duplicate proofs. See latest archive receipts.",
+  "restart_notes": [
+    "All requested x86_64 work is finished;475upgradeprofiles andEL9/EL10CLIcompatibilitychecks passed.",
+    "Everydisposabletasktest/container/network/key/mirror/snapshot wascleaned;existingusercontainersanddeferredstoppedARMpreparation preserved.",
+    "Latest packagepathsareinresume_progress.candidate_ready andresume/glibc-packaging.json. Historicalcomponentpendinglistsaresupersededbythefinalvalidationreport.",
+    "RAMcachewasreleasedforWindows. No hostinit/startupscripts orremoterepositories werechanged."
+  ],
+  "pipeline_audit": {
+    "state": "no concrete production defect found",
+    "checks_passed": 93,
+    "scope": [
+      "workflow entrypoints/matrix/cache/fanout",
+      "EL8 common glibc producer and canonical RPM aliases",
+      "manual bump false/scheduled bump true",
+      "incremental library-only and unchanged-output reuse"
+    ],
+    "remaining_limits": [
+      "actual full native upgrades in progress",
+      "remaining consumer builds",
+      "SPC lock revision only local"
+    ]
+  },
+  "authorized_x86_64_scope_complete": true,
+  "ready_for_local_review": true,
+  "validation_report": "docs/shared-library-migration-validation.json",
+  "validation_profiles": 475,
+  "running_task_tests": [],
+  "merge_readiness_limits": [
+    "ARM validation remains explicitly deferred by the user.",
+    "Hosted CI must be able to fetch the pinned SPC commit; this task performed no source publication."
+  ],
+  "deferred_work": {
+    "aarch64": "Do not start unless the user explicitly resumes ARM work. Existing stopped ARM preparation is preserved.",
+    "public_actions": "No pushes or remote repository/package updates authorized. The user will merge when ready.",
+    "spc_source": "Pinned fbff6898d85b56a172aedc47051fab09939c2a97 must be available from configured Composer source before hosted CI."
   }
 }
