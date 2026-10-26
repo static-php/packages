@@ -66,13 +66,15 @@ private=os.path.realpath('/usr/lib/php-zts/lib')
 if any(not os.path.realpath(p).startswith(private+'/') for p in [modules,engines]): raise RuntimeError('Compiled OpenSSL plugin path escapes private library directory')
 if any(not os.path.realpath(p).startswith(private+'/') for p in mapped): raise RuntimeError('Loaded an external provider: '+str(mapped))
 print(json.dumps({'library':path,'config_dir':config,'config_file':str(configuration),'config_exists':configuration.is_file(),
-'config_sha256':subprocess.check_output(['sha256sum',str(configuration)],text=True).split()[0] if configuration.is_file() else None,
+'config_sha256':subprocess.check_output(['sha256sum',str(configuration)],universal_newlines=True).split()[0] if configuration.is_file() else None,
 'engines_dir':engines,'resolved_engines_dir':os.path.realpath(engines),'modules_dir':modules,'resolved_modules_dir':os.path.realpath(modules),'default_provider_loaded':True,'mapped_provider_modules':mapped}))
 crypto.OSSL_PROVIDER_unload(provider)
 '''
 
 SERVER = r'''
-import http.server,pathlib,ssl,threading
+import http.server,pathlib,socketserver,ssl,threading
+class ThreadingHTTPServer(socketserver.ThreadingMixIn,http.server.HTTPServer):
+    daemon_threads=True
 class TLS(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         body=b'SPP_NATIVE_TLS_TRUST_OK'
@@ -80,10 +82,11 @@ class TLS(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
 class Repository(http.server.SimpleHTTPRequestHandler):
     def translate_path(self,path):
-        return super().translate_path(path[5:] if path.startswith('/repo/') else '/__missing__')
-repository=http.server.ThreadingHTTPServer(('0.0.0.0',8080),lambda *a,**k:Repository(*a,directory='/repo',**k))
+        translated=super().translate_path(path[5:] if path.startswith('/repo/') else '/__missing__')
+        return str(pathlib.Path('/repo')/pathlib.Path(translated).relative_to(pathlib.Path.cwd()))
+repository=ThreadingHTTPServer(('0.0.0.0',8080),Repository)
 threading.Thread(target=repository.serve_forever,daemon=True).start()
-tls=http.server.ThreadingHTTPServer(('0.0.0.0',8443),TLS)
+tls=ThreadingHTTPServer(('0.0.0.0',8443),TLS)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain('/tls/server.crt','/tls/server.key')
 tls.socket=context.wrap_socket(tls.socket,server_side=True)
 pathlib.Path('/tls/ready').touch()
@@ -133,7 +136,7 @@ class Harness(services.Harness):
         issuer(tls)
         (tls / 'server.py').write_text(SERVER)
         self.docker('cp', str(tls), container + ':/tls')
-        self.docker('exec', '-d', container, 'python3', '/tls/server.py')
+        self.docker('exec', '-d', container, 'sh', '-c', 'exec python3 /tls/server.py > /tls/server.log 2>&1')
         self.wait(container, 'test', '-e', '/tls/ready')
         self.configure_repository(container)
         self.remove_cas(container)
@@ -316,6 +319,8 @@ def main():
             try:
                 result = harness.execute(container, 'cat', '/tls/franken.log', check=False, timeout=10)
                 harness.report['diagnostics'][container] = result.stdout[-5000:] + result.stderr[-1000:]
+                server = harness.execute(container, 'cat', '/tls/server.log', check=False, timeout=10)
+                harness.report['diagnostics'][container] += '\n' + server.stdout[-5000:] + server.stderr[-1000:]
             except BaseException as diagnostic:
                 harness.report['diagnostics'][container] = str(diagnostic)
     finally:

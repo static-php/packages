@@ -21,7 +21,9 @@ BOOTSTRAP = {
     'apk': "apk add --no-cache openrc python3 curl ca-certificates; sed -i '/getty/d' /etc/inittab; printf '\\nrc_sys=\"docker\"\\nrc_logger=\"NO\"\\n' >> /etc/rc.conf",
 }
 SERVER = r'''
-import http.server,os,pathlib,urllib.parse
+import http.server,os,pathlib,socketserver,urllib.parse
+class ThreadingHTTPServer(socketserver.ThreadingMixIn,http.server.HTTPServer):
+    daemon_threads=True
 class Repository(http.server.SimpleHTTPRequestHandler):
     def translate_path(self,path):
         relative=urllib.parse.unquote(urllib.parse.urlsplit(path).path).lstrip('/')
@@ -33,7 +35,7 @@ class Repository(http.server.SimpleHTTPRequestHandler):
             target=pathlib.Path('/sources')/profile/relative
             if target.exists(): return str(target)
         return '/missing'
-http.server.ThreadingHTTPServer(('0.0.0.0',8080),Repository).serve_forever()
+ThreadingHTTPServer(('0.0.0.0',8080),Repository).serve_forever()
 '''
 FCGI = r'''<?php
 function record($type,$body) { return pack('CCnnCC',1,$type,1,strlen($body),0,0).$body; }
