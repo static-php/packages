@@ -9,8 +9,8 @@ from pathlib import Path
 import signal
 import ssl
 import subprocess
+import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -81,8 +81,8 @@ class TLS(http.server.BaseHTTPRequestHandler):
 class Repository(http.server.SimpleHTTPRequestHandler):
     def translate_path(self,path):
         return super().translate_path(path[5:] if path.startswith('/repo/') else '/__missing__')
-http=http.server.ThreadingHTTPServer(('0.0.0.0',8080),lambda *a,**k:Repository(*a,directory='/repo',**k))
-threading.Thread(target=http.serve_forever,daemon=True).start()
+repository=http.server.ThreadingHTTPServer(('0.0.0.0',8080),lambda *a,**k:Repository(*a,directory='/repo',**k))
+threading.Thread(target=repository.serve_forever,daemon=True).start()
 tls=http.server.ThreadingHTTPServer(('0.0.0.0',8443),TLS)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain('/tls/server.crt','/tls/server.key')
 tls.socket=context.wrap_socket(tls.socket,server_side=True)
@@ -240,25 +240,22 @@ def self_test():
     with tempfile.TemporaryDirectory(prefix='spp-tls-fixture-') as temporary:
         directory = Path(temporary)
         issuer(directory)
-        import http.server
-
-        class Server(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(BODY.encode())
-
-            def log_message(self, *args):
-                pass
-
-        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Server)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(directory / 'server.crt', directory / 'server.key')
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        server = SERVER.replace("('0.0.0.0',8080)", "('127.0.0.1',0)")
+        server = server.replace("('0.0.0.0',8443)", "('127.0.0.1',0)")
+        server = server.replace("pathlib.Path('/tls/ready').touch()", "pathlib.Path('/tls/ready').write_text(str(tls.server_port))")
+        server = server.replace("'/tls/", repr(str(directory) + '/')[:-1])
+        process = subprocess.Popen([sys.executable, '-c', server], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            url = 'https://localhost:' + str(server.server_port) + '/'
+            ready = directory / 'ready'
+            for _ in range(60):
+                if ready.is_file():
+                    break
+                if process.poll() is not None:
+                    raise RuntimeError('Container TLS fixture exited: ' + ''.join(process.communicate()))
+                time.sleep(.1)
+            if not ready.is_file():
+                raise RuntimeError('Container TLS fixture did not start')
+            url = 'https://localhost:' + ready.read_text() + '/'
             try:
                 urllib.request.urlopen(url, timeout=5)
                 raise RuntimeError('Fixture issuer was unexpectedly trusted')
@@ -274,9 +271,12 @@ def self_test():
             compile(OPENSSL_PROBE, '<openssl-probe>', 'exec')
             compile(SERVER, '<server>', 'exec')
         finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
     print('Passed ephemeral issuer/server, untrusted rejection, trusted success, and probe syntax. Native package trust is a separate run.')
 
 

@@ -186,10 +186,11 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     setattr(other, name, value)
                     with self.assertRaises(harness['PreparedInputError']):
                         mirror.assert_bound(other)
-                mirror.resources.bounds['client']['memory_mib'] = 1024
+                memory = mirror.resources.bounds['client']['memory_mib']
+                mirror.resources.bounds['client']['memory_mib'] = memory + 128
                 with self.assertRaisesRegex(harness['PreparedInputError'], 'resource bounds changed'):
                     mirror.assert_bound(args)
-                mirror.resources.bounds['client']['memory_mib'] = 768
+                mirror.resources.bounds['client']['memory_mib'] = memory
                 extra = candidates / 'new.rpm'
                 extra.write_bytes(b'new archive')
                 with self.assertRaisesRegex(harness['PreparedInputError'], 'archive set changed'):

@@ -935,11 +935,19 @@ class PreparedMirror:
         self.scratch = Path(tempfile.mkdtemp(prefix='spp-migration-upgrade-'))
         self.scratch.chmod(0o755)
         self.resources = Docker(self.scratch, args.arch, allow_emulation=self.args.allow_emulation)
+        self.resources.bounds = {role: ARCHITECTURE['resource_limits'](role, args.runtime) for role in ('repo', 'client')}
         self.ready = False
         self.closed = False
         self.report = {'native_tool_bootstraps': 0, 'sign_index_runs': 0,
                        'clean_runtime_bootstraps': 0, 'clean_runtime_commits': 0, 'profiles_started': 0,
                        'runtime_evidence': self.resources.runtime_evidence}
+
+    def bootstrap_memory_peak(self, name, role):
+        if self.args.runtime != 'alma8':
+            return
+        checked = self.resources.exec(name, ['cat', '/sys/fs/cgroup/memory.peak'], check=False)
+        if checked.stdout.strip().isdigit():
+            self.report.setdefault('bootstrap_memory_peak_bytes', {})[role] = int(checked.stdout.strip())
 
     def command(self, args):
         value = ['python3', '/spp/migration-upgrade-containers.py', '--type', args.type,
@@ -1041,6 +1049,7 @@ class PreparedMirror:
         kind, image = RUNTIMES[args.runtime]
         helper = resources.start(image, 'repo')
         prepare(resources, helper, kind, helper=True)
+        self.bootstrap_memory_peak(helper, 'repository')
         common = ['python3', '/spp/migration-upgrade-containers.py', '--type', kind, '--php', args.php,
                   '--arch', args.arch, '--runtime', args.runtime]
         if args.library_only:
@@ -1082,6 +1091,7 @@ class PreparedMirror:
         self.report['sign_index_runs'] = 1
         base = resources.start(self.stock_image, 'clean-base')
         prepare(resources, base, kind)
+        self.bootstrap_memory_peak(base, 'clean_client')
         self.report['clean_runtime_bootstraps'] = 1
         self.client_image = resources.token + ':clean-client'
         resources.images.append(self.client_image)

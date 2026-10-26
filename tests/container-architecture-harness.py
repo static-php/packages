@@ -82,6 +82,11 @@ class ContainerArchitecture(unittest.TestCase):
             self.assertEqual(limits, {'memory_mib': memory, 'swap_mib': memory, 'cpus': 1})
             self.assertEqual(scope['resource_options'](limits),
                              ['--memory', str(memory) + 'm', '--memory-swap', str(memory) + 'm', '--cpus', '1'])
+        for runtime in ('alma8', 'almalinux:8'):
+            for role in ('repo', 'client'):
+                self.assertEqual(scope['resource_limits'](role, runtime),
+                                 {'memory_mib': 1024, 'swap_mib': 1024, 'cpus': 1})
+        self.assertEqual(scope['resource_limits']('repo', 'alma10')['memory_mib'], 384)
         identity = {'native': True, 'emulated': False, 'target_architecture': 'arm64'}
         limits = scope['resource_limits']('client')
         receipt = scope['container_identity'](self.runtime(), 'container', identity, limits)

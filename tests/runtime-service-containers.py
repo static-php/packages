@@ -81,7 +81,7 @@ class Harness:
         self.execution = identity
         self.report.update(execution=identity, native=identity['native'], emulated=identity['emulated'],
                            runtime_evidence=self.runtime_evidence)
-        limits = ARCHITECTURE['resource_limits'](resource_role)
+        limits = ARCHITECTURE['resource_limits'](resource_role, self.args.image)
         result = self.command(['docker', 'run', *ARCHITECTURE['container_options'](identity),
                                *ARCHITECTURE['resource_options'](limits), *arguments[1:]], **kwargs)
         self.runtime_evidence.append(ARCHITECTURE['container_identity'](self.command, result.stdout.strip(), identity, limits))
@@ -112,6 +112,8 @@ class Harness:
         name = 'spp-services-' + self.token + '-' + scenario
         self.containers.append(name)
         options = ['run', '-d', '--name', name, '--tmpfs', '/run', '--tmpfs', '/run/lock', '--tmpfs', '/tmp']
+        if self.args.type == 'apk':
+            options += ['--cap-add', 'SYS_PTRACE']
         if self.network:
             options += ['--network', self.network]
         if self.args.type != 'apk':
@@ -215,7 +217,7 @@ class Harness:
         self.write(container, confdir + '/fpm.d/www.conf', '[www]\nuser=frankenphp\ngroup=frankenphp\nlisten=127.0.0.1:9074\npm=static\npm.max_children=2\ncatch_workers_output=yes\n')
         self.write(container, '/etc/frankenphp/Caddyfile', '{\n admin off\n auto_https off\n frankenphp\n}\n:8087 {\n root * /usr/share/php-zts-service-test\n php_server\n}\n')
         self.write(container, '/usr/share/php-zts-service-test/index.php', '<?php echo "SPP_SERVICE_OK";\n')
-        self.write(container, '/tmp/fcgi.php', FCGI)
+        self.write(container, '/usr/share/php-zts-service-test/fcgi-client.php', FCGI)
         self.execute(container, 'chmod', '0755', '/usr/share/php-zts-service-test')
         self.execute(container, 'chmod', '0644', '/usr/share/php-zts-service-test/index.php')
         for service in self.service_names:
@@ -280,7 +282,7 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
                     if self.enabled(container, service) != expected_enabled[service]:
                         raise RuntimeError('Active service enablement changed: ' + service)
                     if service.startswith('php-fpm'):
-                        body = self.execute(container, '/usr/bin/php' + self.args.binary_suffix, '-n', '/tmp/fcgi.php', timeout=15).stdout
+                        body = self.execute(container, '/usr/bin/php' + self.args.binary_suffix, '-n', '/usr/share/php-zts-service-test/fcgi-client.php', timeout=15).stdout
                     else:
                         body = self.execute(container, 'curl', '--fail', '--silent', '--max-time', '10', 'http://127.0.0.1:8087/').stdout
                     if 'SPP_SERVICE_OK' not in body:
