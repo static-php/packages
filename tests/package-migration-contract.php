@@ -325,6 +325,7 @@ if (!isset($options['type'])) {
         file_put_contents($root . '/common/lib/php/build/php.m4', 'Fixture build support');
         file_put_contents($root . '/common/bin/php-config', <<<'SH'
 #!/bin/sh
+SED=/usr/bin/sed
 prefix='/__w/producer/packages/buildroot'
 ldflags='-L/__w/producer/packages/buildroot/lib'
 libs='-lphp'
@@ -333,10 +334,10 @@ program_suffix=''
 lib_dir='/__w/producer/packages/buildroot/lib'
 extension_dir='/__w/producer/packages/buildroot/lib/php/extensions/no-debug-zts'
 include_dir='/__w/producer/packages/buildroot/include/php'
-includes="-I$include_dir -I$include_dir/main"
+includes=$(printf '%s\n' "-I$include_dir -I$include_dir/main" | "$SED" -n p)
 case "$1" in --ldflags) echo "$ldflags" ;; --extension-dir) echo "$extension_dir" ;; --prefix) echo "$prefix" ;; --includes) echo "$includes" ;; --lib-dir) echo "$lib_dir" ;; esac
 SH);
-        file_put_contents($root . '/common/bin/phpize', "#!/bin/sh\nprefix='/__w/producer/packages/buildroot'\ndatarootdir='/__w/producer/packages/buildroot/share'\nincludedir='/__w/producer/packages/buildroot/include/php'\necho \"\$prefix \$includedir\"\n");
+        file_put_contents($root . '/common/bin/phpize', "#!/bin/sh\nSED=/usr/bin/sed\nprefix='/__w/producer/packages/buildroot'\ndatarootdir='/__w/producer/packages/buildroot/share'\nincludedir='/__w/producer/packages/buildroot/include/php'\necho \"\$prefix \$includedir\" | \"\$SED\" -n p\n");
         chmod($root . '/common/bin/php-config', 0755);
         chmod($root . '/common/bin/phpize', 0755);
         BuildPayload::record($root . '/common', [
@@ -590,6 +591,7 @@ try {
     migrationCheck(str_contains($headers['php-zts-devel'], 'php-zts-runtime-layout'), 'Devel package lacks a hard runtime-layout dependency');
     $phpConfig = $extractions['php-zts-devel'] . '/usr/bin/php-config-zts';
     migrationCheck(is_executable($phpConfig), 'Installed php-config is missing or not executable');
+    migrationCheck(!str_contains(file_get_contents($phpConfig), '/usr/bin/sed'), 'Installed php-config requires the EL8 producer sed path');
     $linkFlags = trim(migrationCommand([$phpConfig, '--ldflags']));
     migrationCheck(str_contains($linkFlags, '-L' . $physical . '/php-zts/lib') && str_contains($linkFlags, '-Wl,-rpath,/usr/lib/php-zts/lib'), 'Installed php-config cannot link against the private embed/runtime tree');
     migrationCheck(!str_contains(file_get_contents($phpConfig), '/__w/producer/') && !str_contains($linkFlags, $root), 'Installed php-config leaks the relocated producer buildroot');
@@ -597,6 +599,7 @@ try {
     migrationCheck(trim(migrationCommand([$phpConfig, '--extension-dir'])) === $physical . '/php-zts/modules', 'Installed php-config installs extensions outside the packaged module tree');
     migrationCheck(trim(migrationCommand([$phpConfig, '--lib-dir'])) === $physical, 'Installed php-config reports the wrong embed alias directory');
     $phpize = $extractions['php-zts-devel'] . '/usr/bin/phpize-zts';
+    migrationCheck(!str_contains(file_get_contents($phpize), '/usr/bin/sed'), 'Installed phpize requires the EL8 producer sed path');
     migrationCheck(!str_contains(file_get_contents($phpize), '/__w/producer/'), 'Installed phpize leaks the relocated producer buildroot');
     migrationCheck(trim(migrationCommand([$phpize])) === '/usr /usr/include/php-zts', 'Installed phpize retains its producer include directory');
 
