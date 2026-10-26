@@ -85,6 +85,8 @@ class RuntimeHarness(unittest.TestCase):
     def test_native_provides_formats_extract_only_cli_builtin_features(self):
         expected = ['curl', 'mbregex', 'opcache', 'openssl', 'password-argon2', 'swoole-hook-mysql', 'zlib']
         capabilities = ['php-zts', 'php-zts-cli', 'php-zts-devel', 'php-zts-lib-openssl',
+                        'php-zts-shared-runtime', 'php-zts-shared-runtime-82-abi20220829-1',
+                        'php-zts-shared-runtime-86-abi20260924-1',
                         *['php-zts-' + feature for feature in expected]]
         formats = {
             'rpm': '\n'.join(name + ' = 8.4.24-1' for name in capabilities) + '\nphp-zts-cli(x86-64) = 8.4.24-1\n',
