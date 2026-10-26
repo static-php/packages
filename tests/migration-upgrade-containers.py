@@ -730,8 +730,14 @@ def inside(args):
         runtime = runpy.run_path('/spp/shared-runtime-containers.py')
         smokes = runtime['sapi_checks'](args.php, sorted(after), kind)
         ordinary_upgrade(kind)
-        if installed(kind) != after or (sha256(config), sha256(key), module_state(kind)) != state:
+        first_upgrade = installed(kind)
+        managed_before = {name: version for name, version in after.items() if managed(name)}
+        managed_after = {name: version for name, version in first_upgrade.items() if managed(name)}
+        if managed_after != managed_before or (sha256(config), sha256(key), module_state(kind)) != state:
             raise RuntimeError('Fresh optional-package unchanged upgrade changed packages/repository/trust/module selection')
+        ordinary_upgrade(kind)
+        if installed(kind) != first_upgrade or (sha256(config), sha256(key), module_state(kind)) != state:
+            raise RuntimeError('Fresh optional-package second unchanged upgrade was not a no-op')
         if kind == 'rpm':
             run(['dnf', 'check'])
         elif kind == 'deb' and run(['dpkg', '--audit']).stdout.strip():
@@ -1286,6 +1292,18 @@ def suite(args, baseline, profiles):
             receipt = cell(options, prepared=mirror)
             receipt['profile_id'] = profile['id']
             results.append(receipt)
+            if getattr(args, 'report', None) is not None:
+                progress = dict(result, complete=False, state='running', prepared_mirror=mirror.report)
+                progress['profiles_completed'] = len(results)
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                temporary_report = args.report.with_suffix(args.report.suffix + '.next')
+                try:
+                    temporary_report.write_text(json.dumps(progress, indent=2) + '\n')
+                    temporary_report.replace(args.report)
+                finally:
+                    if temporary_report.exists():
+                        temporary_report.unlink()
+            print('Migration result: ' + profile['id'] + ' ok=' + str(receipt['ok']) + (' error=' + receipt.get('error', '')[-2400:] if not receipt['ok'] else ''), flush=True)
             if (receipt.get('interrupted') or receipt.get('prepared_inputs_invalid')
                     or receipt.get('cleanup', {}).get('complete') is False):
                 break
@@ -1353,6 +1371,7 @@ def main():
             result = cell(args)
     except Exception as error:
         result = {'schema': 1, 'ok': False, 'error': str(error), 'resources_created': False}
+    result.update(complete=result['ok'], state='passed' if result['ok'] else 'interrupted' if result.get('interrupted') else 'failed')
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

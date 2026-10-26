@@ -63,8 +63,8 @@ class Harness:
         self.runtime_evidence = []
         self.report = {'schema': 1, 'type': args.type, 'php_stream': args.php_stream, 'scenarios': [], 'commands': [], 'real_service_manager': True, 'probe_only': args.probe_only, 'scope': 'Real service lifecycle; local signed repository URL. Production URL migration is validated separately.', 'host_cgroup_bind': False, 'public_changes': False, 'complete': False}
 
-    def command(self, command, check=True, timeout=1800):
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+    def command(self, command, check=True, timeout=1800, input=None):
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, input=input)
         self.report['commands'].append({'command': command, 'returncode': result.returncode, 'stdout_tail': result.stdout[-2500:], 'stderr_tail': result.stderr[-2500:]})
         if check and result.returncode:
             raise RuntimeError('Command failed: ' + ' '.join(command) + '\n' + result.stdout[-2500:] + result.stderr[-2500:])
@@ -88,7 +88,8 @@ class Harness:
         return result
 
     def execute(self, container, *arguments, **kwargs):
-        return self.docker('exec', container, 'env', '-u', 'LD_LIBRARY_PATH', '-u', 'PHPRC', '-u', 'PHP_INI_SCAN_DIR', *arguments, **kwargs)
+        options = ['-i'] if kwargs.get('input') is not None else []
+        return self.docker('exec', *options, container, 'env', '-u', 'LD_LIBRARY_PATH', '-u', 'PHPRC', '-u', 'PHP_INI_SCAN_DIR', *arguments, **kwargs)
 
     def write(self, container, path, contents):
         source = self.directory / ('write-' + str(len(self.report['commands'])))
@@ -184,7 +185,7 @@ class Harness:
             self.execute(container, 'dnf', '-y', 'upgrade')
         elif self.args.type == 'deb':
             self.execute(container, 'apt', 'update')
-            self.execute(container, 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt', '-y', 'upgrade')
+            self.execute(container, 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt', '-y', 'upgrade', input='\n' * 32)
         else:
             self.execute(container, 'apk', 'update')
             self.execute(container, 'apk', 'upgrade')
