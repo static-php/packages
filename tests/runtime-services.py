@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import time
 import unittest
 
@@ -378,6 +380,76 @@ echo native-runtime-commit-hook-passed
 
 
 class RuntimeServicePackageTests(unittest.TestCase):
+    def test_fpm_generated_debian_postinst_queues_install_and_upgrade(self):
+        if shutil.which("fpm") is None:
+            self.skipTest("FPM is required to inspect its real DEB maintainer scripts")
+        with tempfile.TemporaryDirectory(prefix="spp-fpm-service-script-") as temporary:
+            directory = Path(temporary)
+            code = r"""define('BASE_PATH', $argv[1]); define('TEMP_DIR', $argv[2]);
+require BASE_PATH . '/src/util/RuntimeServices.php';
+$class = 'staticphp\\util\\RuntimeServices';
+echo json_encode(['deb'=>$class::serviceArgs('deb','php-fpm-zts'),
+'rpm'=>$class::serviceArgs('rpm','php-fpm-zts')]);"""
+            generated = subprocess.run(["php", "-r", code, str(ROOT), temporary], capture_output=True, text=True)
+            self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+            arguments = json.loads(generated.stdout)
+            self.assertIn("--before-upgrade", arguments["rpm"])
+            data = directory / "data"
+            data.write_text("service trigger fixture\n")
+            archive = directory / "fixture.deb"
+            packaged = subprocess.run(["fpm", "-s", "dir", "-t", "deb", "--name", "spp-service-trigger-fixture",
+                "--version", "1", "--architecture", "all", "--maintainer", "Fixture <fixture@example.invalid>",
+                "--package", str(archive), *arguments["deb"], str(data) + "=/usr/share/spp-service-trigger-fixture"],
+                capture_output=True, text=True)
+            self.assertEqual(packaged.returncode, 0, packaged.stdout + packaged.stderr)
+            members = subprocess.check_output(["ar", "t", str(archive)], text=True).splitlines()
+            control = next(name.strip() for name in members if name.strip().startswith("control.tar"))
+            with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["ar", "p", str(archive), control]))) as tar:
+                postinst = next(member for member in tar if member.name.lstrip("./") == "postinst")
+                script = directory / "postinst"
+                script.write_bytes(tar.extractfile(postinst).read())
+            mockbin = directory / "bin"
+            mockbin.mkdir()
+            calls = directory / "calls"
+            mock = mockbin / "dpkg-trigger"
+            mock.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SPP_TRIGGER_CALLS"\n')
+            mock.chmod(0o755)
+            environment = dict(os.environ, PATH=str(mockbin) + ":" + os.environ["PATH"], SPP_TRIGGER_CALLS=str(calls))
+            for native_arguments in [["configure"], ["configure", "0.9-1"]]:
+                with self.subTest(native_arguments=native_arguments):
+                    calls.write_text("")
+                    installed = subprocess.run(["sh", str(script), *native_arguments], env=environment, capture_output=True, text=True)
+                    self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), ["--no-await php-zts-runtime"], script.read_text())
+            self.assertNotIn("--before-upgrade", arguments["deb"])
+
+    def test_generated_layout_queues_configure_and_finalizes_only_when_triggered(self):
+        with tempfile.TemporaryDirectory(prefix="spp-layout-service-script-") as temporary:
+            directory = Path(temporary)
+            code = r"""define('BASE_PATH', $argv[1]); define('TEMP_DIR', $argv[2]);
+require BASE_PATH . '/src/util/RuntimeServices.php';
+echo json_encode(staticphp\util\RuntimeServices::layoutArgs('deb'));"""
+            generated = subprocess.run(["php", "-r", code, str(ROOT), temporary], capture_output=True, text=True)
+            self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+            arguments = json.loads(generated.stdout)
+            mockbin = directory / "bin"
+            mockbin.mkdir()
+            calls = directory / "calls"
+            calls.write_text("")
+            for name, label in [("dpkg-trigger", "queue"), ("runtime-services", "finish")]:
+                mock = mockbin / name
+                mock.write_text('#!/bin/sh\nprintf "' + label + ' %s\\n" "$*" >> "$SPP_TRIGGER_CALLS"\n')
+                mock.chmod(0o755)
+            staged = directory / "postinst"
+            staged.write_text(Path(arguments[1]).read_text().replace("/usr/libexec/php-zts/runtime-services", str(mockbin / "runtime-services")))
+            environment = dict(os.environ, PATH=str(mockbin) + ":" + os.environ["PATH"], SPP_TRIGGER_CALLS=str(calls))
+            configured = subprocess.run(["sh", str(staged), "configure"], env=environment, capture_output=True, text=True)
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ["queue --no-await php-zts-runtime"])
+            triggered = subprocess.run(["sh", str(staged), "triggered", "php-zts-runtime"], env=environment, capture_output=True, text=True)
+            self.assertEqual(triggered.returncode, 0, triggered.stdout + triggered.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ["queue --no-await php-zts-runtime", "finish finish"])
+
     def test_generated_package_integration(self):
         with tempfile.TemporaryDirectory(prefix="spp-runtime-scripts-") as temporary:
             code = r'''define('BASE_PATH', $argv[1]); define('TEMP_DIR', $argv[2]);
@@ -394,8 +466,8 @@ echo json_encode(['rpm'=>$rpm,'deb'=>$deb,'apk'=>$apk,'descriptor'=>$descriptor,
             self.assertIn("/usr/lib64/php-zts", Path(generated["rpm"][1]).read_text())
             self.assertIn("--deb-interest-noawait", generated["deb"])
             self.assertIn("/usr/lib/php-zts", generated["deb"])
-            self.assertIn("in triggered)", Path(generated["deb"][1]).read_text())
-            self.assertNotIn("configure", Path(generated["deb"][1]).read_text())
+            self.assertIn("triggered)", Path(generated["deb"][1]).read_text())
+            self.assertIn("configure)", Path(generated["deb"][1]).read_text())
             self.assertIn("preupgrade", generated["apk"])
             self.assertIn("postupgrade", generated["apk"])
             self.assertIn("/etc/apk/commit_hooks.d/php-zts-runtime", generated["apk_layout"]["files"].values())

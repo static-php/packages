@@ -23,7 +23,7 @@ final class RuntimeServices
     {
         $refresh = '/usr/libexec/php-zts/runtime-services finish';
         if ($type === 'deb') {
-            $script = self::script('runtime-layout-postinst', "case \"\${1-}\" in triggered) {$refresh} ;; esac\n");
+            $script = self::script('runtime-layout-postinst', "case \"\${1-}\" in\n    configure) dpkg-trigger --no-await php-zts-runtime ;;\n    triggered) {$refresh} ;;\nesac\n");
             $args = ['--after-install', $script, '--deb-interest-noawait', 'php-zts-runtime'];
             foreach (self::PATHS as $path) {
                 $args[] = '--deb-interest-noawait';
@@ -57,7 +57,11 @@ final class RuntimeServices
     {
         $setup = self::script($service . '-setup-' . $type, self::accountSetup($type) . self::unitSetup($type, $service, $frankenphp));
         $remove = self::script($service . '-remove-' . $type, self::removeService($type, $service));
-        $args = ['--before-install', $setup, '--before-upgrade', $setup, '--before-remove', $remove];
+        $args = ['--before-install', $setup, '--before-remove', $remove];
+        if ($type !== 'deb') {
+            $args[] = '--before-upgrade';
+            $args[] = $setup;
+        }
         if ($type === 'deb') {
             $args[] = '--after-install';
             $args[] = self::script($service . '-ready-deb', self::debianTrigger());
