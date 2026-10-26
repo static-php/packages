@@ -290,7 +290,7 @@ final class ConsumerSnapshot
         if (preg_match('#^(?:modules|debug)/([^/]+?)(?:-(?:zts|nts)-\d+)?\.so(?:\.debug)?$#D', $relative, $match)) {
             return self::normalize($match[1]);
         }
-        if ($relative === 'bin/frankenphp' || str_starts_with($relative, 'packaging/frankenphp/') || $relative === 'debug/frankenphp.debug') {
+        if (in_array($relative, ['bin/frankenphp', 'bin/frankenphp.debug'], true) || str_starts_with($relative, 'packaging/frankenphp/') || $relative === 'debug/frankenphp.debug') {
             return 'frankenphp';
         }
         if (preg_match('#^include/php/ext/([^/]+)/#', $relative, $match)) {

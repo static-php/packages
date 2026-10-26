@@ -109,6 +109,24 @@ PY, $root, $case . '/new.so', (string) $exitCode]);
         unlink($root . '/packaging/frankenphp/package/Caddyfile');
         unlink($previous . '/packaging/frankenphp/package/Caddyfile');
         rejected(static fn () => ConsumerSnapshot::capture($root, $metadata, ['selected'], $previous), 'Missing or changed retained consumer');
+        $frankenRoot = $case . '/frankenroot';
+        mkdir($frankenRoot . '/bin', 0755, true);
+        copy($root . '/bin/php', $frankenRoot . '/bin/frankenphp');
+        BuildPayload::record($frankenRoot, $configuration, '8.6.0RC4', php_uname('m'));
+        $frankenMetadata = BuildPayload::seal($frankenRoot)->metadata();
+        $frankenSnapshot = ConsumerSnapshot::capture($frankenRoot, $frankenMetadata, ['frankenphp']);
+        $replace = new Process(['python3', '-c', <<<'PYTHON'
+import os, shutil, sys
+root, replacement, status = sys.argv[1:]
+shutil.copyfile(replacement, os.path.join(root, 'bin/frankenphp'))
+os.unlink(os.path.join(root, 'payload/debug/bin/frankenphp.debug'))
+sys.exit(int(status))
+PYTHON, $frankenRoot, $case . '/new.so', (string) $exitCode]);
+        check($execute->invoke(null, $replace, $frankenSnapshot) === $exitCode, 'Selected FrankenPHP changed the SPC exit status');
+        check(identity($frankenRoot . '/bin/frankenphp') === identity($case . '/new.so'), 'Selected FrankenPHP was overwritten by preservation');
+        check(!file_exists($frankenRoot . '/payload/debug/bin/frankenphp.debug'), 'An old selected FrankenPHP prepared debug file was restored');
+        check(glob($case . '/.consumer-snapshot-*') === [], 'Selected FrankenPHP left a disposable snapshot');
+
     }
     echo "Passed SPC cleanup preservation on success/failure, cached package assets, preflight rejection and validated atomic payload replacement.\n";
 } finally {
