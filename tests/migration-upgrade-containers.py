@@ -1056,6 +1056,9 @@ class PreparedMirror:
         helper = resources.start(image, 'repo')
         prepare(resources, helper, kind, helper=True)
         self.bootstrap_memory_peak(helper, 'repository')
+        if kind == 'rpm':
+            resources.exec(helper, ['dnf', 'clean', 'all'])
+            self.report['repository_dnf_cache_removed'] = True
         common = ['python3', '/spp/migration-upgrade-containers.py', '--type', kind, '--php', args.php,
                   '--arch', args.arch, '--runtime', args.runtime]
         if args.library_only:
