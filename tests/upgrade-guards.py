@@ -106,12 +106,41 @@ class UpgradeGuards(unittest.TestCase):
             rpm['verify_package'](local, [remote], '8.6')
             commands.run.assert_not_called()
 
+    def test_forgejo_legacy_suffix_comparison(self):
+        versions = {
+            'debian': ('1.5.0+php85.12+ext-1', '1.5.0+php85.12-1'),
+            'alpine': ('1.5.0p85.12_p0-r0', '1.5.0p85.12-r0'),
+        }
+        for kind, (legacy, current) in versions.items():
+            with self.subTest(kind=kind):
+                commands = Mock()
+                commands.run.return_value.returncode = 1
+                commands.check_output.return_value = '=\n'
+                with patch.dict(forgejo_globals, {'subprocess': commands}):
+                    self.assertFalse(forgejo['version_is_newer'](kind, legacy, current))
+                if kind == 'debian':
+                    self.assertEqual(commands.run.call_args[0][0], ['dpkg', '--compare-versions', current, 'gt', current])
+                else:
+                    self.assertEqual(commands.check_output.call_args[0][0], ['apk', 'version', '-t', current, current])
+
+    def test_apk_php_patch_zero_is_preserved(self):
+        version = '3.6.0_alpha1_p86_p0-r0'
+        commands = Mock()
+        commands.check_output.return_value = '=\n'
+        with patch.dict(forgejo_globals, {'subprocess': commands}):
+            self.assertFalse(forgejo['version_is_newer']('alpine', version, version))
+        self.assertEqual(commands.check_output.call_args[0][0], ['apk', 'version', '-t', version, version])
+
     @unittest.skipUnless(shutil.which('dpkg'), 'dpkg required')
     def test_debian_native_comparison(self):
         self.assertTrue(forgejo['version_is_newer']('debian', '3.7.0+php86.0+ext-1', '3.6.0+php86.0+ext-1'))
         self.assertFalse(forgejo['version_is_newer']('debian', '3.6.0~dev+php86~beta2-1', '3.6.0+php86.0~rc3+ext~alpha1-1'))
         published = '1.13.1+php82.35+ext-1'
-        self.assertTrue(forgejo['version_is_newer']('debian', published, '1.13.1+php82.35-2'))
+        self.assertFalse(forgejo['version_is_newer']('debian', published, '1.13.1+php82.35-1'))
+        self.assertFalse(forgejo['version_is_newer']('debian', published, '1.13.1+php82.35-2'))
+        self.assertTrue(forgejo['version_is_newer']('debian', published, '1.13.0+php82.35-2'))
+        self.assertTrue(forgejo['version_is_newer']('debian', published, '1.13.1+php82.34-2'))
+        self.assertTrue(forgejo['version_is_newer']('debian', '1.13.1+php82.35+ext-2', '1.13.1+php82.35-1'))
         self.assertTrue(forgejo['version_is_newer']('debian', '1.13.2+php82.35-1', published))
         self.assertTrue(forgejo['version_is_newer']('debian', '1.13.1+php82.36-1', published))
 
@@ -120,7 +149,11 @@ class UpgradeGuards(unittest.TestCase):
         self.assertTrue(forgejo['version_is_newer']('alpine', '3.7.0p86.0_p0-r0', '3.6.0p86.0_p0-r0'))
         self.assertFalse(forgejo['version_is_newer']('alpine', '3.6.0_pre_beta2_p86-r0', '3.6.0p86.0_rc3_p0_alpha1-r0'))
         published = '1.13.1p82.35_p0-r0'
-        self.assertTrue(forgejo['version_is_newer']('alpine', published, '1.13.1p82.35-r1'))
+        self.assertFalse(forgejo['version_is_newer']('alpine', published, '1.13.1p82.35-r0'))
+        self.assertFalse(forgejo['version_is_newer']('alpine', published, '1.13.1p82.35-r1'))
+        self.assertTrue(forgejo['version_is_newer']('alpine', published, '1.13.0p82.35-r1'))
+        self.assertTrue(forgejo['version_is_newer']('alpine', published, '1.13.1p82.34-r1'))
+        self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.1p82.35_p0-r1', '1.13.1p82.35-r0'))
         self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.2p82.35-r0', published))
         self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.1p82.36-r0', published))
 
@@ -128,11 +161,34 @@ class UpgradeGuards(unittest.TestCase):
     def test_rpm_suffix_removal(self):
         remote = {'name': 'frankenphp', 'arch': 'aarch64', 'version': '1.13.1_82.35+ext', 'evr': '0:1.13.1_82.35+ext-1.el10'}
         local = dict(remote, version='1.13.1_82.35', evr='0:1.13.1_82.35-2.el10')
-        with self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
-            rpm['verify_package'](local, [remote], '8.2')
-        for version in ['1.13.2_82.35', '1.13.1_82.36']:
+        rpm['verify_package'](local, [remote], '8.2')
+        for version in ['1.13.1_82.35', '1.13.2_82.35', '1.13.1_82.36']:
             with self.subTest(version=version):
                 rpm['verify_package'](dict(remote, version=version, evr=f'0:{version}-1.el10'), [remote], '8.2')
+        for evr in ['0:1.13.0_82.35-2.el10', '0:1.13.1_82.34-2.el10', '0:1.13.1_82.35-0.el10', '0:1.13.1~rc1_82.35-2.el10']:
+            with self.subTest(evr=evr), self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
+                rpm['verify_package'](dict(local, version=evr.split(':')[1].split('-')[0], evr=evr), [remote], '8.2')
+
+    @unittest.skipUnless(shutil.which('rpmdev-vercmp'), 'rpmdev-vercmp required')
+    def test_rpm_ssh2_suffix_removal_allows_runtime_and_debuginfo(self):
+        local = {'name': 'php-zts-ssh2', 'arch': 'aarch64', 'version': '1.5.0_85.12', 'evr': '0:1.5.0_85.12-1.el10'}
+        remote = dict(local, version='1.5.0_85.12+ext', evr='0:1.5.0_85.12+ext-1.el10')
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            metadata = {
+                'ssh2.rpm': local,
+                'ssh2-debuginfo.rpm': dict(local, name='php-zts-ssh2-debuginfo'),
+            }
+            for name in metadata:
+                (directory / name).touch()
+            manifest = directory / 'upload-files'
+            with patch.dict(rpm_globals, {
+                'local_package': lambda path: metadata[path.name],
+                'published_packages': lambda read: [remote, dict(remote, name='php-zts-ssh2-debuginfo')],
+            }), patch.object(sys, 'argv', ['check-rpm-upgrades', '--host', 'example.com', '--remote-directory', '/rpm', '--php-version', '8.5', '--files-from', str(manifest), str(directory)]), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(rpm['main'](), 0)
+            self.assertNotIn('::warning::', output.getvalue())
+            self.assertEqual(set(manifest.read_bytes().split(b'\0')), {b'ssh2.rpm', b'ssh2-debuginfo.rpm', b''})
 
     @unittest.skipUnless(shutil.which('rpmdev-vercmp'), 'rpmdev-vercmp required')
     def test_rpm_native_epoch_comparison(self):
