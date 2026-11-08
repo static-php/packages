@@ -32,6 +32,8 @@ def expected_profile(root, stream):
     version = tuple(int(value) for value in stream.split('.'))
     if version >= (8, 5):
         result['shared'] = [name for name in result['shared'] if name != 'memcache']
+    if version >= (8, 6):
+        result['shared'] = [name for name in result['shared'] if name != 'swoole']
     return result
 
 

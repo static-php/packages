@@ -1276,7 +1276,7 @@ class CreatePackages
             '-s', 'dir',
             '-t', 'rpm',
             '--no-rpm-autoreqprov',
-            '--rpm-compression', 'xz',
+            '--rpm-compression', $isDebuginfo ? 'gzip' : 'xz',
             '-p', $packageFile,  // Full path with phpSuffix and distVersion in filename
             '--name', $name,
             '--version', $rpmVersion,
@@ -1483,7 +1483,7 @@ class CreatePackages
             'fpm',
             '-s', 'dir',
             '-t', 'deb',
-            '--deb-compression', 'xz',
+            '--deb-compression', $isDebuginfo ? 'gz' : 'xz',
             '-p', $packageFile,
             '--name', $name,
             '--version', $debVersion,

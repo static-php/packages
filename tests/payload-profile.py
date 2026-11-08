@@ -2,8 +2,10 @@
 """Cache coverage must describe built outputs, never leftovers in an SDK."""
 
 import copy
+import json
 from pathlib import Path
 import runpy
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -176,6 +178,18 @@ class PayloadProfile(unittest.TestCase):
         self.assertIn('curl', expected['shared'])
         self.assertIn('openssl', expected['extensions'])
         self.assertNotIn('memcache', expected['shared'])
+        self.assertNotIn('swoole', expected['shared'])
+        self.assertIn('swoole', helper['expected_profile'](project, '8.5')['shared'])
+
+    def test_complete_prerelease_profile_matches_the_rendered_build_configuration(self):
+        project = Path(__file__).resolve().parents[1]
+        for kind in ['rpm', 'deb', 'apk']:
+            with self.subTest(kind=kind):
+                configuration = json.loads(subprocess.check_output(
+                    ['php', str(project / 'tests/glibc-build-config.php'), '--type=' + kind, '--json'], text=True))
+                expected = helper['expected_profile'](project, '8.6')
+                for key, field in [('sapis', 'sapi'), ('shared', 'shared-extensions'), ('extensions', 'extensions')]:
+                    self.assertEqual(set(expected[key]), set(helper['names'](configuration.get(field))))
 
 
 if __name__ == '__main__':

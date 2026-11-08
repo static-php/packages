@@ -24,7 +24,7 @@ The cache-hit path must work without workspace files generated only by compilati
 
 Subsequent CI evidence from job `128746788330` in run `42485596531` confirms the no-op ABI fix: `rebuilt_libraries: []`, cached classifications reused for all 68 libraries, and zero libraries analyzed for both RPM and DEB. No PHP consumer archives were scanned. That run was later superseded for a separate tool/cache-key correction, so it does not prove overall pipeline success.
 
-Its remaining long SDK step was package creation: gRPC RPM debuginfo took approximately ten minutes under the current explicit xz compression. Inspect packaging/compression costs separately from ABI analysis. First publication still needs the library archives; subsequent unchanged updates should reuse already published archives. Preserve target package-manager compatibility when changing compression.
+Its remaining long SDK step was package creation: gRPC RPM debuginfo took approximately ten minutes under explicit xz compression. Debuginfo now uses gzip; ordinary RPM/DEB packages retain xz. The native archive tools verify the compression and can decode the resulting packages. This trades larger debug archives for faster packaging. First publication still needs library archives; subsequent unchanged updates should reuse already published archives.
 
 ### Alpine: preinstalled go-xcaddy is not recognized
 
@@ -49,6 +49,10 @@ The original compiled payload was not cached because export occurred after packa
 EL8 job `128752715161` missed a genuinely compatible x86_64 cache and started a cold build. Its requested compiler compatibility exactly matched the existing receipt. The original archive had been deleted by a superseded run's save, which was canceled during replacement upload, leaving only an unusable `starter` asset. The verified local archive still matched the old receipt's full checksum and was recovered without compilation.
 
 Cache writes must preserve the current SDK until the replacement is fully uploaded and its receipt is committed. The replacement implementation stages uploads, restores by committed asset ID, keeps a receipt backup during the switch, and finishes with the same readable canonical filenames. It removes obsolete staging assets after success. Tests interrupt each transaction boundary and partial uploads. A matching receipt with a missing archive must fail visibly instead of silently triggering a cold rebuild.
+
+### PHP 8.6 complete-cache profile drifted from the actual build
+
+Both PHP 8.6 Alpine builds compiled successfully but could not export their payloads: the cache's expected profile required Swoole even though `craft.yml.twig` deliberately excludes it for PHP 8.6. Those two outputs were not saved; the eight PHP 8.2–8.5 payloads were saved. The expected profile now applies the exclusion, and a test compares it with the real rendered configurations for RPM, DEB and APK. That check runs during fingerprint preparation, before library or PHP compilation. Preserve the rule that deliberately filtered builds cannot overwrite a complete cache; remove duplicated profile interpretation where possible.
 
 ## What must remain
 

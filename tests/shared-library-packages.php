@@ -41,7 +41,7 @@ function packageHeader(string $artifact, string $type): string
     }
     if ($type === 'deb') {
         $member = current(array_filter(explode("\n", command(['ar', 't', $artifact])), fn ($name) => str_starts_with($name, 'control.tar')));
-        return command(['tar', '-xOJf', '-', './control'], command(['ar', 'p', $artifact, $member]));
+        return command(['tar', str_ends_with($member, '.xz') ? '-xOJf' : '-xOzf', '-', './control'], command(['ar', 'p', $artifact, $member]));
     }
     return command(['tar', '-xOf', '-', '.PKGINFO'], command(['gzip', '-dc', $artifact]));
 }
@@ -137,7 +137,15 @@ try {
     check(count($artifacts) === 4, "Expected runtime/debuginfo pairs for {$type}: {$log}");
     $headers = [];
     foreach ($artifacts as $artifact) {
-        if (str_contains(basename($artifact), '-debuginfo')) {
+        $debug = str_contains(basename($artifact), '-debuginfo');
+        if ($type === 'rpm') {
+            check(command(['rpm', '-qp', '--qf', '%{PAYLOADCOMPRESSOR}', $artifact]) === ($debug ? 'gzip' : 'xz'), 'Incorrect RPM payload compression');
+            check(command(['rpm2cpio', $artifact]) !== '', 'RPM payload could not be decompressed');
+        } elseif ($type === 'deb') {
+            $members = explode("\n", command(['ar', 't', $artifact]));
+            check(in_array($debug ? 'data.tar.gz' : 'data.tar.xz', $members, true), 'Incorrect DEB payload compression');
+        }
+        if ($debug) {
             continue;
         }
         $header = packageHeader($artifact, $type);

@@ -85,6 +85,7 @@ case "$command" in
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress >&2
         php bin/spp --version >/dev/null
+        python3 tests/payload-profile.py >&2
         mkdir -p stage
         php .github/actions/shared-libraries/build-inputs.php "$PWD" "$TYPE" "$TARGET" > stage/library-build-environment.json
         toolchain=$(python3 .github/actions/shared-libraries/toolchain.py --build-environment stage/library-build-environment.json)

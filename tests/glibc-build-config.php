@@ -8,7 +8,7 @@ use Symfony\Component\Yaml\Yaml;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
-$options = getopt('', ['type:']);
+$options = getopt('', ['type:', 'json']);
 if (isset($options['type'])) {
     define('BASE_PATH', dirname(__DIR__));
     define('SPP_TYPE', $options['type']);
@@ -16,7 +16,8 @@ if (isset($options['type'])) {
     define('SPP_PHP_VERSION', '8.6');
     define('SPP_TARGET', null);
     function getSharedLibrarySuffix(): string { return '-zts-86'; }
-    echo TwigRenderer::renderCraftTemplate('8.6', 'x86_64', null, '8.6.0RC4');
+    $configuration = TwigRenderer::renderCraftTemplate('8.6', 'x86_64', null, '8.6.0RC4');
+    echo isset($options['json']) ? json_encode(Yaml::parse($configuration), JSON_THROW_ON_ERROR) : $configuration;
     exit;
 }
 
