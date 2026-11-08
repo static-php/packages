@@ -25,6 +25,10 @@ Earlier native CI evidence demonstrated all ten Alpine build/test targets passin
 
 CI state changes. Inspect current runs and actual terminal logs before dispatching, canceling or claiming success. Useful references are [Alpine source 42509033185](https://github.com/static-php/packages/actions/runs/42509033185), [Alpine publication recovery 42518472445](https://github.com/static-php/packages/actions/runs/42518472445), [EL8 source 42517652884](https://github.com/static-php/packages/actions/runs/42517652884) and [EL8 recovery 42526301093](https://github.com/static-php/packages/actions/runs/42526301093). This document does not assert their current live status. A green upload step with `continue-on-error` is insufficient evidence of successful publication.
 
+After the user's publication prohibition, both active publication runs and the queued `publish=true` recovery were canceled. Replacement build/test-only runs are [Alpine 42527631594](https://github.com/static-php/packages/actions/runs/42527631594) and [EL8 42527633027](https://github.com/static-php/packages/actions/runs/42527633027), both dispatched with `publish=false`. Both Alpine SDK jobs passed with no libraries rebuilt, 68 cached ABI results reused and zero analyzed libraries.
+
+Alpine PHP 8.2 ARM64 job `128876579405` then failed freezing the actual published baseline: FrankenPHP `1.13.5p82.35-r1` requires `php-zts-shared-runtime-82-abi20220829-1`, while the published CLI is still static `8.2.35-r2`. The real Alpine 3.21 solver independently fails on that missing capability. Explicitly pinning the previous published FrankenPHP `1.13.5p82.35-r0` resolves with the old CLI/embed, but silently selecting that older version would not establish that the current repository works. Preserve the failure and the publication prohibition; do not bypass dependency checks, delete registry packages or resume uploads to make this check green without authorization. Continue inspecting unaffected targets.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
