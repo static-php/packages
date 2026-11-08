@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -160,7 +161,7 @@ class ReleaseCacheTests(unittest.TestCase):
 
     def unavailable(self, code=504):
         error = cache.CacheError("Cache download failed: HTTP " + str(code))
-        error.__cause__ = cache.urllib.error.HTTPError("https://github.com/cache", code, "unavailable", {}, None)
+        error.__cause__ = cache.urllib.error.HTTPError("https://github.com/cache", code, "unavailable", {}, io.BytesIO())
         error.__cause__.close()
         return error
 
@@ -210,6 +211,39 @@ class ReleaseCacheTests(unittest.TestCase):
         with mock.patch.object(self.backend, "tags", side_effect=TimeoutError("timed out")) as tags, mock.patch.object(cache.time, "sleep"):
             self.assertEqual(self.restore()["cache-hit"], "false")
         self.assertEqual(tags.call_count, 3)
+
+
+class GitHubDownloadTests(unittest.TestCase):
+    def test_missing_release_and_empty_release_do_not_request_download_urls(self):
+        for release, calls in [(None, 1), ({"id": 17}, 2)]:
+            with self.subTest(release=release):
+                github = cache.GitHub("owner/repository")
+                with mock.patch.object(github, "api", side_effect=[release, []]) as api, mock.patch.object(cache.urllib.request, "build_opener") as opener:
+                    self.assertFalse(github.download("cache-2026-45", "absent", "unused"))
+                    self.assertFalse(github.download("cache-2026-45", "other", "unused"))
+                self.assertEqual(api.call_count, calls)
+                opener.assert_not_called()
+
+    def test_paginated_inventory_downloads_by_asset_id_and_is_reused(self):
+        github = cache.GitHub("owner/repository", "test-token")
+        first = [{"name": str(index), "id": index} for index in range(100)]
+        second = [{"name": "sdk.tar.zst", "id": 123}]
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(github, "api", side_effect=[{"id": 17}, first, second]) as api, mock.patch.object(cache.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(b"compiled SDK")
+            path = Path(temporary) / "sdk"
+            self.assertTrue(github.download("cache-2026-45", "sdk.tar.zst", path))
+            self.assertEqual(path.read_bytes(), b"compiled SDK")
+            self.assertFalse(github.download("cache-2026-45", "missing", path))
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, "https://api.github.com/repos/owner/repository/releases/assets/123")
+            self.assertEqual(request.get_header("Accept"), "application/octet-stream")
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+            self.assertEqual(api.call_count, 3)
+
+    def test_asset_redirect_does_not_forward_github_token_to_storage(self):
+        request = cache.urllib.request.Request("https://api.github.com/repos/owner/repository/releases/assets/123", headers={"Authorization": "Bearer test-token"})
+        redirected = cache.AssetRedirectHandler().redirect_request(request, None, 302, "Found", {}, "https://release-assets.githubusercontent.com/asset")
+        self.assertIsNone(redirected.get_header("Authorization"))
 
 
 class RacingGitHub(cache.GitHub):

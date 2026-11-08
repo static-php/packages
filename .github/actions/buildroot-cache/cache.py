@@ -18,6 +18,14 @@ class CacheError(RuntimeError):
     pass
 
 
+class AssetRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, url):
+        redirected = super().redirect_request(request, response, code, message, headers, url)
+        if redirected is not None and urllib.parse.urlsplit(request.full_url)[:2] != urllib.parse.urlsplit(url)[:2]:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 def split_key(key):
     match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]{0,170})-([0-9]{4})-([0-9]{2})", key)
     if not match:
@@ -44,6 +52,8 @@ class GitHub:
             raise CacheError("Invalid repository")
         self.repository = repository
         self.token = token
+        self.release_ids = {}
+        self.asset_inventories = {}
 
     def request(self, url, method="GET", data=None, headers=None, missing=False):
         request_headers = {"Accept": "application/vnd.github+json", "User-Agent": "buildroot-cache"}
@@ -69,15 +79,35 @@ class GitHub:
         tags = []
         for page in range(1, 11):
             releases = self.api("/releases?per_page=100&page=" + str(page))
+            self.release_ids.update({value["tag_name"]: value["id"] for value in releases})
             tags.extend(value["tag_name"] for value in releases if re.fullmatch(r"cache-[0-9]{4}-[0-9]{2}", value.get("tag_name", "")) and not value.get("draft"))
             if len(releases) < 100:
                 break
         return sorted(set(tags), reverse=True)
 
     def download(self, tag, asset, destination):
-        url = "https://github.com/" + self.repository + "/releases/download/" + urllib.parse.quote(tag, safe="") + "/" + urllib.parse.quote(asset, safe="")
+        if tag not in self.asset_inventories:
+            if tag not in self.release_ids:
+                release = self.api("/releases/tags/" + urllib.parse.quote(tag, safe=""), missing=True)
+                self.release_ids[tag] = release["id"] if release is not None else None
+            release_id = self.release_ids[tag]
+            inventory = {}
+            if release_id is not None:
+                for page in range(1, 101):
+                    assets = self.api("/releases/" + str(release_id) + "/assets?per_page=100&page=" + str(page))
+                    inventory.update({value["name"]: value["id"] for value in assets})
+                    if len(assets) < 100:
+                        break
+            self.asset_inventories[tag] = inventory
+        asset_id = self.asset_inventories[tag].get(asset)
+        if asset_id is None:
+            return False
+        url = "https://api.github.com/repos/" + self.repository + "/releases/assets/" + str(asset_id)
+        headers = {"User-Agent": "buildroot-cache", "Accept": "application/octet-stream"}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "buildroot-cache"}), timeout=180) as response, Path(destination).open("wb") as output:
+            with urllib.request.build_opener(AssetRedirectHandler()).open(urllib.request.Request(url, headers=headers), timeout=180) as response, Path(destination).open("wb") as output:
                 while block := response.read(1024 * 1024):
                     output.write(block)
             return True
