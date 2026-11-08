@@ -4,11 +4,13 @@ import hashlib
 import http.server
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -174,6 +176,31 @@ class PinnedSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(pinned.SourceError, "conflicts"):
             self.ensure(source)
         self.assertEqual(ignored.read_text(), "ignored generated source\n")
+
+    def test_existing_git_accepts_foreign_owned_clean_snapshot(self):
+        repository = self.root / "downloads/lib"
+        repository.mkdir(parents=True)
+
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(repository), *args], stderr=subprocess.DEVNULL, text=True).strip()
+
+        git("init", "--quiet")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        (repository / "lib.c").write_text("pinned source\n")
+        git("add", "lib.c")
+        git("commit", "--quiet", "-m", "pinned")
+        source = {"source": {"cache_type": "git", "dirname": "lib", "hash": git("rev-parse", "HEAD"),
+                             "config": {"type": "git", "url": str(repository)}}}
+        with patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}):
+            rejected = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("dubious ownership", rejected.stderr)
+            self.assertEqual(self.ensure(source)[0]["source"], "existing")
+            (repository / "lib.c").write_text("modified source\n")
+            with self.assertRaisesRegex(pinned.SourceError, "conflicts"):
+                self.ensure(source)
+        self.assertEqual(self.requests, [])
 
     def test_existing_git_requires_initialized_recorded_submodules(self):
         repository = self.root / "downloads/lib"

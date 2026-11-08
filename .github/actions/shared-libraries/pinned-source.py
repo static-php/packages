@@ -126,7 +126,7 @@ def _url(source):
 
 
 def _git(args, directory):
-    result = subprocess.run(["git", "-C", str(directory), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    result = subprocess.run(["git", "-c", "safe.directory=" + str(Path(directory).resolve()), "-C", str(directory), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
     if result.returncode:
         raise SourceError("Cannot materialize the exact recorded Git commit")
@@ -140,7 +140,7 @@ def _clean_git(path, commit, submodules):
         return True
     args = ["submodule", "status", "--recursive"] if submodules is None else ["submodule", "status", "--", *submodules]
     # Keep the leading status marker: strip() would hide an unmodified first submodule.
-    result = subprocess.run(["git", "-C", str(path), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(["git", "-c", "safe.directory=" + str(path.resolve()), "-C", str(path), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return result.returncode == 0 and all(line.startswith(" ") for line in result.stdout.splitlines())
 
 
