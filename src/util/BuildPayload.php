@@ -233,28 +233,34 @@ final class BuildPayload
                 throw new RuntimeException('Frozen PIE asset differs from the selected source snapshot');
             }
         }
-        $parent = $payload->root . '/packaging';
-        if (!is_dir($parent) && !mkdir($parent, 0755, true) && !is_dir($parent)) {
-            throw new RuntimeException('Cannot create package asset directory');
-        }
-        $target = $parent . '/pie';
+        $target = $payload->root . '/packaging';
         if (is_link($target)) {
-            throw new RuntimeException('Frozen PIE asset directory must not be a symlink');
+            throw new RuntimeException('Package asset directory must not be a symlink');
         }
-        $stage = $payload->root . '/.pie-refresh-' . bin2hex(random_bytes(8));
+        $stage = $payload->root . '/.package-assets-refresh-' . bin2hex(random_bytes(8));
         $backup = $stage . '-previous';
         $previous = $payload->data;
         $installed = false;
         try {
-            if (!mkdir($stage, 0755) || !copy($source, $stage . '/pie.phar') || !chmod($stage . '/pie.phar', 0755)
-                || !copy($metadataPath, $stage . '/metadata.json') || !chmod($stage . '/metadata.json', 0644)) {
+            if (!mkdir($stage, 0755)) {
+                throw new RuntimeException('Cannot stage package assets');
+            }
+            if (is_dir($target)) {
+                self::command(['cp', '-a', $target . '/.', $stage . '/']);
+            }
+            if (!is_dir($stage . '/pie') && !mkdir($stage . '/pie', 0755)) {
                 throw new RuntimeException('Cannot stage frozen PIE assets');
             }
+            if (!copy($source, $stage . '/pie/pie.phar') || !chmod($stage . '/pie/pie.phar', 0755)
+                || !copy($metadataPath, $stage . '/pie/metadata.json') || !chmod($stage . '/pie/metadata.json', 0644)) {
+                throw new RuntimeException('Cannot stage frozen PIE assets');
+            }
+            self::stageSpxAssets($payload, $downloads, $stage);
             if (is_dir($target) && !rename($target, $backup)) {
-                throw new RuntimeException('Cannot preserve previous frozen PIE assets');
+                throw new RuntimeException('Cannot preserve previous package assets');
             }
             if (!rename($stage, $target)) {
-                throw new RuntimeException('Cannot install frozen PIE assets');
+                throw new RuntimeException('Cannot install package assets');
             }
             $installed = true;
             $payload->data['packaging_assets'] = self::assets($payload->root);
@@ -277,6 +283,68 @@ final class BuildPayload
             self::command(['rm', '-rf', '--', $stage, $backup]);
         }
         return $payload;
+    }
+
+    private static function stageSpxAssets(self $payload, string $downloads, string $stage): void
+    {
+        if (glob($payload->root . '/modules/spx*.so') === []) {
+            if (file_exists($stage . '/spx') || is_link($stage . '/spx')) {
+                self::command(['rm', '-rf', '--', $stage . '/spx']);
+            }
+            return;
+        }
+        $destination = $stage . '/spx/web-ui';
+        $installed = $payload->root . '/share/misc/php-spx/assets/web-ui';
+        if (is_dir($destination) && !is_dir($installed)) {
+            return;
+        }
+        self::command(['rm', '-rf', '--', $destination]);
+        if (!mkdir($destination, 0755, true)) {
+            throw new RuntimeException('Cannot stage SPX package assets');
+        }
+        if (is_dir($installed)) {
+            self::command(['cp', '-a', $installed . '/.', $destination . '/']);
+            return;
+        }
+        $context = $payload->data['build_context'] ?? [];
+        $record = $context['source_snapshot']['records']['ext-spx']
+            ?? $context['reused_source_snapshot']['records']['ext-spx'] ?? null;
+        $cache = json_decode((string) file_get_contents($downloads . '/.cache.json'), true, 512, JSON_THROW_ON_ERROR);
+        $source = $cache['ext-spx']['source'] ?? null;
+        $filename = $source['filename'] ?? '';
+        if (!is_array($record) || ($source['cache_type'] ?? null) !== 'archive'
+            || !is_string($filename) || $filename === '' || basename($filename) !== $filename
+            || str_contains($filename, '\\') || ($source['hash'] ?? null) !== ($record['hash'] ?? null)
+            || !preg_match('/^[a-f0-9]{40}$/D', $source['hash'] ?? '')) {
+            throw new RuntimeException('Missing matching frozen SPX source for cached package assets');
+        }
+        $archive = $downloads . '/' . $filename;
+        if (!is_file($archive) || is_link($archive) || hash_file('sha1', $archive) !== $source['hash']) {
+            throw new RuntimeException('Frozen SPX source differs from its recorded hash');
+        }
+        $count = 0;
+        foreach (new \RecursiveIteratorIterator(new \PharData($archive)) as $file) {
+            $name = substr($file->getPathname(), strlen('phar://' . realpath($archive) . '/'));
+            if (!preg_match('#^(?:[^/]+/)?assets/web-ui/(.+)$#D', $name, $match)) {
+                continue;
+            }
+            $relative = $match[1];
+            if (!$file->isFile() || $file->isLink() || $file->getSize() > 8 * 1024 * 1024
+                || str_contains($relative, '\\') || preg_match('#(?:^|/)\.{1,2}(?:/|$)#', $relative)) {
+                throw new RuntimeException('Invalid frozen SPX web UI file');
+            }
+            $path = $destination . '/' . $relative;
+            if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true)) {
+                throw new RuntimeException('Cannot create SPX web UI directory');
+            }
+            if (!copy($file->getPathname(), $path) || !chmod($path, $file->getPerms() & 0777)) {
+                throw new RuntimeException('Cannot stage frozen SPX web UI file');
+            }
+            $count++;
+        }
+        if ($count === 0) {
+            throw new RuntimeException('Frozen SPX source has no web UI assets');
+        }
     }
 
     public static function graft(string $root, array $cached, array $reuseProof = []): self
@@ -327,7 +395,8 @@ final class BuildPayload
         if (!self::equal($skips, $cached['skipped_shared_extensions'] ?? null)) {
             throw new RuntimeException('Cached PHP shared-extension skip manifest was not restored');
         }
-        $payload = self::record($root, $cached['configuration'], $cached['php_version'], $cached['architecture'], $cached['source_version'] ?? $cached['php_version']);
+        $payload = self::record($root, $cached['configuration'], $cached['php_version'], $cached['architecture'],
+            $cached['source_version'] ?? $cached['php_version'], $cached['build_context'] ?? null);
         foreach ($cached['prepared'] ?? [] as $relative => $entry) {
             if (self::equal($cached['files'][$relative] ?? null, $payload->data['files'][$relative] ?? null)
                 && isset($payload->data['files'][$relative]) && self::matches($payload->root, $entry['runtime'])

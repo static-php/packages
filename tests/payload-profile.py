@@ -76,6 +76,15 @@ class PayloadProfile(unittest.TestCase):
             self.assertFalse(helper['php_file_allowed'](name, self.record))
         self.assertTrue(helper['php_file_allowed']('packaging/php-module-build/ext/xsl/config.m4', self.record))
 
+    def test_spx_ui_is_cached_only_with_its_module(self):
+        name = 'packaging/spx/web-ui/index.html'
+        self.assertFalse(helper['php_file_allowed'](name, self.record))
+        self.record['configuration']['shared-extensions'] += ',spx'
+        self.assertTrue(helper['php_file_allowed'](name, self.record))
+        self.record['skipped_shared_extensions'] = {'schema': 1, 'php_version_id': 80600,
+            'allow_shared_ext_failure': True, 'skipped': [{'extension': 'spx'}]}
+        self.assertFalse(helper['php_file_allowed'](name, self.record))
+
     def test_honest_incomplete_checkpoint_cannot_occupy_complete_cache_key(self):
         self.record['build_context'] = {'kind': 'full-consumer-build', 'coverage': 'incomplete'}
         with self.assertRaisesRegex(RuntimeError, 'incomplete PHP build checkpoint'):

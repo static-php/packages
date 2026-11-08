@@ -136,6 +136,7 @@ def php_file_allowed(relative, record, root=None, profile=None):
     if relative.startswith('packaging/'):
         return (relative in {'packaging/pie/pie.phar', 'packaging/pie/metadata.json'}
                 or relative.startswith('packaging/php-module-build/')
+                or relative.startswith('packaging/spx/') and 'spx' in profile['modules']
                 or relative.startswith('packaging/frankenphp/') and 'frankenphp' in sapis)
     if relative in ('bin/phpize', 'bin/php-config') or relative.startswith(('include/php/', 'lib/php/build/')):
         return 'cli' in sapis

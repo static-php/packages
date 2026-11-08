@@ -60,6 +60,8 @@ Both PHP 8.6 Alpine builds compiled successfully but could not export their payl
 
 Run `42493776131` restored PHP 8.3/8.5 payloads with `changed_components: []`, then packaging failed to detect AMQP's version. The version probe loaded unsuffixed module names, while the actual files are named `amqp-zts-85.so`, etc. Fresh builds had hidden this through a source-header fallback. The probe now uses actual module paths and the correct `zend_extension` directive where required. `tests/extension-version-probe.php --payload=PATH --stream=8.5 --type=apk` passed all 81 available shared extensions from the real cached Alpine payload in an offline native container without a PHP source tree. A restored payload must support packaging independently of compilation's workspace.
 
+The subsequent native packaging check found SPX's web UI was also omitted from the PHP cache. Asset refresh now records it under `packaging/spx/web-ui`, and cache export retains it with its module. Existing caches recover the UI from the already downloaded source archive, verified against the compiled source lock; cache graft preserves that provenance. Rebuilt SPX replaces its old UI, while skipped SPX retains no old UI. The real cached Alpine PHP 8.5 payload then created AMQP, MySQLi, Xdebug, SPX, CLI and devel APKs successfully without compilation. `tests/extension-assets.php` covers legacy recovery, archive mismatch rejection, sealed inventory, replacement and reuse. This native check does not replace CI installation, upgrade and publication validation.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
