@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from threading import Barrier
 import unittest
 from unittest.mock import patch
 
@@ -118,6 +119,7 @@ class Pipeline(unittest.TestCase):
                 if cached_variants:
                     glibc.write(sdk / 'openssl-variants/variants.json', {})
                 calls, scans = [], []
+                packaging = Barrier(2)
                 def baseline(kind, destination, consumers=False, abi_libraries=()):
                     scans.append((kind, consumers, set(abi_libraries)))
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
@@ -131,7 +133,13 @@ class Pipeline(unittest.TestCase):
                         glibc.write(option('--manifest-output'), value)
                         glibc.write(option('--output'), {'libraries': [], 'php_requests': {}})
                     elif 'stage-publication-retries' in args:
-                        glibc.write(option('--output'), {'remaining_libraries': []})
+                        glibc.write(option('--output'), {'remaining_libraries': ['fixture']})
+                    elif args[:2] == ['php', 'bin/spp']:
+                        kind = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--type='))
+                        selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
+                        self.assertEqual(Path(selected), stage / ('sdk-' + kind))
+                        self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
+                        packaging.wait(timeout=5)
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
@@ -145,6 +153,8 @@ class Pipeline(unittest.TestCase):
                 prepares = [call for call in calls if 'prepare' in call]
                 self.assertEqual(len(prepares), 2 if cached_variants else 4)
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
+                self.assertEqual(packaging.n_waiting, 0)
+                self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), 2)
 
     def test_shared_consumer_graph_preserves_native_rpm_versions_and_libraries(self):
         with tempfile.TemporaryDirectory() as temporary:

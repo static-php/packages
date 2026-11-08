@@ -114,7 +114,7 @@ try {
     file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
     ob_start();
     try {
-        CreatePackages::run(null, '1', true, false, true);
+        CreatePackages::run(null, '1', true, false, true, null, BUILD_ROOT_PATH);
         $revisionOne = glob(DIST_PATH . '/' . $type . '/*.' . $type);
         $oldConsumer = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'fixture-consumer') && !str_contains(basename($file), '-debuginfo')));
         $oldHeader = packageHeader($oldConsumer, $type);
@@ -128,7 +128,7 @@ try {
             $manifest['libraries']['fixture-' . $id]['source_hash'] = hash_file('sha256', $root . '/' . $id . '.c');
         }
         file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
-        CreatePackages::run(null, '2', true, false, true);
+        CreatePackages::run(null, '2', true, false, true, null, BUILD_ROOT_PATH);
     } finally {
         $log = ob_get_clean();
     }

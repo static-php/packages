@@ -37,7 +37,7 @@ class CreatePackages
     private static ?SharedLibraries $sharedLibraries = null;
     private static array $consumerManifest = [];
 
-    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null, bool $libsOnly = false, ?array $libraries = null): true
+    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null, bool $libsOnly = false, ?array $libraries = null, ?string $buildroot = null): true
     {
         self::$prefix = defined('SPP_PREFIX') ? SPP_PREFIX : '-zts';
         self::$packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
@@ -47,7 +47,10 @@ class CreatePackages
         self::$resolvedIterations = [];
         self::$versionArch = [];
         self::$consumerManifest = [];
-        $manifestRoot = $libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH;
+        if ($buildroot !== null && (!$libsOnly || !is_file($buildroot . '/shared-libraries.json'))) {
+            throw new \InvalidArgumentException('--buildroot requires --libs-only and a shared library SDK manifest.');
+        }
+        $manifestRoot = $buildroot ?? ($libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH);
         $shared = CraftConfig::getInstance()->getRawConfig()['build-options']['with-shared-libs'] ?? false;
         self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, self::runtimeLibdir());
         if (($payload = BuildPayload::load($manifestRoot)) !== null && !$payload->isSealed()) {

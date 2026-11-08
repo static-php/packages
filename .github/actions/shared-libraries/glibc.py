@@ -2,6 +2,7 @@
 """Build one EL8 payload and consume it in format-only packaging stages."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -140,6 +141,41 @@ def save_abi_cache(root, kind):
                 copy_tree(directory, STAGE / 'abi-cache' / (kind if directory.name == 'openssl' else 'common') / directory.name)
 
 
+def package_libraries(kind):
+    directory = STAGE / kind
+    selected_sdk = STAGE / ('sdk-' + kind)
+    shutil.copy2(directory / 'shared-libraries.json', selected_sdk / 'shared-libraries.json')
+    run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
+    abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
+    if abi.exists():
+        copy_tree(abi, directory / 'abi')
+    retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
+                  '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
+                  '--manifest', selected_sdk / 'shared-libraries.json', '--manifest-output', selected_sdk / 'shared-libraries.json',
+                  '--output', directory / 'publication-retries.json']
+    for baseline_path in directory.glob('baseline/shared-libraries.json'):
+        retry_args += ['--baseline-manifest', baseline_path]
+    run(retry_args)
+    selected = read(directory / 'publication-retries.json')['remaining_libraries']
+    if selected or read(directory / 'publication-retries.json').get('layout_required'):
+        environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
+        selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
+        run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(selected_sdk),
+             *selection, '--debuginfo', *revision_flags()], env=environment)
+    if list((ROOT / 'dist' / kind).glob('*.' + kind)):
+        run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', selected_sdk,
+             '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', directory / 'payload-archive-receipt.json'])
+    run(['php', 'bin/build-payload', 'manifest', '--root', selected_sdk, '--type', kind,
+         '--output', directory / 'shared-libraries.json'])
+    packages = directory / 'libraries'
+    packages.mkdir(exist_ok=True)
+    for archive in (ROOT / 'dist' / kind).glob('*.' + kind):
+        shutil.copy2(archive, packages / archive.name)
+    consumer_manifest = ROOT / 'dist' / kind / 'shared-library-consumers.json'
+    if consumer_manifest.exists():
+        shutil.copy2(consumer_manifest, packages / consumer_manifest.name)
+
+
 def classify():
     sdk = ROOT / 'buildroot'
     STAGE.mkdir(exist_ok=True)
@@ -208,46 +244,8 @@ def classify():
     else:
         raise RuntimeError('Cross-format library ABI planning did not converge')
     run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
-    for kind in FORMATS:
-        directory = STAGE / kind
-        selected_sdk = STAGE / ('sdk-' + kind)
-        shutil.copy2(directory / 'shared-libraries.json', selected_sdk / 'shared-libraries.json')
-        run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
-        abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
-        if abi.exists():
-            copy_tree(abi, directory / 'abi')
-        common = STAGE / 'common-sdk'
-        sdk.rename(common)
-        selected_sdk.rename(sdk)
-        try:
-            retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
-                          '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
-                          '--manifest', sdk / 'shared-libraries.json', '--manifest-output', sdk / 'shared-libraries.json',
-                          '--output', directory / 'publication-retries.json']
-            for baseline_path in directory.glob('baseline/shared-libraries.json'):
-                retry_args += ['--baseline-manifest', baseline_path]
-            run(retry_args)
-            selected = read(directory / 'publication-retries.json')['remaining_libraries']
-            if selected or read(directory / 'publication-retries.json').get('layout_required'):
-                environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
-                selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
-                run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind,
-                     *selection, '--debuginfo', *revision_flags()], env=environment)
-            if list((ROOT / 'dist' / kind).glob('*.' + kind)):
-                run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', sdk,
-                     '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', directory / 'payload-archive-receipt.json'])
-            run(['php', 'bin/build-payload', 'manifest', '--root', sdk, '--type', kind,
-                 '--output', directory / 'shared-libraries.json'])
-            packages = directory / 'libraries'
-            packages.mkdir(exist_ok=True)
-            for archive in (ROOT / 'dist' / kind).glob('*.' + kind):
-                shutil.copy2(archive, packages / archive.name)
-            consumer_manifest = ROOT / 'dist' / kind / 'shared-library-consumers.json'
-            if consumer_manifest.exists():
-                shutil.copy2(consumer_manifest, packages / consumer_manifest.name)
-        finally:
-            sdk.rename(selected_sdk)
-            common.rename(sdk)
+    with ThreadPoolExecutor(max_workers=len(FORMATS)) as executor:
+        list(executor.map(package_libraries, FORMATS))
     sdk_manifest = read(sdk / 'shared-libraries.json')
     format_manifests = {kind: read(STAGE / kind / 'shared-libraries.json') for kind in FORMATS}
     for kind, entry in merge_library_abi(sdk_manifest, format_manifests):

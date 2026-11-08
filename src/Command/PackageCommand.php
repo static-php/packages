@@ -22,6 +22,7 @@ class PackageCommand extends BaseCommand
             ->addOption('iteration', null, InputOption::VALUE_REQUIRED, 'Specify iteration number to use for packages (overrides auto-detected)')
             ->addOption('bump', null, InputOption::VALUE_NONE, 'Bump each package iteration to (latest published on the remote repo) + 1')
             ->addOption('libs-only', null, InputOption::VALUE_NONE, 'Package shared libraries without requiring a PHP binary')
+            ->addOption('buildroot', null, InputOption::VALUE_REQUIRED, 'Shared library SDK directory (requires --libs-only)')
             ->addOption('libraries', null, InputOption::VALUE_REQUIRED, 'Select shared libraries (comma-separated; requires --libs-only)');
     }
 
@@ -31,6 +32,10 @@ class PackageCommand extends BaseCommand
         $iteration = $input->getOption('iteration');
         $bump = (bool)$input->getOption('bump');
         $libsOnly = (bool)$input->getOption('libs-only');
+        $buildroot = $input->getOption('buildroot');
+        if ($buildroot !== null && !$libsOnly) {
+            throw new \InvalidArgumentException('--buildroot requires --libs-only.');
+        }
         $libraries = $input->getOption('libraries');
         $libraries = $libraries === null ? null : array_values(array_filter(array_map('trim', explode(',', $libraries))));
         if ($libraries === [] || ($libraries !== null && !$libsOnly)) {
@@ -50,7 +55,7 @@ class PackageCommand extends BaseCommand
         }
 
         // All parameters now come from constants set by BaseCommand::initialize()
-        $result = CreatePackages::run($packageNames, $iteration, $debuginfo, $bump, $libsOnly, $libraries);
+        $result = CreatePackages::run($packageNames, $iteration, $debuginfo, $bump, $libsOnly, $libraries, $buildroot);
 
         if ($result) {
             $output->writeln("Package creation completed successfully.");
