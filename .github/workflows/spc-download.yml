@@ -235,7 +235,7 @@ jobs:
                 env:
                     GH_TOKEN: ${{ secrets.GH_PAT }}
                     PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
-                    BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
+                    BUMP: ${{ inputs.bump || false }}
                 run: |
                     set -euo pipefail
                     for workflow in build-rpm-modular-packages.yml build-apk-forgejo.yml; do

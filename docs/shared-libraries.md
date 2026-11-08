@@ -139,6 +139,22 @@ changes reuse sealed PHP payloads; extension-only changes reuse the verified cor
 `bump` defaults to false; explicit iterations take precedence. `publish=false`
 builds and tests without repository or release-cache writes.
 
+To publish those tested archives later, dispatch `publish-packages.yml` with
+`format=rpm`, `format=deb` or `format=apk` and `build_run_id=<package-build-run>`.
+Each dispatch publishes only its selected format. RPM and DEB refer to the same
+shared EL8 run; APK refers to its native Alpine run. This does not compile,
+repackage, change package revisions or save release caches. Set `bump=true` on
+the original build if revision bumps are needed.
+
+The selected run must have completed on the default branch. Complete architecture
+cohorts can be published even if another architecture failed. Missing or expired
+artifacts exclude that architecture; no complete cohort is an error. Plans,
+packages and their validation receipts are retained for seven days in new builds.
+The publisher uses the recorded image digests and immutable artifact IDs, checks
+native upgrade receipts against archive hashes, signs RPMs, and reruns the cohort
+and current repository version guards before uploading. Concurrent
+publication to the same format and architecture is serialized across workflows.
+
 Each producer and architecture caches its whole SDK buildroot as a weekly release
 asset. Daily builds restore a compatible SDK, check source and build inputs,
 rebuild changed libraries and genuine ABI dependents, and save the whole updated

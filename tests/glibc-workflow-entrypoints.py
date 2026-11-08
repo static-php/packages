@@ -45,7 +45,7 @@ class SharedGlibcEntrypoints(unittest.TestCase):
         self.assertFalse(events['workflow_dispatch']['inputs']['publish']['default'])
         self.assertFalse(events['workflow_dispatch']['inputs']['bump']['default'])
         self.assertEqual(trigger['env']['PUBLISH'], "${{ github.event_name == 'schedule' || inputs.publish }}")
-        self.assertEqual(trigger['env']['BUMP'], "${{ github.event_name != 'workflow_dispatch' || inputs.bump }}")
+        self.assertEqual(trigger['env']['BUMP'], "${{ inputs.bump || false }}")
         self.assertIn('build-rpm-modular-packages.yml build-apk-forgejo.yml', dispatch)
         self.assertNotIn('build-deb-forgejo.yml', dispatch)
         self.assertIn('downloads_run_id="$GITHUB_RUN_ID"', dispatch)
@@ -58,7 +58,7 @@ class SharedGlibcEntrypoints(unittest.TestCase):
                           ' output.write(json.dumps(sys.argv[1:]) + "\\n")\n')
             gh.chmod(0o755)
             cases = [('review/single-el8', 'false', 'false'), ('review/single-el8', 'true', 'false'),
-                     ('review/single-el8', 'true', 'true'), ('master', 'true', 'true')]
+                     ('review/single-el8', 'true', 'true'), ('master', 'true', 'false')]
             for branch, publish, bump in cases:
                 with self.subTest(branch=branch, publish=publish, bump=bump):
                     capture.write_text('')
@@ -104,16 +104,17 @@ class SharedGlibcEntrypoints(unittest.TestCase):
 
     def test_second_registry_cannot_bypass_cohort_validation(self):
         data, _ = workflow('build-rpm-modular-packages.yml')
-        steps = data['jobs']['publish']['steps']
+        publisher = data['jobs']['publish']['uses']
+        steps = yaml.safe_load((ROOT / publisher).read_text())['jobs']['publish-glibc']['steps']
         guard = next(step for step in steps if step.get('name') == 'Verify complete cohort and all upgrade guards')
-        second = next(step for step in steps if step.get('name') == 'Publish DEB cohort to second existing registry')
+        second = next(step for step in steps if step.get('name') == 'Publish cohort to second existing registry')
         cases = [('failure', False, 'deb', False), ('skipped', False, 'deb', False),
                  ('success', False, 'deb', True), ('success', True, 'deb', False),
                  ('success', False, 'rpm', False)]
         for outcome, cancelled, kind, expected in cases:
             with self.subTest(outcome=outcome, cancelled=cancelled, kind=kind):
                 expression = second['if'].strip().removeprefix('${{').removesuffix('}}').strip()
-                expression = expression.replace('cancelled()', repr(cancelled)).replace('matrix.type', repr(kind))
+                expression = expression.replace('cancelled()', repr(cancelled)).replace('env.TYPE', repr(kind))
                 expression = expression.replace('steps.' + guard['id'] + '.outcome', repr(outcome))
                 expression = expression.replace('&&', ' and ').replace('||', ' or ')
                 expression = re.sub(r'!(?!=)', 'not ', expression)

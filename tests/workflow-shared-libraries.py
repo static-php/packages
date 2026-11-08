@@ -574,6 +574,12 @@ class ArtifactReceiptTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def publication_steps(self, data):
+        call = data['jobs']['publish']
+        publisher = yaml.safe_load((ROOT / call['uses']).read_text())
+        job = 'publish-apk' if call['with']['format'] == 'apk' else 'publish-glibc'
+        return publisher['jobs'][job]['steps']
+
     def workflows(self):
         for name in ['build-rpm-modular-packages.yml', 'build-apk-forgejo.yml']:
             path = ROOT / '.github/workflows' / name
@@ -585,9 +591,9 @@ class WorkflowContractTests(unittest.TestCase):
                 runs = '\n'.join(step.get('run', '') for step in data['jobs'][job_name]['steps'])
                 self.assertNotIn(' upload ', runs, name)
                 self.assertNotIn('rsync ', runs, name)
-            publish = data['jobs']['publish']['steps']
+            publish = self.publication_steps(data)
             preflight = next(index for index, step in enumerate(publish) if step['name'] in ['Verify complete cohort and all downgrade guards', 'Verify complete cohort and all upgrade guards'])
-            upload = next(index for index, step in enumerate(publish) if step['name'].startswith(('Upload complete', 'Publish consumers', 'Publish DEB', 'Stage and promote')))
+            upload = next(index for index, step in enumerate(publish) if step['name'].startswith(('Publish cohort', 'Stage and promote')))
             self.assertLess(preflight, upload)
             self.assertIn('!cancelled()', data['jobs']['publish']['if'])
 
@@ -643,7 +649,7 @@ class WorkflowContractTests(unittest.TestCase):
         cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
         self.assertIn('inputs.publish == true', cache['if'])
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
-        publish = data['jobs']['publish']['steps']
+        publish = self.publication_steps(data)
         names = [step['name'] for step in publish]
         self.assertLess(names.index('Verify native ordinary upgrade receipts'), names.index('Sign RPM packages'))
         self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Stage and promote canonical RPM generation'))

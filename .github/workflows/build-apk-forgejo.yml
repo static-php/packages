@@ -276,7 +276,7 @@ jobs:
                     path: |
                         stage/shared-library-plan.json
                         stage/target.json
-                    retention-days: 1
+                    retention-days: 7
             -   name: Stage common SDK buildroot
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
@@ -291,7 +291,7 @@ jobs:
                     overwrite: true
                     name: shared-libs-apk-${{ matrix.target }}
                     path: stage
-                    retention-days: 1
+                    retention-days: 7
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -496,7 +496,7 @@ jobs:
                     overwrite: true
                     name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-apk-${{ matrix.target }}-php${{ matrix.php-version }}
                     path: dist/apk
-                    retention-days: 1
+                    retention-days: 7
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -515,64 +515,21 @@ jobs:
                     key: composer-${{ hashFiles('**/composer.lock') }}
 
     publish:
-        name: Publish (${{ matrix.target }})
+        name: Publish (apk ${{ matrix.target }})
         needs: [setup-matrix, compute-build-matrix, build]
         if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: read
             packages: read
             actions: read
-        defaults:
-            run:
-                shell: bash
         strategy:
             fail-fast: false
             matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        env:
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: apk
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            MODE: ${{ inputs.mode || 'full' }}
-            LIBRARIES: ${{ inputs.libraries || '' }}
-            PHP_VERSIONS: ${{ inputs.php_versions || '' }}
-            PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
-            PHPV: ${{ matrix.php-version || '' }}
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ inputs.bump || false }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
-            IMAGE: ${{ matrix.image }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Log in to GHCR and pull builder
-                env:
-                    ACTOR: ${{ github.actor }}
-                run: |
-                    echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-                    docker pull "$IMAGE"
-            -   name: Download complete staged cohort
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    pattern: shared-*-apk-${{ matrix.target }}*
-                    path: cohort
-            -   name: Verify native ordinary upgrade receipts
-                run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
-            -   name: Verify complete cohort and all downgrade guards
-                run: bash .github/actions/shared-libraries/run.sh publish
-            -   name: Publish consumers then libraries on host 1
-                id: host-1
-                continue-on-error: true
-                run: bash .github/actions/shared-libraries/run.sh upload-1
-            -   name: Publish consumers then libraries on host 2
-                id: host-2
-                continue-on-error: true
-                run: bash .github/actions/shared-libraries/run.sh upload-2
-            -   name: Report publication failures
-                if: ${{ !cancelled() && (steps.host-1.outcome == 'failure' || steps.host-2.outcome == 'failure') }}
-                run: exit 1
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            format: apk
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+        secrets: inherit

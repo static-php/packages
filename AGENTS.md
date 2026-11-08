@@ -13,6 +13,8 @@ Builds RPM/DEB/APK packages (PHP toolchain, gcc) via GitHub Actions, using repro
   - `build-rpm-modular-packages.yml` — one EL8 glibc producer × x86_64/arm64 × PHP 8.2–8.6; packages the same common binaries as RPM and DEB. RPM runtime tests run only on EL8. RPM publication stages and atomically promotes one canonical repository per architecture, with legacy EL9/EL10 URL aliases.
   - `build-deb-forgejo.yml` — delegates to the shared EL8 workflow; it does not compile a separate Debian payload.
   - `build-apk-forgejo.yml` — separate native Alpine/musl producer. DEB/APK publish each PHP stream to its existing Forgejo owner (`82`…`86`, from `getForgejoOwner()`), including its private libraries, so clients keep their existing version-specific repository URLs.
+  - `publish-packages.yml` — publishes one selected format (`rpm`, `deb` or `apk`) from a completed default-branch `build_run_id`, without compiling or repackaging. RPM and DEB use the same shared EL8 build run; APK uses its Alpine run.
+  - `publish-package-cohort.yml` — reusable publisher called by both the build workflows and `publish-packages.yml` with `secrets: inherit`. It verifies receipts, signs packages and checks current repository upgrades. Its EL8/Debian container job and Alpine host job share publication steps through a YAML anchor.
   - `build-images.yml` — builds the EL8 and Alpine producer images and Debian packaging image.
   - `spc-download.yml` — produces the `downloads-tarball` artifact that the build workflows pull via `dawidd6/action-download-artifact`.
   - `zizmor.yml` — workflow security audit.
@@ -112,6 +114,7 @@ python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" .github/workflow
 python3 tests/glibc-workflow-entrypoints.py
 python3 tests/workflow-shared-libraries.py
 python3 tests/glibc-pipeline.py
+python3 tests/package-publication.py
 ```
 
 The Plan/Explore agents can also read large workflow files, but for these targeted edits prefer Read + Edit directly.
@@ -135,7 +138,7 @@ The shared glibc workflow, its DEB wrapper and the Alpine workflow accept these 
 - `downloads_run_id` — pins the `spc-download` source snapshot; automatic dispatches pass their own run ID, and empty preserves the download action's latest-artifact lookup.
 - `architectures` — `x86_64,arm64`; the glibc workflow and DEB wrapper also accept `amd64` for x86_64. EL8 is the fixed glibc producer; there is no `alma_versions` input.
 - `packages` — passed through to `bin/spp` as `--packages=…`.
-- `iteration` — passed through as `--iteration=…` and overrides automatic bumping. `bump` defaults to false; scheduled `spc-download` dispatches pass `bump=true`. Forgejo revision queries paginate the full authenticated registry and cache each page.
+- `iteration` — passed through as `--iteration=…` and overrides automatic bumping. `bump` defaults to false, including scheduled `spc-download` dispatches; only an explicit manual `bump=true` requests forced revision bumps. Forgejo revision queries paginate the full authenticated registry and cache each page.
 - `publish` — defaults to false: build/test only, without package publication or release-cache writes. Scheduled `spc-download` dispatches set it true.
 - `debug_tmate` — opens tmate on failure (only after build step; tmate binary is downloaded inline because Alma doesn't ship it).
 
@@ -150,7 +153,7 @@ When the user asks to "rerun for X only", they mean these inputs.
 - RPM archives are staged via `rsync` over SSH beneath `/mnt/data/rpm/{x86_64|aarch64}/.php-zts/`. The checked-out `bin/canonical-rpm-repository` and `bin/createrepo_static` are copied with the validated cohort; `stage` and `promote --activate-aliases` publish one complete generation while retaining cached legacy URLs. DEB/APK upload to the two existing Forgejo registries after cohort and native upgrade guards pass.
 - RPM signing: GPG key from `secrets.DEB_GPG_PRIVATE_KEY` + passphrase `DEB_GPG_PASSWORD`, loaded into `~/.rpmmacros` and used by `rpmsign --addsign`.
 - `actions/cache` stores Composer downloads keyed on `composer.lock`; reusable compiled SDKs and PHP payloads use the release cache described above.
-- `shared-sdk-*`, `shared-payload-*` and package/plan artifacts use `retention-days: 1` as intermediates.
+- `shared-sdk-*` and `shared-payload-*` artifacts use `retention-days: 1` as intermediates. Package cohorts, validation receipts and target plans are retained for seven days for independent publication. Publish-only runs pin artifact IDs and the recorded builder/packager digests, and share per-format/per-target publication locks with normal builds. An incomplete architecture is excluded; a selected cohort must pass every publication guard. Publishing preserves the built versions/revisions and does not populate release caches.
 
 ## Comments
 

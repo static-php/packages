@@ -62,3 +62,18 @@ produces both package formats without a second compilation.
 Debian images provide packaging and runtime-test tools; production glibc
 compilation runs in the EL8 builder. Use the shared glibc workflow with
 `publish=false` to build and validate without updating repositories.
+
+Publish an existing validated build with `publish-packages.yml`, selecting one
+format at a time. RPM and DEB use the same shared EL8 build run ID; APK uses its
+Alpine build run ID:
+
+```sh
+gh workflow run publish-packages.yml --ref master -f format=rpm -f build_run_id="$GLIBC_RUN_ID"
+gh workflow run publish-packages.yml --ref master -f format=deb -f build_run_id="$GLIBC_RUN_ID"
+gh workflow run publish-packages.yml --ref master -f format=apk -f build_run_id="$ALPINE_RUN_ID"
+```
+
+This publishes the built versions without compilation or repackaging. Build runs
+must be completed on the default branch and still have their package artifacts,
+retained for seven days. Existing artifacts keep their original expiry. Publication
+rechecks upgrade receipts and current repository versions before uploading.

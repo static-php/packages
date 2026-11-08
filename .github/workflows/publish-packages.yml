@@ -1,0 +1,78 @@
+name: Publish existing packages
+run-name: Publish ${{ inputs.format }} packages from build ${{ inputs.build_run_id }}
+
+on:
+    workflow_dispatch:
+        inputs:
+            format:
+                description: "Package format to publish independently"
+                type: choice
+                options: [rpm, deb, apk]
+                required: true
+            build_run_id:
+                description: "Existing package build run ID (shared EL8 for RPM/DEB, Alpine for APK)"
+                type: string
+                required: true
+
+permissions:
+    contents: read
+    packages: read
+    actions: read
+
+jobs:
+    prepare:
+        runs-on: ubuntu-24.04
+        outputs:
+            matrix: ${{ steps.matrix.outputs.matrix }}
+            any: ${{ steps.matrix.outputs.any }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Inspect completed package build
+                id: inspect
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                    BUILD_RUN_ID: ${{ inputs.build_run_id }}
+                    TYPE: ${{ inputs.format }}
+                    DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+                run: |
+                    python3 .github/actions/shared-libraries/publication.py inspect \
+                        --run-id "$BUILD_RUN_ID" --type "$TYPE" --branch "$DEFAULT_BRANCH" \
+                        --output publication.json >> "$GITHUB_OUTPUT"
+            -   name: Download recorded build plans
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.build_run_id }}
+                    artifact-ids: ${{ steps.inspect.outputs.plan-artifact-ids }}
+                    path: plans
+            -   name: Select complete package cohorts
+                id: matrix
+                run: |
+                    python3 .github/actions/shared-libraries/publication.py matrix \
+                        --state publication.json --plans plans >> "$GITHUB_OUTPUT"
+
+    publish:
+        name: Publish (${{ matrix.type }} ${{ matrix.target }})
+        needs: prepare
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            format: ${{ matrix.type }}
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            package-image: ${{ matrix.package-image }}
+            source-run-id: ${{ matrix.source-run-id }}
+            build-run-id: ${{ inputs.build_run_id }}
+            artifact-ids: ${{ matrix.artifact-ids }}
+        secrets: inherit

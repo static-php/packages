@@ -323,7 +323,7 @@ jobs:
                     path: |
                         stage/common/shared-library-plan.json
                         stage/common/target.json
-                    retention-days: 1
+                    retention-days: 7
             -   name: Stage common SDK metadata
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
@@ -345,14 +345,14 @@ jobs:
                     overwrite: true
                     name: shared-libs-rpm-${{ matrix.target }}
                     path: stage/rpm
-                    retention-days: 1
+                    retention-days: 7
             -   name: Stage DEB library packages
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
                     name: shared-libs-deb-${{ matrix.target }}
                     path: stage/deb
-                    retention-days: 1
+                    retention-days: 7
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -725,7 +725,7 @@ jobs:
                     overwrite: true
                     name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-${{ matrix.type }}-${{ matrix.target }}-php${{ matrix.php-version }}
                     path: dist/${{ matrix.type }}
-                    retention-days: 1
+                    retention-days: 7
             -   name: Stage failed validation receipt
                 if: failure()
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -740,85 +740,19 @@ jobs:
         name: Publish (${{ matrix.type }} ${{ matrix.target }})
         needs: [setup-matrix, compute-build-matrix, package]
         if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ${{ matrix.package-image }}
         permissions:
             contents: read
             packages: read
             actions: read
-        defaults:
-            run:
-                shell: bash
         strategy:
             fail-fast: false
             matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        env:
-            IMAGE: ${{ matrix.image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: ${{ matrix.type }}
-            GLIBC_PIPELINE: true
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            MODE: ${{ inputs.mode || 'full' }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-            RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Select supported Python
-                run: |
-                    if command -v python3.9 >/dev/null 2>&1; then
-                        mkdir -p "$RUNNER_TEMP/spp-python"
-                        ln -sf "$(command -v python3.9)" "$RUNNER_TEMP/spp-python/python3"
-                        echo "$RUNNER_TEMP/spp-python" >> "$GITHUB_PATH"
-                    fi
-            -   name: Set up SSH key
-                uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
-                with:
-                    ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
-            -   name: Trust repository host
-                run: |
-                    mkdir -p ~/.ssh
-                    cat >> ~/.ssh/known_hosts <<'EOF'
-                    ${{ secrets.DEB_SERVER_IP }} ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPQq0y77dDEtxECVMhCxjcqiV369goMcbInsY/d+F1yXGwqOXQ6RqIEzgaVhgq0joMJT5BiGXNXQ+OI10/KtzGI=
-                    ${{ secrets.DEB_SERVER_IP }} ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2laCc5jifgjL/2zLzgP1E/X3kouXdaZv00KtAV1DOO5umThoWzb16cswnVtjtLUEMIuo9rPLB79xX2Asa+nN3uMgJDANnr/xnhRoI++yOGLga40/O69U88j5x+5FXODscH/k4n85mfcjzm/fZLXcHlb17ibCmU20I3v46sydn95Pp4/ShDvqsHVB4gWEKJ+jStkooUz2H1UZ8ZquNtaPTlmkOeClNj6gxag74P5b9VB6M5YNac2Emi3Nm0dYkc+BL0Qv+NEtFR1lR63DLa3O/NGTALGJYGmTUkjwiv8KygegaKhd2zxESmWhV7eYIPax8zL+GE9sX1Xwwh1huS0vsuwr2dXPP1/q5slz1AQV/lx85fGdiHc0F8RUXwqXbvGxZJheTuC/Mgu0cFzp5gqO4kTP28X+9fokzScBKBCIfObDXrl7rZgTXAA8IQ5gHk1tGchaEOIcDsjdISW5HVOiwocYSwUNMHzuZ08qAulatIywtOGcWVRdvOs7TcvSgfZ0=
-                    ${{ secrets.DEB_SERVER_IP }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
-                    EOF
-                    chmod 600 ~/.ssh/known_hosts
-            -   name: Set canonical RPM repository paths
-                run: |
-                    arch="$MATRIX_ARCH"
-                    if [[ "$arch" == arm64 ]]; then arch=aarch64; fi
-                    echo "RPM_DIRECTORY=/mnt/data/rpm/$arch/el8" >> "$GITHUB_ENV"
-            -   name: Download complete staged cohort
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    pattern: shared-*-${{ matrix.type }}-${{ matrix.target }}*
-                    path: cohort
-            -   name: Assemble cohort packages
-                run: bash .github/actions/shared-libraries/run.sh assemble
-            -   name: Verify native ordinary upgrade receipts
-                run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
-            -   name: Sign RPM packages
-                if: matrix.type == 'rpm'
-                env:
-                    RPM_SIGNING_KEY: ${{ secrets.DEB_GPG_PRIVATE_KEY }}
-                    RPM_SIGNING_PASSWORD: ${{ secrets.DEB_GPG_PASSWORD }}
-                run: bash .github/actions/shared-libraries/sign-rpm.sh
-            -   name: Verify complete cohort and all upgrade guards
-                id: cohort-guard
-                run: bash .github/actions/shared-libraries/run.sh publish
-            -   name: Publish DEB cohort to first existing registry
-                if: matrix.type == 'deb'
-                run: bash .github/actions/shared-libraries/run.sh upload-1
-            -   name: Publish DEB cohort to second existing registry
-                if: ${{ !cancelled() && matrix.type == 'deb' && steps.cohort-guard.outcome == 'success' }}
-                run: bash .github/actions/shared-libraries/run.sh upload-2
-            -   name: Stage and promote canonical RPM generation
-                if: matrix.type == 'rpm'
-                run: bash .github/actions/shared-libraries/run.sh publish-rpm
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            format: ${{ matrix.type }}
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            package-image: ${{ matrix.package-image }}
+            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+        secrets: inherit
