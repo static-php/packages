@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 
-from workflow import STREAMS, emit
+from workflow import STREAMS, emit, image_digest
 
 
 WORKFLOWS = {
@@ -85,7 +85,7 @@ def publication_matrix(state, plans):
             print('::warning::Skipping incomplete ' + kind + ' ' + identity + ': missing or expired ' + ', '.join(missing), file=sys.stderr)
             continue
         includes.append({'type': kind, 'target': identity, 'arch': arch, 'image': image,
-                         'package-image': packaging, 'source-run-id': source_run,
+                         'package-image': packaging, 'package-image-digest': image_digest(packaging), 'source-run-id': source_run,
                          'artifact-ids': ','.join(str(state['artifacts'][name]) for name in required)})
     if not includes:
         raise RuntimeError('No complete retained ' + kind + ' package cohort is available to publish')

@@ -22,6 +22,13 @@ def emit(name, value):
     print(name + "=" + encoded)
 
 
+def image_digest(image):
+    match = re.fullmatch(r"[^\s@]+@sha256:([a-f0-9]{64})", image)
+    if match is None:
+        raise RuntimeError("Publication requires an image pinned by SHA256")
+    return match.group(1)
+
+
 def stable_artifact(value):
     if not isinstance(value, dict):
         return value
@@ -311,7 +318,8 @@ def main():
         runtime_checks([entry for entry in includes if entry.get("type") == "apk"])
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
-        publishing = [dict(target, type=kind, **{"package-image": target["package_images"][kind]}) for target in targets for kind in ["rpm", "deb"]
+        publishing = [dict(target, type=kind, **{"package-image": target["package_images"][kind],
+                      "package-image-digest": image_digest(target["package_images"][kind])}) for target in targets for kind in ["rpm", "deb"]
                       if kind not in target.get("format_selection", {}) or target["format_selection"][kind].get("libraries") or any(request.get("full") or request.get("packages") for request in target["format_selection"][kind].get("php_requests", {}).values())] if any("package_images" in target for target in targets) else targets
         emit("publish-matrix", {"include": publishing})
         emit("publish-any", str(bool(publishing)).lower())

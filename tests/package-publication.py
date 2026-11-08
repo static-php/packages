@@ -69,6 +69,8 @@ class Publication(unittest.TestCase):
             self.assertEqual(first['image'], second['image'])
             self.assertEqual(first['source-run-id'], '123')
             self.assertNotEqual(first['package-image'], second['package-image'])
+            self.assertEqual(first['package-image-digest'], 'b' * 64)
+            self.assertEqual(second['package-image-digest'], 'c' * 64)
             self.assertFalse(set(first['artifact-ids'].split(',')) & set(second['artifact-ids'].split(',')))
         self.assertEqual({value['type'] for value in rpm}, {'rpm'})
         self.assertEqual({value['type'] for value in deb}, {'deb'})
@@ -83,6 +85,13 @@ class Publication(unittest.TestCase):
         self.assertIn('packages-builder-alpine@sha256:', value['image'])
         with self.assertRaisesRegex(RuntimeError, 'supported glibc'):
             self.state('deb')
+
+    def test_publication_digest_rejects_tags_and_malformed_hashes(self):
+        image = 'ghcr.io/static-php/packages-packager-debian'
+        self.assertEqual(publication.image_digest(image + '@sha256:' + 'a' * 64), 'a' * 64)
+        for suffix in ['', ':latest', '@sha256:short', '@sha256:' + 'z' * 64, '@sha256:' + 'a' * 64 + '@extra']:
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(RuntimeError, 'pinned by SHA256'):
+                publication.image_digest(image + suffix)
 
     def test_debian_wrapper_run_is_supported(self):
         self.run['path'] = '.github/workflows/build-deb-forgejo.yml'
@@ -209,10 +218,13 @@ class WorkflowContracts(unittest.TestCase):
                 self.assertEqual(job['with']['source-run-id'], '${{ matrix.source-run-id }}')
             else:
                 self.assertEqual(job['with']['source-run-id'], '${{ needs.setup-matrix.outputs.downloads-run-id }}')
+            if name != 'build-apk-forgejo.yml':
+                self.assertEqual(job['with']['package-image-digest'], '${{ matrix.package-image-digest }}')
         self.assertEqual(self.publisher['concurrency'], {
             'group': 'shared-publish-${{ inputs.format }}-${{ inputs.target }}', 'cancel-in-progress': False})
         self.assertNotIn('container', self.publisher['jobs']['publish-apk'])
-        self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'], '${{ inputs.package-image }}')
+        self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
+                         "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")
         self.assertEqual(self.publisher['jobs']['publish-glibc']['steps'], self.publisher['jobs']['publish-apk']['steps'])
 
     def test_publisher_reads_inherited_secrets_directly(self):

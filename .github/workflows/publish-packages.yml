@@ -71,7 +71,7 @@ jobs:
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}
-            package-image: ${{ matrix.package-image }}
+            package-image-digest: ${{ matrix.package-image-digest }}
             source-run-id: ${{ matrix.source-run-id }}
             build-run-id: ${{ inputs.build_run_id }}
             artifact-ids: ${{ matrix.artifact-ids }}

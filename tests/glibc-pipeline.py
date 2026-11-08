@@ -80,7 +80,7 @@ class Pipeline(unittest.TestCase):
             target = root / 'target'
             target.mkdir()
             (target / 'target.json').write_text(json.dumps({'target': 'alma8-x86_64', 'arch': 'x86_64',
-                'image': 'producer', 'package_images': {'rpm': 'rpm-image', 'deb': 'deb-image'}}))
+                'image': 'producer', 'package_images': {'rpm': 'rpm-image@sha256:' + 'a' * 64, 'deb': 'deb-image@sha256:' + 'b' * 64}}))
             (target / 'shared-library-plan.json').write_text(json.dumps({'php_requests': {}, 'libraries': ['zlib']}))
             self.assertEqual(workflow.matrix(root, workflow.STREAMS)[0], [])
             result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'packages', '--plans', root,
@@ -96,7 +96,7 @@ class Pipeline(unittest.TestCase):
             target = root / 'target'
             target.mkdir()
             (target / 'target.json').write_text(json.dumps({'target': 'alma8-x86_64', 'arch': 'x86_64',
-                'image': 'producer', 'package_images': {'rpm': 'rpm-image', 'deb': 'deb-image'}}))
+                'image': 'producer', 'package_images': {'rpm': 'rpm-image@sha256:' + 'a' * 64, 'deb': 'deb-image@sha256:' + 'b' * 64}}))
             plan = glibc.combine_plans({'rpm': {'libraries': [], 'php_requests': {}},
                                        'deb': {'libraries': ['openssl'], 'php_requests': {}}})
             (target / 'shared-library-plan.json').write_text(json.dumps(plan))
@@ -107,6 +107,7 @@ class Pipeline(unittest.TestCase):
             result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'matrix', '--plans', root], text=True)
             publish = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('publish-matrix=')))['include']
             self.assertEqual([value['type'] for value in publish], ['deb'])
+            self.assertEqual(publish[0]['package-image-digest'], 'b' * 64)
 
     def test_native_services_and_tls_are_deduplicated_per_format_and_architecture(self):
         values = [{'target': 'alma8-' + arch, 'type': kind, 'php-version': stream, 'packages': ''}

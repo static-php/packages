@@ -16,8 +16,8 @@ on:
                 description: Pinned producer image
                 type: string
                 required: true
-            package-image:
-                description: Pinned RPM or DEB packaging image
+            package-image-digest:
+                description: SHA256 digest of the RPM or DEB packaging image
                 type: string
                 default: ""
             source-run-id:
@@ -65,7 +65,7 @@ jobs:
         if: inputs.format == 'rpm' || inputs.format == 'deb'
         runs-on: ubuntu-24.04${{ inputs.arch == 'arm64' && '-arm' || '' }}
         container:
-            image: ${{ inputs.package-image }}
+            image: ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}
         steps: &publish-steps
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

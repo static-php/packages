@@ -753,6 +753,6 @@ jobs:
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}
-            package-image: ${{ matrix.package-image }}
+            package-image-digest: ${{ matrix.package-image-digest }}
             source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
         secrets: inherit
