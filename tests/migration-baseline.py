@@ -42,6 +42,23 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_deleted_apk_versions_are_not_selected_from_stale_index(self):
+        stale = {'name': 'php-zts-igbinary', 'version': '3.2.17~rc1_84-r1'}
+        current = {'name': 'php-zts-igbinary', 'version': '3.2.17_rc1_p84-r0'}
+        cli = {'name': 'php-zts-cli', 'version': '8.4.27-r1'}
+        calls = []
+        def packages(*args):
+            calls.append(args)
+            return [current, cli]
+        scope = helper['registered_apk_packages'].__globals__
+        with patch.dict(scope, {'runpy': SimpleNamespace(run_path=lambda path: {'get_remote_packages': packages})}):
+            available = helper['registered_apk_packages']([stale, current, cli], '84')
+        self.assertEqual(available, [current, cli])
+        self.assertEqual(calls[0][:2], ('https://git.henderkes.com', '84'))
+        with patch.dict(scope, {'runpy': SimpleNamespace(run_path=lambda path: {'get_remote_packages': lambda *args: (_ for _ in ()).throw(RuntimeError('registry unavailable'))})}):
+            with self.assertRaisesRegex(RuntimeError, 'registry unavailable'):
+                helper['registered_apk_packages']([stale, current, cli], '84')
+
     def test_apk_checksum_is_control_member_not_signature_or_file_hash(self):
         signature = tar_member('.SIGN.RSA.example.rsa.pub', b'signature')
         control = tar_member('.PKGINFO', b'pkgname = php-zts-cli\npkgver = 8.6.0_rc4-r3\n')

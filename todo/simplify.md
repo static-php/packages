@@ -85,6 +85,10 @@ Alpine x86_64 SDK job `128789019049` then rebuilt exactly ngtcp2 in 31 seconds, 
 
 The corrected Alpine jobs `128790898718` and `128790898725` passed that guard and confirmed the intended ABI scope: 67 cached classifications reused and only ngtcp2 analyzed. Planning then failed at `package_versions.pop(type, None)` because SPC's PHP associative-array round-trip changed an empty map from `{}` to `[]`. The planner normalizes only an empty list back to a map at its manifest boundary and rejects populated lists. Native PHP round-trip tests preserve real per-format versions. This is a representation correction, not permission to discard published versions or weaken publication checks.
 
+### Native upgrade baseline selected deleted APK index entries
+
+Alpine job `128795850139` in run `42500878781` restored PHP 8.4 with `consumer_cache_reused: true` and `changed_components: []`, then passed package creation, installation and loader checks. Freezing its published upgrade baseline failed with HTTP 404. The served APK index still listed two historical igbinary versions containing `~` that no longer existed in the primary registry. Their corrected version existed and downloaded with its original index checksum. Baseline selection now cross-checks indexed APK identities against the primary registry before native version selection. Registry errors still abort, and archives still require their published checksum. The live PHP 8.4 x86_64 check removed exactly those two stale entries and verified both remaining igbinary versions. This does not waive native upgrade testing or authorize skipping an existing package whose download fails.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
