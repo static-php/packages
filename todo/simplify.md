@@ -62,6 +62,10 @@ Run `42493776131` restored PHP 8.3/8.5 payloads with `changed_components: []`, t
 
 The subsequent native packaging check found SPX's web UI was also omitted from the PHP cache. Asset refresh now records it under `packaging/spx/web-ui`, and cache export retains it with its module. Existing caches recover the UI from the already downloaded source archive, verified against the compiled source lock; cache graft preserves that provenance. Rebuilt SPX replaces its old UI, while skipped SPX retains no old UI. The real cached Alpine PHP 8.5 payload then created AMQP, MySQLi, Xdebug, SPX, CLI and devel APKs successfully without compilation. `tests/extension-assets.php` covers legacy recovery, archive mismatch rejection, sealed inventory, replacement and reuse. This native check does not replace CI installation, upgrade and publication validation.
 
+### EL8 selected PHP cache keys before initializing their inputs
+
+Job `128776908029` in run `42493778798` compiled and sealed PHP 8.3 successfully, then failed export with `PHP cache export inputs do not match its requested key`. Its key step ran the Python helper directly before Composer installation. The later build initialized vendor files and installed-tool metadata, changing the inputs. A local checkout without vendor files reproduced the exact CI seed `77b55af48ca17f39355467ac0a91606d`; populating vendor changed its core fingerprint, while repeated initialized reads were stable. EL8 now uses the same `run.sh payload-key` preparation already used by Alpine. The existing sealed common-payload upload also runs before release-cache export, preserving completed compilation if export fails. Downstream jobs still require a successful producer job. The failed PHP 8.3 output was not saved; do not claim it can be reused. The four SDK caches remain available and require no library recompilation.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

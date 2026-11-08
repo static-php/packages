@@ -501,7 +501,7 @@ jobs:
             -   name: Compute sealed PHP cache identity
                 id: payload-cache-key
                 run: |
-                    python3 .github/actions/shared-libraries/payload-cache.py key --root . --stream "$PHPV" --manifest buildroot/shared-libraries.json --compatibility stage/library-compatibility | tee stage/payload-cache-inputs
+                    bash .github/actions/shared-libraries/run.sh payload-key | tee stage/payload-cache-inputs
                     key=$(sed -n 's/^key=//p' stage/payload-cache-inputs)
                     seed=$(sed -n 's/^seed-key=//p' stage/payload-cache-inputs)
                     printf '%s\n' "$key" > stage/payload-cache-key
@@ -518,6 +518,16 @@ jobs:
                     path: php-payload-cache.tar.zst
             -   name: Build and seal common PHP payload
                 run: bash .github/actions/shared-libraries/run.sh glibc-payload
+            -   name: Pack sealed common payload
+                run: tar -cf - "build/$PHPV" stage/payload-provenance.json | zstd -f -o php-payload.tar.zst
+            -   name: Stage sealed common payload
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
+                    path: php-payload.tar.zst
+                    compression-level: 0
+                    retention-days: 1
             -   name: Export PHP-only sealed cache
                 run: |
                     source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
@@ -542,16 +552,6 @@ jobs:
                             break
                         fi
                     done
-            -   name: Pack sealed common payload
-                run: tar -cf - "build/$PHPV" stage/payload-provenance.json | zstd -f -o php-payload.tar.zst
-            -   name: Stage sealed common payload
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: php-payload.tar.zst
-                    compression-level: 0
-                    retention-days: 1
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

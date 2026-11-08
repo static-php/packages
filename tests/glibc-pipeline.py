@@ -30,6 +30,17 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_payload_cache_key_initializes_build_inputs_and_sealed_output_survives_export_failure(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
+        steps = next(job['steps'] for job in workflow['jobs'].values()
+                     if any(step.get('name') == 'Build and seal common PHP payload' for step in job.get('steps', [])))
+        names = [step.get('name') for step in steps]
+        key = steps[names.index('Compute sealed PHP cache identity')]['run']
+        self.assertIn('run.sh payload-key', key)
+        self.assertLess(names.index('Build and seal common PHP payload'), names.index('Stage sealed common payload'))
+        self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
+
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
         for rebuilt, cached_variants in [(False, False), (False, True), (True, False)]:
             with self.subTest(rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
