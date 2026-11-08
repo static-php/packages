@@ -322,16 +322,7 @@ def package_metadata(pkg_file, pkg_type):
     with open(pkg_file, 'rb') as archive:
         return apk_metadata(archive)
 
-def comparison_version(pkg_type, version):
-    if pkg_type == 'debian':
-        pattern = r'(\+php\d+\.\d+(?:~{1,2}(?:alpha|beta|rc|dev)\d*)?)\+ext(?=-|$)'
-    else:
-        pattern = r'(p\d+\.\d+(?:_(?:alpha|beta|rc|dev)\d*)*)_p0(?=-r\d+$)'
-    return re.sub(pattern, r'\1', version)
-
 def version_is_newer(pkg_type, left, right):
-    left = comparison_version(pkg_type, left)
-    right = comparison_version(pkg_type, right)
     if pkg_type == 'debian':
         result = subprocess.run(['dpkg', '--compare-versions', left, 'gt', right])
         if result.returncode not in [0, 1]:

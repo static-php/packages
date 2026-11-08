@@ -117,10 +117,6 @@ def same_archive(local, remote):
         raise PackageDowngradeError('Refusing different bytes for existing RPM {} {}'.format(local['name'], local['evr']))
 
 
-def comparison_evr(evr):
-    return re.sub(r'(_\d+\.\d+(?:~{1,2}(?:alpha|beta|rc|dev)\d*)?)\+ext(?=-|$)', r'\1', evr)
-
-
 def verify_package(local, published, stream=None):
     independent = local['name'].startswith('php-zts-lib-') or re.sub(r'-debuginfo$', '', local['name']) == 'php-zts-runtime-layout'
     local_stream = None if independent else php_stream(local['version'])
@@ -130,7 +126,7 @@ def verify_package(local, published, stream=None):
         remote_stream = None if independent else php_stream(remote['version'])
         if (remote['name'], remote['arch'], remote_stream) != (local['name'], local['arch'], local_stream):
             continue
-        result = subprocess.run(['rpmdev-vercmp', comparison_evr(local['evr']), comparison_evr(remote['evr'])], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        result = subprocess.run(['rpmdev-vercmp', local['evr'], remote['evr']], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if result.returncode == 12:
             raise PackageDowngradeError('Refusing upload: {} {} sorts below published {}'.format(local['name'], local['evr'], remote['evr']))
         if result.returncode not in [0, 11]:
