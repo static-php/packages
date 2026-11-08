@@ -262,7 +262,10 @@ def file_snapshot(root, manifest, names):
             if not expected or actual != expected:
                 raise RuntimeError("Restored SDK output checksum mismatch: " + name + ":" + relative)
             stat = path.lstat()
-            result[relative] = {"sha256": actual, "mode": stat.st_mode, "mtime_ns": stat.st_mtime_ns}
+            result[relative] = {"sha256": actual, "mode": stat.st_mode}
+            # Alpine ldconfig recreates unchanged SONAME symlinks.
+            if not path.is_symlink():
+                result[relative]["mtime_ns"] = stat.st_mtime_ns
     return result
 
 
@@ -360,8 +363,11 @@ def execute(root, buildroot, plan, package_type, command=None):
     if not isinstance(current, dict) or current.get("schema") != 1 or current.get("linkage") != "shared":
         raise RuntimeError("Library build produced no shared SDK manifest")
     pending = pending_rebuilds(current)
-    if not plan["full"] and file_snapshot(buildroot, current, plan["reused"]) != protected:
-        raise RuntimeError("A selected build changed unselected library outputs")
+    if not plan["full"]:
+        observed = file_snapshot(buildroot, current, plan["reused"])
+        if observed != protected:
+            changed = sorted(name for name in observed.keys() | protected.keys() if observed.get(name) != protected.get(name))
+            raise RuntimeError("A selected build changed unselected library outputs: " + ", ".join(changed[:10]))
     if not plan["full"]:
         for name in plan["reused"]:
             for field in ["source_hash", "version"]:

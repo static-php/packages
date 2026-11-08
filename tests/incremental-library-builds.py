@@ -21,6 +21,31 @@ spec.loader.exec_module(incremental)
 
 
 class IncrementalLibraryTests(unittest.TestCase):
+    def test_recreated_unchanged_soname_link_preserves_output_snapshot(self):
+        link = self.sdk / 'lib/libother.so'
+        link.symlink_to('libother.so.1')
+        entry = self.manifest['libraries']['other']
+        entry['files'].append('lib/libother.so')
+        entry['file_hashes']['lib/libother.so'] = incremental.signature(link)
+        before = incremental.file_snapshot(self.sdk, self.manifest, ['other'])
+        timestamp = link.lstat().st_mtime_ns
+        link.unlink()
+        link.symlink_to('libother.so.1')
+        os.utime(link, ns=(timestamp + 1000000000, timestamp + 1000000000), follow_symlinks=False)
+        self.assertEqual(incremental.file_snapshot(self.sdk, self.manifest, ['other']), before)
+        link.unlink()
+        link.symlink_to('libconsumer.so.1')
+        with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+            incremental.file_snapshot(self.sdk, self.manifest, ['other'])
+
+    def test_unselected_regular_file_timestamp_change_is_still_rejected(self):
+        path = self.sdk / 'lib/libother.so.1'
+        timestamp = path.stat().st_mtime_ns
+        code = 'import os; os.utime(' + repr(str(path)) + ', ns=(' + str(timestamp + 1000000000) + ',)*2)'
+        with self.assertRaisesRegex(RuntimeError, 'changed unselected library outputs: lib/libother.so.1'):
+            incremental.execute(self.root, self.sdk, self.plan(sources=self.changed('base'), libraries='base'),
+                                'rpm', [sys.executable, '-c', code])
+
     def test_noop_runtime_scan_preserves_recorded_build_identity(self):
         runtime = {'fingerprint': 'same-runtime', 'compiler_runtime_inputs': None, 'uses_cxx_runtime': False}
         previous = {'recipe_hash': 'same-recipe', 'compiler_runtime': incremental.compact_runtime(runtime),
