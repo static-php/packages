@@ -101,6 +101,8 @@ Run `42502917126` passed baseline capture and packaging, but its Alpine upgrade 
 
 Run `42505024995` then passed x86_64 PHP 8.2's 84 native upgrade profiles and PHP 8.5's 83 profiles, both reusing sealed PHP payloads with no changed components. Inspection also found that Alpine's shell target recorder omitted `type: apk`, so the matrix's format filter silently omitted service/TLS selection. The recorder now includes its format. A regression runs the actual recorder into the actual matrix CLI and requires one service/TLS target per architecture, selecting the highest requested stream. Passing ordinary upgrade tests without these separately required checks is not full pipeline validation.
 
+The corrected run `42506881502` executed service preparation on both PHP 8.6 targets. Its x86_64 TLS report passed, but the service report found another plain `apk update` in its separate upgrade helper and retained the installed CLI. That helper now explicitly refreshes the index too. Its exact upgrade method passed the signed r0-to-r1 native reproduction with the world file unchanged; no init system was needed for that focused check. The full service lifecycle test still needs to pass in CI. This duplicated refresh behavior is another responsibility to consolidate during simplification.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

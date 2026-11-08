@@ -12,6 +12,14 @@ scope = runpy.run_path(str(Path(__file__).with_name('runtime-service-containers.
 
 
 class ServiceContainerSecurity(unittest.TestCase):
+    def test_apk_service_upgrades_refresh_indexes_without_changing_solver(self):
+        harness = self.harness('docker', 'apk')
+        harness.execute = Mock()
+        harness.upgrade('fixture')
+        self.assertEqual([call.args for call in harness.execute.call_args_list], [
+            ('fixture', 'apk', 'update', '--cache-max-age', '0'),
+            ('fixture', 'apk', 'upgrade')])
+
     def setUp(self):
         environment = patch.dict(scope['os'].environ, {'GITHUB_ACTIONS': 'false'})
         environment.start()

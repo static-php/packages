@@ -279,7 +279,7 @@ class Harness:
             self.execute(container, 'apt', 'update')
             self.execute(container, 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt', '-y', 'upgrade', input='\n' * 32)
         else:
-            self.execute(container, 'apk', 'update')
+            self.execute(container, 'apk', 'update', '--cache-max-age', '0')
             self.execute(container, 'apk', 'upgrade')
 
     def service(self, container, service, operation, check=True):
