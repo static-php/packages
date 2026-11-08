@@ -509,7 +509,7 @@ def ordinary_upgrade(kind):
     if kind == 'deb':
         run(['apt-get', 'update'])
         return run(['apt', 'upgrade', '-y'], input='\n' * 32)
-    run(['apk', 'update'])
+    run(['apk', 'update', '--cache-max-age', '0'])
     return run(['apk', 'upgrade'])
 
 

@@ -95,6 +95,10 @@ PHP 8.6 x86_64 job `128795850150` in the same run reached native upgrade validat
 
 Fresh installation checks in that job also mistook `php-zts-shared-runtime-86-abi20260924-rc5-1` for an advertised PHP extension. Runtime capability parsing now recognizes initial PHP prerelease ABI qualifiers, including development, alpha, beta and RC. Real builtin-extension assertions remain enabled.
 
+### Native upgrade tests reused the previous repository index
+
+Run `42502917126` passed baseline capture and packaging, but its Alpine upgrade tests retained installed versions despite strictly higher candidates. A native reproduction with two small signed APK generations confirmed that plain `apk update` reused the fresh old index after the test mirror switched generations. The upgrade helper now uses `apk update --cache-max-age 0` before ordinary `apk upgrade`. Calling that exact helper in the signed reproduction upgraded revision r0 to r1 with the same repository, trust key and world file. No dependency installation, solver override or weakened upgrade assertion was added. Both SDK jobs in this run separately confirmed no library compilation, all 68 ABI classifications reused, zero libraries analyzed and no consumer archive reads.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

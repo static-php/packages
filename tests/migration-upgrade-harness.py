@@ -371,7 +371,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
     def test_upgrade_commands_never_explicitly_install_new_dependencies_or_override_solver(self):
         expected = {'rpm': [['dnf', 'upgrade', '-y']],
                     'deb': [['apt-get', 'update'], ['apt', 'upgrade', '-y']],
-                    'apk': [['apk', 'update'], ['apk', 'upgrade']]}
+                    'apk': [['apk', 'update', '--cache-max-age', '0'], ['apk', 'upgrade']]}
         for kind in expected:
             calls = []
             with patch.dict(scope, {'run': lambda command, **kwargs: calls.append((command, kwargs))}):
