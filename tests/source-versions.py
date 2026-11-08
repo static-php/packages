@@ -127,7 +127,7 @@ class SourceVersions(unittest.TestCase):
                      version='3.6.0alpha1')
         self.assertEqual(self.result()['php-zts-xdebug']['upstream_version'], '3.6.0alpha2-dev')
 
-    def test_apk_aliases_change_package_names_without_changing_logical_sources(self):
+    def test_apk_keeps_original_package_names_and_sources(self):
         self.profile(['amqp', 'igbinary', 'grpc'])
         for component, version in [('amqp', '2.2.0'), ('igbinary', '3.2.17RC1'), ('grpc', '1.84.1')]:
             self.archive('ext-' + component, {component + '/version.h': '#define PHP_' + component.upper() + '_VERSION "' + version + '"\n'})
@@ -137,12 +137,13 @@ class SourceVersions(unittest.TestCase):
         logical = {entry['name']: entry for entry in versions.candidates(self.root, self.stream)['candidates']}
         apk = {entry['name']: entry for entry in versions.candidates(self.root, self.stream, 'apk')['candidates']}
         for component in ['amqp', 'igbinary']:
-            old, new = logical['php-zts-' + component], apk['php-zts-' + component + '-shared']
-            self.assertEqual(new['logical_name'], old['name'])
+            old, new = logical['php-zts-' + component], apk['php-zts-' + component]
+            self.assertNotIn('logical_name', new)
             self.assertEqual(new['component'], component)
             self.assertEqual(new['upstream_version'], old['upstream_version'])
             self.assertEqual(new['evidence'], old['evidence'])
         self.assertIn('php-zts-grpc', apk)
+        self.assertEqual(logical, apk)
         self.assertEqual(logical, {entry['name']: entry for entry in versions.candidates(self.root, self.stream, 'rpm')['candidates']})
 
     def test_runtime_macro_aliases_resolve_without_using_release_template(self):

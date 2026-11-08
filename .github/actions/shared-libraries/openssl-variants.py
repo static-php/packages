@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 PROFILES = {"rpm": "/etc/pki/tls", "deb": "/etc/ssl"}
 MANIFEST = "shared-libraries.json"
 STATE = "shared-library-build-inputs.json"
-BUILD_RECIPE_SCHEMA = 1
+BUILD_RECIPE_SCHEMA = 2
 
 
 def read(path):
@@ -105,13 +105,18 @@ def runtime_assets(entry):
     return mapping(value, "runtime_assets")
 
 
-def entry_paths(entry):
+def runtime_paths(entry):
     files = entry.get("files", [])
     result = set(files if isinstance(files, list) else files.keys())
     result.update(runtime_assets(entry).keys())
-    result.update(mapping(entry.get("abi_dump", {}), "abi_dump").values())
     for item in result:
         relative(item)
+    return result
+
+
+def entry_paths(entry):
+    result = runtime_paths(entry)
+    result.update(relative(name) for name in mapping(entry.get("abi_dump", {}), "abi_dump").values())
     return result
 
 
@@ -275,6 +280,7 @@ def probe_directory(sdk, expected):
 
 
 def copy_sdk(sdk, target, manifest):
+    ownership = read(sdk / ".shared-library-ownership.json")
     wanted = {"openssl", "gcc-runtime"} & manifest["libraries"].keys()
     while True:
         expanded = wanted | {item for name in wanted for field in ("depends", "dlopen_dependencies", "asset_dependencies")
@@ -283,14 +289,18 @@ def copy_sdk(sdk, target, manifest):
             break
         wanted = expanded
     for name in wanted:
-        for relative_name in entry_paths(manifest["libraries"][name]):
+        paths = entry_paths(manifest["libraries"][name]) | set(ownership["libraries"][name]["files"])
+        for relative_name in paths:
             copy_file(rooted(sdk, relative_name), rooted(target, relative_name))
     for directory in ["include/openssl", "lib/pkgconfig", "lib/cmake/OpenSSL"]:
         if (sdk / directory).is_dir():
             shutil.copytree(sdk / directory, target / directory, dirs_exist_ok=True, symlinks=True)
-    for name in ["include/zlib.h", "include/zconf.h", "bin/pkg-config", "bin/pkgconf", ".build.json"]:
+    for name in ["include/zlib.h", "include/zconf.h", "bin/pkg-config", "bin/pkgconf"]:
         if (sdk / name).exists():
             copy_file(sdk / name, target / name)
+    if (sdk / ".build.json").is_file():
+        cache = read(sdk / ".build.json")
+        write(target / ".build.json", {name: record for name, record in cache.items() if name in wanted and name != "openssl"})
     for name in [MANIFEST, ".shared-library-ownership.json"]:
         data = read(sdk / name)
         data["libraries"] = {key: item for key, item in data.get("libraries", {}).items() if key in wanted}
@@ -523,7 +533,7 @@ def apply(sdk, variants, profile):
             or receipt["runtime_libdir"] != manifest["runtime_libdir"] or receipt.get("architecture") != manifest["architecture"]
             or receipt["headers_sha256"] != header_digest(sdk) or receipt.get("common_identity") != common_identity(sdk, old)):
         raise RuntimeError("OpenSSL overlay does not match this common SDK")
-    if entry_paths(receipt["entry"]) != entry_paths(old):
+    if runtime_paths(receipt["entry"]) != runtime_paths(old):
         raise RuntimeError("OpenSSL profile changed the common runtime/asset ownership set")
     allowed = entry_paths(old) | {"debug/" + name + ".debug" for name in entry_paths(old)}
     if not receipt["files"].keys() <= allowed:

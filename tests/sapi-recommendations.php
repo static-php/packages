@@ -49,8 +49,10 @@ $type = $options['type'];
 assertRecommendation(in_array($type, ['rpm', 'deb', 'apk'], true), 'Unknown package type');
 $root = trim(runRecommendationCommand(['mktemp', '-d', '/tmp/spp-sapi-recommends-XXXXXXXX']));
 $previousTmp = getenv('TMPDIR');
+$previousLogs = getenv('SPC_LOGS_DIR');
 try {
     putenv('TMPDIR=' . $root);
+    putenv('SPC_LOGS_DIR=' . $root . '/command-logs');
     define('BASE_PATH', dirname(__DIR__));
     define('INI_PATH', BASE_PATH . '/src/ini');
     define('SPP_TYPE', $type);
@@ -154,5 +156,6 @@ try {
     }
 } finally {
     $previousTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $previousTmp);
+    $previousLogs === false ? putenv('SPC_LOGS_DIR') : putenv('SPC_LOGS_DIR=' . $previousLogs);
     removeRecommendationFixture($root);
 }

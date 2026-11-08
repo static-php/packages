@@ -70,7 +70,7 @@ class PublicationRetryPlan(unittest.TestCase):
         merged, divergent = planner['merge_baselines'](values, 'rpm', destination)
         return merged, divergent, destination
 
-    def prepare(self, previous=None, peer=None, request=None):
+    def prepare(self, previous=None, peer=None, request=None, libraries=None):
         current = self.snapshot('payload', manifest())
         baseline = previous or self.snapshot('baseline', manifest(library(1)))
         requested = self.root / 'request.json'
@@ -78,7 +78,7 @@ class PublicationRetryPlan(unittest.TestCase):
         args = argparse.Namespace(type='rpm', manifest=str(current / 'shared-libraries.json'),
                                   root=str(current), baseline=str(baseline),
                                   peer_baseline=str(peer) if peer else None,
-                                  mode='incremental', request=str(requested), libraries=None,
+                                  mode='incremental', request=str(requested), libraries=libraries,
                                   rebuilt_libraries=None, php_versions=None, packages=None,
                                   bootstrap=False, manifest_output=str(self.root / 'annotated.json'),
                                   output=str(self.root / 'plan.json'))
@@ -86,6 +86,17 @@ class PublicationRetryPlan(unittest.TestCase):
                                     'abi_difference': Mock(return_value='compatible')}):
             planner['prepare'](args)
         return json.loads(Path(args.output).read_text())
+
+    def test_automatic_metadata_requests_only_select_the_target_sdk(self):
+        plan = self.prepare(request={'requests': {}, 'library_package_requests': ['fixture', 'windows-only'],
+                                     'variant_package_requests': {'rpm': ['unused-library']}})
+        self.assertEqual(plan['libraries'], ['fixture'])
+        self.assertEqual(plan['library_package_requests'], ['fixture'])
+        self.assertFalse(any(request['compile'] for request in plan['php_requests'].values()))
+
+    def test_explicit_unknown_library_selection_remains_fatal(self):
+        with self.assertRaisesRegex(RuntimeError, 'Unknown selected libraries'):
+            self.prepare(libraries='windows-only')
 
     def test_release_only_owner_drift_reuses_archive_without_php_builds(self):
         older = b'old signed archive'

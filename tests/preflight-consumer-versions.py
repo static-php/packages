@@ -157,34 +157,86 @@ class ConsumerVersionPreflight(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(receipt['candidates'][0]['version'], '1.83.0_86.0~rc4-6')
 
-    def test_apk_alias_names_are_derived_from_the_central_configuration(self):
+    def test_apk_package_names_remain_unchanged(self):
         result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-amqp', upstream='2.2.0')],
                                             requires_native=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['name'], 'php-zts-amqp-shared')
-        self.assertEqual(receipt['candidates'][0]['logical_name'], 'php-zts-amqp')
+        self.assertEqual(receipt['candidates'][0]['name'], 'php-zts-amqp')
+        self.assertNotIn('logical_name', receipt['candidates'][0])
         self.assertEqual(receipt['candidates'][0]['published_versions'], [])
 
-    def test_apk_alias_source_identity_cannot_claim_a_different_component(self):
+    def test_php_prerelease_phase_advances_in_retained_versions(self):
+        for kind, tag, marker, separator in [('rpm', '_86.0', '~', '-'),
+                                             ('deb', '+php86.0', '~', '-'),
+                                             ('apk', 'p86.0', '_', '-r')]:
+            if not shutil.which(TOOLS[kind]):
+                continue
+            for php, suffix in [('8.6.0RC5', marker + 'rc5'), ('8.6.0', ''), ('8.6.1RC1', '')]:
+                with self.subTest(kind=kind, php=php):
+                    old = '1.13.5' + tag + marker + 'rc2' + separator + '7'
+                    candidate = self.candidate(name='frankenphp', upstream='1.13.5', php=php)
+                    result, receipt = self.run_preflight(kind, [candidate], [self.package('frankenphp', old)])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(receipt['candidates'][0]['production_base_version'], '1.13.5' + tag + suffix)
+
+    def test_php_prerelease_rollback_is_not_hidden_in_a_retained_version(self):
+        for kind, old in [('rpm', '1.13.5_86.0~rc5-1'), ('deb', '1.13.5+php86.0~rc5-1'), ('apk', '1.13.5p86.0_rc5-r0')]:
+            if not shutil.which(TOOLS[kind]):
+                continue
+            with self.subTest(kind=kind):
+                result, receipt = self.run_preflight(kind, [self.candidate(name='frankenphp', upstream='1.13.5', php='8.6.0RC2')],
+                                                    [self.package('frankenphp', old)], flags=['--bump'])
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertEqual(receipt['rejected'][0]['reason'], 'native-version-downgrade')
+
+    def test_pie_always_has_a_stream_only_php_tag(self):
+        for kind, tag, separator in [('rpm', '_86', '-'), ('deb', '+php86', '-'), ('apk', 'p86', '-r')]:
+            if not shutil.which(TOOLS[kind]):
+                continue
+            for php in ['8.6.0alpha1', '8.6.0beta3', '8.6.0RC5', '8.6.0', '8.6.1RC1']:
+                with self.subTest(kind=kind, php=php):
+                    base = '1.5.5' + tag
+                    result, receipt = self.run_preflight(kind, [self.candidate(name='pie-zts', upstream='1.5.5', php=php)],
+                                                        [self.package('pie-zts', base + separator + '7')], flags=['--bump'])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(receipt['candidates'][0]['version'], base + separator + '8')
+
+    def test_patch_rc_keeps_compiled_consumer_tag_and_advances_core_version(self):
+        for kind, tag, rc, separator in [('rpm', '_86', '~rc1', '-'), ('deb', '+php86', '~rc1', '-'), ('apk', 'p86', '_rc1', '-r')]:
+            if not shutil.which(TOOLS[kind]):
+                continue
+            with self.subTest(kind=kind):
+                candidates = [self.candidate(name='frankenphp', upstream='1.13.5', php='8.6.1RC1'),
+                              self.candidate(name='php-zts-cli', upstream='8.6.1RC1', php='8.6.1RC1')]
+                packages = [self.package('frankenphp', '1.13.5' + tag + separator + '7'),
+                            self.package('php-zts-cli', '8.6.0' + separator + '7')]
+                result, receipt = self.run_preflight(kind, candidates, packages, flags=['--bump'])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                versions = {item['name']: item['version'] for item in receipt['candidates']}
+                self.assertEqual(versions['frankenphp'], '1.13.5' + tag + separator + '8')
+                self.assertEqual(versions['php-zts-cli'], '8.6.1' + rc + separator + ('0' if kind == 'apk' else '1'))
+
+    def test_apk_package_renames_are_rejected(self):
         candidate = self.candidate(name='php-zts-amqp-shared', logical_name='php-zts-amqp',
                                    component='igbinary', upstream='2.2.0')
         result, receipt = self.run_preflight('apk', [candidate], requires_native=False)
         self.assertEqual(result.returncode, 1)
         self.assertIsNone(receipt)
-        self.assertIn('source component differs', result.stderr)
+        self.assertIn('package renames are not supported', result.stderr)
 
-    def test_apk_provider_version_does_not_inherit_an_invalid_logical_native_floor(self):
-        candidate = self.candidate(name='php-zts-igbinary-shared', logical_name='php-zts-igbinary',
-                                   component='igbinary', upstream='3.2.17RC1', php='8.2.35')
+    def test_apk_same_upstream_rebuild_is_blocked_without_inventing_a_version(self):
+        candidate = self.candidate(name='php-zts-igbinary', component='igbinary', upstream='3.2.17RC1', php='8.2.35')
         result, receipt = self.run_preflight('apk', [candidate],
                                             [self.package('php-zts-igbinary', '3.2.17~rc1_82-r1')], php_stream='8.2')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 3, result.stderr)
         record = receipt['candidates'][0]
-        self.assertEqual(record['version'], '3.2.17_rc1_p82_p35-r0')
-        self.assertEqual(record['published_versions'], [])
-        self.assertEqual(record['published_source_versions'], {'php-zts-igbinary': '3.2.17~rc1_82-r1'})
+        self.assertEqual(record['version'], '3.2.17_rc1_p82-r0')
+        self.assertEqual(receipt['rejected'][0]['reason'], 'native-version-downgrade')
+        self.assertEqual(record['name'], 'php-zts-igbinary')
+        self.assertEqual(record['upstream_version'], '3.2.17RC1')
+        self.assertEqual(record['published_versions'], ['3.2.17~rc1_82-r1'])
 
-    def test_apk_provider_rename_does_not_mask_a_source_rollback(self):
+    def test_apk_source_rollback_remains_rejected(self):
         old = [self.package('php-zts-igbinary', '3.2.17~rc1_82-r1')]
         for upstream, reason in [('3.2.16', 'upstream-version-rollback'), ('3.2.17alpha1', 'upstream-phase-rollback')]:
             with self.subTest(upstream=upstream):
@@ -193,25 +245,27 @@ class ConsumerVersionPreflight(unittest.TestCase):
                 self.assertEqual(result.returncode, 3, result.stderr)
                 self.assertEqual(receipt['rejected'][0]['reason'], reason)
 
-    def test_apk_provider_future_revisions_use_the_actual_physical_package_domain(self):
+    def test_apk_later_upstream_release_uses_normal_version_and_revisions(self):
         packages = [self.package('php-zts-igbinary', '3.2.17~rc1_82-r100'),
-                    self.package('php-zts-igbinary-shared', '3.2.17_rc1_p82_p35-r5')]
-        result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary', upstream='3.2.17RC1', php='8.2.35')],
+                    self.package('php-zts-igbinary', '3.2.18p82-r5')]
+        result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary', upstream='3.2.18', php='8.2.35')],
                                             packages, flags=['--bump'], php_stream='8.2', migration_cutoffs={'8.2': {}})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['version'], '3.2.17_rc1_p82_p35-r6')
+        self.assertEqual(receipt['candidates'][0]['version'], '3.2.18p82-r6')
 
-    def test_apk_provider_checks_each_legacy_source_phase_when_native_versions_compare_equal(self):
+    def test_apk_checks_each_legacy_source_phase_when_native_versions_compare_equal(self):
         packages = [self.package('php-zts-igbinary', '3.2.17~rc1_82-r1'),
                     self.package('php-zts-igbinary', '3.2.17~rc2_82-r1')]
         result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary',
                                                                   upstream='3.2.17RC1', php='8.2.35')],
                                             packages, php_stream='8.2')
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertEqual(receipt['rejected'][0]['reason'], 'upstream-phase-rollback')
-        self.assertEqual(receipt['rejected'][0]['published'], '3.2.17~rc2_82-r1')
+        self.assertEqual({item['published']: item['reason'] for item in receipt['rejected']}, {
+            '3.2.17~rc1_82-r1': 'native-version-downgrade',
+            '3.2.17~rc2_82-r1': 'upstream-phase-rollback',
+        })
 
-    def test_apk_provider_valid_legacy_source_phase_cannot_roll_back(self):
+    def test_apk_valid_legacy_source_phase_cannot_roll_back(self):
         for old, upstream in [('3.2.17_rc1_p82-r0', '3.2.17alpha1'),
                               ('3.2.17_rc2_p82-r0', '3.2.17RC1')]:
             with self.subTest(old=old, upstream=upstream):
@@ -222,7 +276,7 @@ class ConsumerVersionPreflight(unittest.TestCase):
                 self.assertEqual(receipt['rejected'][0]['reason'], 'upstream-phase-rollback')
                 self.assertEqual(receipt['rejected'][0]['published'], old)
 
-    def test_apk_provider_valid_legacy_source_phase_can_stay_or_advance(self):
+    def test_apk_valid_legacy_source_phase_can_stay_or_advance(self):
         for upstream in ['3.2.17RC1', '3.2.17RC2', '3.2.17']:
             with self.subTest(upstream=upstream):
                 result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-igbinary',

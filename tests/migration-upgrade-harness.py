@@ -122,50 +122,6 @@ class MigrationUpgradeHarness(unittest.TestCase):
         self.assertEqual(result['cells'][1]['coverage'], 'fresh_candidate_only')
         self.assertEqual(len(profiles['profiles']), 1)
 
-    def test_apk_replacement_requires_native_alias_and_core_generation_headers(self):
-        logical, physical = 'php-zts-igbinary', 'php-zts-igbinary-shared'
-        capability = 'php-zts-shared-runtime-82-abi20220829-1'
-        core = {'name': 'php-zts-cli', 'provides': [capability], 'requires': ['!' + logical + '>0']}
-        module = {'name': physical, 'provides': [logical], 'replaces': [logical],
-                  'requires': ['!' + logical + '>0', capability], 'provider_priority': ['100']}
-        aliases = {logical: physical}
-        proofs = harness['apk_alias_proofs']('8.2', [core, module], aliases)
-        self.assertEqual(proofs[logical]['real_name'], physical)
-        for entry, field, value in [(core, 'requires', []), (module, 'provides', [logical + '=1']),
-                                    (module, 'replaces', []), (module, 'requires', [capability]),
-                                    (module, 'provider_priority', [])]:
-            old = entry[field]
-            entry[field] = value
-            with self.assertRaisesRegex(RuntimeError, 'identity/core-conflict proof'):
-                harness['apk_alias_proofs']('8.2', [core, module], aliases)
-            entry[field] = old
-        with self.assertRaisesRegex(RuntimeError, 'identity/core-conflict proof'):
-            harness['apk_alias_proofs']('8.6', [core, module], aliases)
-
-    def test_apk_physical_replacement_keeps_strict_removed_package_checks(self):
-        logical, actual = 'php-zts-igbinary', 'php-zts-igbinary-shared'
-        before = {logical: '3.2.17~rc1_82-r1', 'php-zts-cli': '8.2-1'}
-        after = {actual: '3.2.17_rc1_p82-r2', 'php-zts-cli': '8.2-2'}
-        candidates = {name: {'version': version} for name, version in after.items()}
-        replacements = {logical: {'real_name': actual}}
-        harness['assert_upgrade'](before, after, candidates, sorted(before), replacements)
-        with self.assertRaisesRegex(RuntimeError, 'no migration candidate'):
-            harness['assert_upgrade'](before, after, candidates, sorted(before))
-        with self.assertRaisesRegex(RuntimeError, 'held back'):
-            harness['assert_upgrade'](before, dict(after, **{logical: before[logical]}), candidates, sorted(before), replacements)
-        with self.assertRaisesRegex(RuntimeError, 'removed installed packages'):
-            harness['assert_upgrade'](dict(before, **{'php-zts-intl': '8.2-1'}), after, candidates, sorted(before), replacements)
-
-    def test_apk_alias_is_covered_by_published_upgrade_or_fresh_logical_install(self):
-        logical, actual = 'php-zts-igbinary', 'php-zts-igbinary-shared'
-        inventory = {'incoming': [{'name': actual}], 'aliases': {logical: {'real_name': actual}}}
-        baseline = {'type': 'apk', 'packages': [{'name': logical}]}
-        self.assertEqual(harness['candidate_only_profiles'](baseline, inventory), [])
-        self.assertEqual(harness['candidate_only_profiles']({'packages': []}, inventory),
-                         [{'id': 'fresh-' + logical, 'packages': [logical], 'fresh_package': logical}])
-        baseline['packages'] = [{'name': actual}]
-        self.assertEqual(harness['resolve_profile'](baseline, ['php-zts-cli', logical], {logical: actual}),
-                         ['php-zts-cli', actual])
 
     def test_prepared_mirror_refuses_changed_archive_mode_runtime_or_file_set(self):
         with tempfile.TemporaryDirectory(prefix='spp-prepared-inputs-') as directory:

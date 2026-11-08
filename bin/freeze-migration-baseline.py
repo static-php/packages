@@ -189,11 +189,9 @@ def latest_packages(kind, inventory):
 
 def select_packages(kind, inventory, profile, include_debug=False):
     latest = latest_packages(kind, inventory)
-    aliases = runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/apk-aliases.py')) if kind == 'apk' else None
     def wanted(name):
         if 'all' not in profile:
-            logical = aliases['logical_name'](name) if aliases else name
-            return logical.removeprefix('php-zts-').replace('_', '-') in profile
+            return name.removeprefix('php-zts-').replace('_', '-') in profile
         managed = name.startswith('php-zts-') or name in ('php-zts', 'frankenphp', 'pie-zts')
         return managed and (include_debug or not name.endswith(('-debuginfo', '-dbgsym')))
     selected = {name: package for name, package in latest.items() if wanted(name)}
@@ -205,7 +203,7 @@ def select_packages(kind, inventory, profile, include_debug=False):
     while pending:
         package = pending.pop()
         for dependency in package.get('requires', []):
-            if not dependency.startswith(('php-zts-', 'frankenphp', 'pie-zts')):
+            if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
                 continue
             choices = list(providers.get(dependency, {}).values())
             if len(choices) != 1:
@@ -234,60 +232,6 @@ def download_package(package, kind, output, stage):
     return dict(package, path=str(destination.relative_to(output)), sha256=hashlib.sha256(data).hexdigest())
 
 
-def apk_consumer_metadata(path, name):
-    expected = 'usr/share/php-zts/consumers/' + name + '.json'
-    result = None
-    with gzip.GzipFile(filename=str(path)) as stream, tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
-        for member in archive:
-            if member.name.removeprefix('./').lstrip('/') != expected:
-                continue
-            if result is not None or not member.isfile() or not 0 < member.size <= 256 * 1024:
-                raise RuntimeError('Invalid APK alias consumer metadata')
-            result = json.loads(archive.extractfile(member).read())
-    return result
-
-
-def effective_apk_inventory(inventory, php, output, stage):
-    aliases = runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/apk-aliases.py'))
-    latest = latest_packages('apk', inventory)
-    physical = [name for name in latest if aliases['logical_name'](name) != name and not name.endswith('-debuginfo')]
-    if not physical:
-        return inventory, {}, {}
-    if 'php-zts-cli' not in latest:
-        raise RuntimeError('Published APK aliases have no CLI generation')
-    core = download_package(latest['php-zts-cli'], 'apk', output, stage)
-    core['native_metadata'] = aliases['archive_evidence'](output / core['path'])
-    verified = {'php-zts-cli': core}
-    replacements = {}
-    evidence = {}
-    for name in physical:
-        package = download_package(latest[name], 'apk', output, stage)
-        package['native_metadata'] = aliases['archive_evidence'](output / package['path'])
-        package['consumer_metadata'] = apk_consumer_metadata(output / package['path'], name)
-        for record in (core, package):
-            native = record['native_metadata']
-            if any(native.get(field) != record.get(key) for field, key in [('name', 'name'), ('version', 'version'), ('arch', 'architecture')]):
-                raise RuntimeError('Published APK archive identity differs from index')
-        metadata = package['consumer_metadata']
-        if (not isinstance(metadata, dict) or metadata.get('schema') != 1
-                or metadata.get('php_stream') != php
-                or metadata.get('architecture') != package['architecture']):
-            raise RuntimeError('Published APK alias consumer identity differs from stream or architecture')
-        proof = aliases['verify_alias'](package['native_metadata'], metadata, core['native_metadata'])
-        logical = proof['logical_name']
-        replacements[logical] = name
-        evidence[logical] = dict(proof, version=package['version'], archive_sha256=package['sha256'], path=package['path'],
-                                 core_archive_sha256=core['sha256'], core_version=core['version'], core_path=core['path'])
-        verified[name] = package
-    result = []
-    for package in inventory:
-        if package['name'] in replacements:
-            continue
-        current = verified.get(package['name'])
-        result.append(current if current and current['publication_url'] == package['publication_url'] else package)
-    return result, replacements, evidence
-
-
 def freeze(args):
     architecture = ('aarch64' if args.arch == 'arm64' else 'x86_64')
     if args.type == 'deb':
@@ -305,8 +249,7 @@ def freeze(args):
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
         stage = Path(temporary)
-        effective, replacements, replacement_evidence = effective_apk_inventory(inventory, args.php, output, stage) if args.type == 'apk' else (inventory, {}, {})
-        selected = select_packages(args.type, effective, profile, args.include_debug)
+        selected = select_packages(args.type, inventory, profile, args.include_debug)
         if 'php-zts-cli' not in selected:
             raise RuntimeError('Published baseline has no matching CLI package')
         for name, content in metadata.items():
@@ -329,10 +272,6 @@ def freeze(args):
                                 'include_debug': args.include_debug,
                                 'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},
                   'repository': {'publication_url': base, 'metadata': ['metadata/' + name for name in metadata]}}
-        if args.type == 'apk':
-            result['effective_published_packages'] = effective
-            result['logical_replacements'] = {'apk': replacements}
-            result['replacement_candidates'] = {'apk': replacement_evidence}
         (output / 'baseline.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({'baseline': str(output / 'baseline.json'), 'packages': len(packages),
                       'published_inventory': len(inventory)}))

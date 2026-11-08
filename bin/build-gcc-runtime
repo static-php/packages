@@ -20,12 +20,11 @@ has_debug_info() {
         /^[[:space:]]*Version:/ { version = $2; units++; versions[version]++ }
         /DW_TAG_(subprogram|structure_type|class_type|base_type)/ {
             types++
-            if (version != 4) incompatible = 1
         }
         END {
-            if (units && types && !incompatible) exit 0
+            if (units && types) exit 0
             for (version in versions) summary = summary " " version ":" versions[version]
-            printf "Invalid GCC runtime DWARF4: %s (units=%d, type/function DIEs=%d, CU versions:%s)\n", \
+            printf "Missing GCC runtime DWARF type information: %s (units=%d, type/function DIEs=%d, CU versions:%s)\n", \
                 library, units, types, summary > "/dev/stderr"
             exit 1
         }
@@ -89,7 +88,7 @@ if runtime_has_debug_info && licenses_installed && dynamic_cxx_selector; then
     exit 0
 fi
 if "$check_only"; then
-    printf '%s\n' 'GCC shared runtime selection, DWARF4 and COPYING3/COPYING.RUNTIME are required.' >&2
+    printf '%s\n' 'GCC shared runtime selection, DWARF type information and COPYING3/COPYING.RUNTIME are required.' >&2
     exit 1
 fi
 
@@ -125,8 +124,8 @@ elif [[ -f /etc/debian_version ]]; then
 fi
 CC=/usr/bin/gcc CXX=/usr/bin/g++ "$source_directory/configure" "${configure_options[@]}"
 build_jobs=${SPP_GCC_BUILD_JOBS:-$(nproc)}
-make -j"$build_jobs" CFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' \
-    CXXFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' LIBGCC2_DEBUG_CFLAGS='-g -gdwarf-4'
+make -j"$build_jobs" CFLAGS_FOR_TARGET='-g -O2' \
+    CXXFLAGS_FOR_TARGET='-g -O2' LIBGCC2_DEBUG_CFLAGS='-g'
 make install-target
 repair_cxx_selector
 runtime_has_debug_info

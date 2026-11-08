@@ -240,14 +240,7 @@ def library_package_identity(root):
 
 
 def format_package_identities(root):
-    path = root / 'config/apk-runtime-aliases.json'
-    if not path.is_file():
-        return {}
-    value = json.loads(path.read_text())
-    if value.get('schema') != 1 or not isinstance(value.get('extensions'), dict):
-        raise RuntimeError('Invalid APK runtime alias configuration')
-    return {'apk': {'identity': hashlib.sha256(path.read_bytes()).hexdigest(),
-                    'packages': sorted({'cli', *value['extensions']})}}
+    return {}
 
 
 def variant_identities(root):

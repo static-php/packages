@@ -29,6 +29,14 @@ foreach (['rpm', 'deb', 'apk'] as $type) {
 if ($configurations['rpm'] !== $configurations['deb']) {
     throw new RuntimeException('Package format changed common glibc compiler flags or compiled lookup paths');
 }
+foreach ($configurations as $type => $configuration) {
+    foreach (['SPC_DEFAULT_CFLAGS', 'SPC_DEFAULT_CXXFLAGS'] as $name) {
+        if (!preg_match('/(?:^| )-g(?: |$)/', $configuration['extra-env'][$name])
+            || preg_match('/(?:^| )-gdwarf-[0-9]+(?: |$)/', $configuration['extra-env'][$name])) {
+            throw new RuntimeException("{$type} libraries need debug information using the compiler's default DWARF format");
+        }
+    }
+}
 $config = $configurations['rpm'];
 if ($config['build-options']['with-shared-libdir'] !== '/usr/lib/php-zts/lib'
     || $config['extra-env']['EXTENSION_DIR'] !== '/usr/lib/php-zts/modules'

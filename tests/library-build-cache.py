@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -109,6 +110,22 @@ class LibraryBuildIdentityTests(unittest.TestCase):
             results.append(dict(line.split('=', 1) for line in text.splitlines()))
         self.assertNotEqual(results[0]['fingerprint'], results[1]['fingerprint'])
         self.assertEqual(results[0]['compatibility'], results[1]['compatibility'])
+
+    def test_sdk_manifest_changes_invalidate_compiled_library_cache(self):
+        spc = self.root / 'spc'
+        shutil.copytree(ROOT / 'vendor/crazywhalecc/static-php-cli/src', spc / 'src')
+        environment = dict(os.environ, SPP_SPC_ROOT=str(spc))
+
+        def inputs():
+            return json.loads(subprocess.check_output(['php', str(ROOT / '.github/actions/shared-libraries/build-inputs.php'),
+                                                      str(ROOT), 'rpm', 'alma8-x86_64'], env=environment, text=True))
+
+        before = inputs()
+        manifest = spc / 'src/StaticPHP/Util/SharedLibraryManifest.php'
+        manifest.write_text(manifest.read_text() + '\n// altered SDK ownership implementation fixture\n')
+        after = inputs()
+        self.assertNotEqual(workflow.compatibility(self.root, 'rpm-alma8-x86_64', 'gcc16', before),
+                            workflow.compatibility(self.root, 'rpm-alma8-x86_64', 'gcc16', after))
 
     def test_rendered_flags_are_target_specific_and_exclude_php_options(self):
         for kind, target in [('rpm', 'alma8-x86_64'), ('rpm', 'alma10-x86_64'), ('deb', 'amd64'), ('apk', 'arm64')]:

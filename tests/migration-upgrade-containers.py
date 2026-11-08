@@ -115,57 +115,8 @@ def managed(name):
     return name in ('php-zts', 'frankenphp') or name.startswith(('php-zts-', 'pie-zts'))
 
 
-def apk_alias_config():
-    local = HERE / 'apk-runtime-aliases.json'
-    return local if local.is_file() else HERE.parent / 'config/apk-runtime-aliases.json'
-
-
-def apk_aliases():
-    data = json.loads(apk_alias_config().read_text())
-    if data.get('schema') != 1 or not isinstance(data.get('extensions'), dict):
-        raise RuntimeError('Unsupported APK runtime alias configuration')
-    result = {}
-    for extension, entry in data['extensions'].items():
-        suffix = entry.get('suffix', '')
-        if not re.fullmatch('[a-z][a-z0-9_]*', extension) or not re.fullmatch('-[a-z][a-z0-9-]*', suffix):
-            raise RuntimeError('Invalid APK runtime alias configuration')
-        logical = 'php-zts-' + extension
-        result[logical] = logical + suffix
-    return result
-
-
-def apk_alias_proofs(stream, packages, aliases=None):
-    aliases = apk_aliases() if aliases is None else aliases
-    indexed = {p['name']: p for p in packages}
-    cli = indexed.get('php-zts-cli', {})
-    result = {}
-    for logical, physical in aliases.items():
-        package = indexed.get(physical)
-        if package is None:
-            continue
-        conflict = '!' + logical + '>0'
-        requirements = {value.replace(' ', '') for value in package.get('requires', [])}
-        core_requirements = {value.replace(' ', '') for value in cli.get('requires', [])}
-        shared = {value for value in package.get('requires', [])
-                  if re.fullmatch('php-zts-shared-runtime-' + stream.replace('.', '') + r'-abi\d+-1', value)
-                  and value in cli.get('provides', [])}
-        if (logical not in package.get('provides', [])
-                or any(value.startswith(logical + '=') for value in package.get('provides', []))
-                or logical not in package.get('replaces', [])
-                or package.get('provider_priority') != ['100']
-                or conflict not in requirements or conflict not in core_requirements or not shared):
-            raise RuntimeError('APK runtime alias lacks its versionless identity/core-conflict proof: ' + physical)
-        result[logical] = {'real_name': physical, 'shared_core_capabilities': sorted(shared),
-                           'logical_provide': logical, 'core_conflict': conflict}
-    return result
-
-
-def resolve_profile(baseline, names, aliases=None):
-    if baseline.get('type') != 'apk':
-        return names
-    aliases = apk_aliases() if aliases is None else aliases
-    present = {p['name'] for p in baseline['packages']}
-    return sorted({aliases[name] if name not in present and aliases.get(name) in present else name for name in names})
+def resolve_profile(baseline, names):
+    return sorted(set(names))
 
 
 def library_old_profile(baseline, incoming_changes, requested):
@@ -214,7 +165,7 @@ def all_profiles(baseline, individual=False):
         profiles.append({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
                          'disabled_extension': 'imagick'})
     if baseline.get('type') == 'apk':
-        package = next((name for name in ('php-zts-igbinary', 'php-zts-igbinary-shared') if name in names), None)
+        package = 'php-zts-igbinary' if 'php-zts-igbinary' in names else None
         if package:
             profiles.append({'id': 'disabled-igbinary', 'packages': ['php-zts-cli', package],
                              'disabled_extension': 'igbinary'})
@@ -228,16 +179,10 @@ def candidate_only_profiles(baseline, inventory):
     published.update(inventory.get('published_names', []))
     core = {'php-zts', 'php-zts-cli', 'php-zts-cgi', 'php-zts-fpm', 'php-zts-embed',
             'php-zts-devel', 'php-zts-runtime-layout', 'php-zts-curl', 'php-zts-fileinfo'}
-    alias_proofs = inventory.get('aliases', {})
-    physical_aliases = {p['real_name'] for p in alias_proofs.values()}
-    incoming = {p['name'] for p in inventory.get('incoming', [])}
     names = {p['name'] for p in inventory.get('incoming', [])
                     if p['name'].startswith('php-zts-') and p['name'] not in published | core
-                    and p['name'] not in physical_aliases
                     and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))}
-    names.update(logical for logical, proof in alias_proofs.items()
-                 if logical not in published and proof['real_name'] not in published and proof['real_name'] in incoming)
     return [{'id': 'fresh-' + name, 'packages': [name], 'fresh_package': name} for name in sorted(names)]
 
 
@@ -568,22 +513,15 @@ def ordinary_upgrade(kind):
     return run(['apk', 'upgrade'])
 
 
-def assert_upgrade(before, after, candidate, names, replacements=None):
-    replacements = replacements or {}
-    replaced = set()
+def assert_upgrade(before, after, candidate, names):
     for name in names:
         if name not in before:
             raise RuntimeError('Requested old package was not actually installed: ' + name)
-        actual = replacements.get(name, {}).get('real_name', name)
-        if actual not in candidate:
-            raise RuntimeError('Published package has no migration candidate: ' + name)
-        if (after.get(actual) != candidate[actual]['version']
-                or (name == actual and after[actual] == before[name])
-                or (name != actual and name in after)):
+        if name not in candidate:
+            raise RuntimeError('Installed package has no migration candidate: ' + name)
+        if after.get(name) != candidate[name]['version'] or after[name] == before[name]:
             raise RuntimeError('Ordinary upgrade held back or failed to advance ' + name)
-        if actual != name:
-            replaced.add(name)
-    removed = {name for name in set(before) - set(after) if managed(name) and name not in replaced}
+    removed = {name for name in set(before) - set(after) if managed(name)}
     if removed:
         raise RuntimeError('Ordinary upgrade removed installed packages: ' + ', '.join(sorted(removed)))
 
@@ -672,7 +610,6 @@ def inside(args):
                     source = Path(package['path'])
                     shutil.copy2(source, Path('/spp/repository/generations/new') / source.name)
         new = index_generation(kind, 'new', args.php, args.arch)
-        aliases = apk_alias_proofs(args.php, new) if kind == 'apk' else {}
         for item in old + new:
             if item['architecture'] not in (architecture(args.arch), 'all'):
                 raise RuntimeError('Package architecture does not match the native cell')
@@ -694,7 +631,7 @@ def inside(args):
         published_names = json.loads(Path('/spp/published-names.json').read_text())
         Path('/spp/inventory.json').write_text(json.dumps({'old': old, 'new': new, 'incoming': incoming,
                                                         'incoming_changes': incoming_changes, 'library': library,
-                                                        'published_names': published_names, 'aliases': aliases}))
+                                                        'published_names': published_names}))
         return
     if args.inside == 'fresh':
         inventory = json.loads(Path('/spp/inventory.json').read_text())
@@ -706,7 +643,7 @@ def inside(args):
         run(command + [args.fresh_package])
         after = installed(kind)
         candidate = {p['name']: p for p in inventory['new']}
-        actual = inventory.get('aliases', {}).get(args.fresh_package, {}).get('real_name', args.fresh_package)
+        actual = args.fresh_package
         if (after.get(actual) != candidate[actual]['version']
                 or actual != args.fresh_package and args.fresh_package in after):
             raise RuntimeError('Fresh installation selected the wrong optional-package version')
@@ -786,16 +723,14 @@ def inside(args):
     incoming = {p['name']: p for p in inventory['incoming']}
     changed = inventory['incoming_changes']
     names = [name for name in before['installed'] if managed(name)]
-    replacements = {name: proof for name, proof in inventory.get('aliases', {}).items() if name in before['installed']}
     partial = args.library_only or args.partial_consumers
     comparison_names = [name for name in names if name in changed] if partial else names
     if not comparison_names and not args.allow_unaffected_profile:
         raise RuntimeError('No affected installed packages to validate')
     for name in comparison_names:
-        actual = replacements.get(name, {}).get('real_name', name)
-        if actual not in candidate:
+        if name not in candidate:
             raise RuntimeError('Published installed package lacks a candidate: ' + name)
-        if actual == name and not newer(kind, before['installed'][name], candidate[name]['version']):
+        if not newer(kind, before['installed'][name], candidate[name]['version']):
             raise RuntimeError('Candidate is not strictly newer: ' + name)
     ordinary_upgrade(kind)
     after = installed(kind)
@@ -805,7 +740,7 @@ def inside(args):
     else:
         actual_updates = comparison_names
         library_updates = None
-        assert_upgrade(before['installed'], after, candidate, names, replacements)
+        assert_upgrade(before['installed'], after, candidate, names)
     for field in ('config', 'key', 'php_ini'):
         if sha256(before[field]) != before[field + '_sha256']:
             raise RuntimeError('Upgrade changed existing ' + field)
@@ -842,9 +777,7 @@ def inside(args):
         if audit.stdout.strip():
             raise RuntimeError('dpkg reports an incomplete package transaction: ' + audit.stdout)
     result = {'ok': True, 'actual_old_versions': {n: before['installed'][n] for n in names},
-              'new_versions': {n: after[replacements.get(n, {}).get('real_name', n)] for n in names},
-              'physical_package_replacements': {name: dict(proof, old_version=before['installed'][name],
-                  new_version=after[proof['real_name']]) for name, proof in replacements.items()},
+              'new_versions': {n: after[n] for n in names},
               'automatic_libraries': libraries,
               'curl_fileinfo_automatic': True, 'configuration_preserved': True,
               'repository_and_trust_unchanged': True, 'module_selection_unchanged': True,
@@ -982,8 +915,6 @@ class PreparedMirror:
             records.append({'role': 'baseline', 'name': Path(item['source']).name,
                             'path': item['source'], 'sha256': item['sha256']})
         helpers = [Path(__file__), HERE / 'container-architecture.py', HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py']
-        if args.type == 'apk':
-            helpers.append(apk_alias_config())
         if args.tls:
             helpers.append(HERE / 'tls-runtime-containers.py')
         if args.tls or args.services:
@@ -1022,8 +953,6 @@ class PreparedMirror:
         self.copy_checked(HERE / 'container-architecture.py', scratch / 'container-architecture.py')
         self.copy_checked(HERE / 'shared-runtime.php', scratch / 'shared-runtime.php')
         self.copy_checked(HERE / 'shared-runtime-containers.py', scratch / 'shared-runtime-containers.py')
-        if args.type == 'apk':
-            self.copy_checked(apk_alias_config(), scratch / 'apk-runtime-aliases.json')
         (scratch / 'published-names.json').write_text(json.dumps(sorted({p['name'] for p in
             baseline['packages'] + baseline.get('published_packages', [])})))
         repository = scratch / 'repository'
@@ -1121,8 +1050,6 @@ class PreparedMirror:
         for name in ('migration-upgrade-containers.py', 'container-architecture.py', 'shared-runtime.php', 'shared-runtime-containers.py',
                      'inventory.json', 'published-names.json'):
             self.staged[str(scratch / name)] = source_token(scratch / name, include_ctime=False)
-        if args.type == 'apk':
-            self.staged[str(scratch / 'apk-runtime-aliases.json')] = source_token(scratch / 'apk-runtime-aliases.json', include_ctime=False)
         self.assert_bound(args)
         self.ready = True
 

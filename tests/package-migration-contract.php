@@ -522,7 +522,7 @@ try {
             migrationCheck(str_ends_with(basename($archives[0]), '-8.x86_64.rpm'), 'RPM filename differs from neutral header Release');
         }
     }
-    $capability = 'php-zts-shared-runtime-86-abi20260800-1';
+    $capability = 'php-zts-shared-runtime-86-abi20260800-rc4-1';
     migrationCheck(CreatePackages::getSharedRuntimeCapability() === $capability, 'Shared runtime capability has the wrong PHP stream/module ABI/generation');
     migrationCheck(str_contains($relationships['php-zts-cli']['provides'], $capability), 'CLI native package does not provide its shared-core generation');
     migrationCheck(str_contains($relationships['php-zts-intl']['requires'], $capability), 'Shared module native package does not require its shared-core generation');
@@ -639,6 +639,32 @@ SH;
     migrationCommand(['sh', $stage . '/devel-remove.sh', '0']);
     migrationCheck(is_link($simLib . '/libphp.so') && readlink($simLib . '/libphp.so') === 'libphp-zts-85.so', 'Devel uninstall deleted another stream alias');
     migrationCheck(!is_link($simLib . '/libphp-zts.so'), 'Devel uninstall left its own obsolete alias');
+
+    $simBin = $simulation . '/usr/bin';
+    mkdir($simBin, 0755, true);
+    file_put_contents($simBin . '/php-zts', 'CLI fixture');
+    symlink($simBin . '/php-zts', $simBin . '/php');
+    (new \staticphp\package\cli())->getFpmExtraArgs();
+    foreach (['install', 'remove'] as $operation) {
+        $script = str_replace('/usr/bin/', $simBin . '/', file_get_contents(TEMP_DIR . '/cli-after-' . $operation . '.sh'));
+        file_put_contents($stage . '/cli-' . $operation . '.sh', $script);
+    }
+    migrationCommand(['sh', $stage . '/cli-install.sh', '2']);
+    $oldCliRemoval = 'if [ -L "$1/php" ] && [ "$(readlink "$1/php")" = "$1/php-zts" ]; then rm -f "$1/php"; fi';
+    migrationCommand(['sh', '-c', $oldCliRemoval, 'legacy-cli-removal', $simBin]);
+    migrationCheck(is_link($simBin . '/php') && readlink($simBin . '/php') === 'php-zts', 'Old CLI removal deleted the php command during upgrade');
+    migrationCommand(['sh', $stage . '/cli-remove.sh', '1']);
+    migrationCheck(is_link($simBin . '/php'), 'CLI upgrade removal deleted the php command');
+    migrationCommand(['sh', $stage . '/cli-remove.sh', '0']);
+    migrationCheck(!is_link($simBin . '/php'), 'CLI uninstall retained its php alias');
+    migrationCommand(['sh', $stage . '/cli-install.sh', '1']);
+    migrationCheck(readlink($simBin . '/php') === 'php-zts', 'Fresh CLI install did not create php');
+    unlink($simBin . '/php');
+    file_put_contents($simBin . '/php-other', 'Other PHP fixture');
+    symlink('php-other', $simBin . '/php');
+    migrationCommand(['sh', $stage . '/cli-install.sh', '2']);
+    migrationCommand(['sh', $stage . '/cli-remove.sh', '0']);
+    migrationCheck(readlink($simBin . '/php') === 'php-other', 'CLI replaced or removed another PHP installation');
 
     migrationCheck(hash_file('sha256', $source) === $sourceHash, 'Native packaging mutated the common source ELF');
     file_put_contents($root . '/' . $type . '-result.json', json_encode([

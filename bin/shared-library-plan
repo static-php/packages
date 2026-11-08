@@ -26,7 +26,6 @@ STREAMS = ['8.2', '8.3', '8.4', '8.5', '8.6']
 METADATA = 'usr/share/php-zts/libraries'
 ROOT = Path(__file__).resolve().parent
 ABI_DUMP_FLAGS = ('--no-corpus-path', '--no-show-locs')
-APK_ALIASES = runpy.run_path(str(ROOT.parent / '.github/actions/shared-libraries/apk-aliases.py'))
 
 
 def read_json(path):
@@ -45,6 +44,15 @@ def write_json(path, value):
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def consumer_version_stream(version):
+    tag = re.search(r'(?:\+php|p)(\d{2,})(?=[._~+-]|$)', version)
+    if tag:
+        digits = tag.group(1)
+        return digits[:-1] + '.' + digits[-1]
+    core = re.match(r'\d+\.\d+', version)
+    return core.group() if core else None
 
 
 def file_sha256(path):
@@ -581,7 +589,7 @@ def merge_baselines(baselines, kind, destination):
     merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete', 'consumers' in value) for value, _ in baselines)
     merged['consumer_versions'] = {stream: {} for stream in STREAMS}
     merged['consumer_dependencies'] = {stream: {} for stream in STREAMS}
-    for field in ['consumer_components', 'logical_replacements', 'consumer_native_metadata']:
+    for field in ['consumer_components', 'consumer_native_metadata']:
         merged[field] = {stream: {} for stream in STREAMS}
         for value, _ in baselines:
             for stream, records in value.get(field, {}).items():
@@ -646,8 +654,7 @@ def prepare(args):
         baselines.append((manifest(peer, False), args.peer_baseline))
     request = read_json(args.request) if args.request else {}
     metadata_libraries = set(request.get('library_package_requests', [])) | set(request.get('variant_package_requests', {}).get(args.type, []))
-    if metadata_libraries - current['libraries'].keys():
-        raise RuntimeError('Unknown library metadata requests: ' + ', '.join(sorted(metadata_libraries - current['libraries'].keys())))
+    metadata_libraries.intersection_update(current['libraries'])
     specified = sorted(set(name.strip() for name in (args.libraries or '').split(',') if name.strip()))
     rebuilt = set(name.strip() for name in (getattr(args, 'rebuilt_libraries', None) or '').split(',') if name.strip())
     if specified and args.packages:
@@ -895,7 +902,7 @@ def stage_debug_archive(record, destination):
                     continue
                 url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(record['host'].rstrip('/'), quote(record['owner'], safe=''), package_type,
                                                                quote(record['name'], safe=''), quote(record['package_version'], safe=''), file['id'])
-                with requests.get(url, auth=(record['owner'], password), timeout=120, stream=True) as response:
+                with requests.get(url, auth=(record['owner'], password) if password else None, timeout=120, stream=True) as response:
                     response.raise_for_status()
                     with path.open('wb') as output:
                         for chunk in response.iter_content(1024 * 1024):
@@ -1025,7 +1032,7 @@ def normalized_arch(arch, kind):
     return arch
 
 
-def published_consumers(helper, host, owner, password, kind, architecture, migration=None, dependencies=None, components=None, replacements=None, native_metadata=None):
+def published_consumers(helper, host, owner, password, kind, architecture, migration=None, dependencies=None, components=None, native_metadata=None):
     package_type = 'debian' if kind == 'deb' else 'alpine'
     packages = helper['get_remote_packages'](host, owner, password, package_type)
     result = {}
@@ -1045,18 +1052,6 @@ def published_consumers(helper, host, owner, password, kind, architecture, migra
                 selected[name] = [archive for archive in archives if archive['arch'] == architecture or archive['arch'] in ('all', 'noarch')]
                 break
     stream = owner[0] + '.' + owner[1:]
-    if kind == 'apk':
-        core = next((record.get('native_metadata') for name, records in selected.items() if name.endswith('-cli') for record in records), None)
-        for name, records in list(selected.items()):
-            logical = APK_ALIASES['logical_name'](name)
-            if logical == name or core is None or '!' + logical + '>0' not in core.get('depends', []):
-                continue
-            for record in records:
-                APK_ALIASES['verify_alias'](record.get('native_metadata', {}), record.get('consumer_metadata'), core)
-            result.pop(logical, None)
-            selected.pop(logical, None)
-            if replacements is not None:
-                replacements.setdefault(stream, {})[logical] = name
     for name, records in selected.items():
         if dependencies is not None:
             values = [consumer_dependencies(record.get('consumer_metadata'), name, stream, architecture) for record in records]
@@ -1123,7 +1118,6 @@ def baseline_single(args):
     consumer_versions = {stream: {} for stream in STREAMS}
     dependencies = {stream: {} for stream in STREAMS}
     components = {stream: {} for stream in STREAMS}
-    replacements = {stream: {} for stream in STREAMS}
     native_metadata = {stream: {} for stream in STREAMS}
     migration = {}
     layout_metadata = None
@@ -1219,14 +1213,14 @@ def baseline_single(args):
             package_type = 'debian' if args.type == 'deb' else 'alpine'
             password = os.environ.get(args.password_env, '') if args.password_env else ''
             consumer_password = os.environ.get(args.consumer_password_env, '') if args.consumer_password_env else password
-            auth = (args.owner, password)
+            auth = (args.owner, password) if password else None
             packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
             consumer_streams = STREAMS
             if args.owner in [value.replace('.', '') for value in STREAMS]:
                 consumer_streams = [args.owner[0] + '.' + args.owner[1:]]
             for stream in consumer_streams:
                 owner = stream.replace('.', '')
-                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, replacements, native_metadata)
+                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, native_metadata)
                 consumers[stream].update(versions)
                 consumer_versions[stream].update(versions)
             names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
@@ -1275,7 +1269,6 @@ def baseline_single(args):
     aggregate['consumer_versions'] = consumer_versions
     aggregate['consumer_dependencies'] = dependencies
     aggregate['consumer_components'] = components
-    aggregate['logical_replacements'] = replacements
     aggregate['consumer_native_metadata'] = native_metadata
     aggregate['consumer_inventory_complete'] = True
     aggregate['migration_cutoffs'] = migration
@@ -1313,6 +1306,20 @@ def baseline_single(args):
     write_json(destination / 'shared-libraries.json', aggregate)
 
 
+def missing_forgejo_owner(args, error):
+    import requests
+    if (args.type not in ('deb', 'apk') or getattr(args, 'owner', None) not in [stream.replace('.', '') for stream in STREAMS]
+            or not isinstance(error, requests.HTTPError) or error.response is None or error.response.status_code != 404):
+        return False
+    password = os.environ.get(args.password_env, '') if args.password_env else ''
+    response = requests.get(args.host.rstrip('/') + '/api/v1/users/' + quote(args.owner, safe=''),
+                            auth=(args.owner, password) if password else None, timeout=30)
+    if response.status_code == 404:
+        return True
+    response.raise_for_status()
+    return False
+
+
 def baseline(args):
     destination = Path(args.output)
     if destination.exists() and any(destination.iterdir()):
@@ -1337,17 +1344,26 @@ def baseline(args):
             sources.append(dict(owner=owner, password_env=password_env))
     destination.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='shared-library-baselines-') as temporary:
-        baselines = []
+        baselines, captured, skipped = [], [], []
         for index, source in enumerate(sources):
             source_args = copy.copy(args)
             source_args.__dict__.update(source)
             source_args.output = str(Path(temporary) / str(index))
-            baseline_single(source_args)
+            try:
+                baseline_single(source_args)
+            except Exception as error:
+                if not missing_forgejo_owner(source_args, error):
+                    raise
+                skipped.append(dict(source, reason='owner-not-found'))
+                continue
             baselines.append((manifest(Path(source_args.output) / 'shared-libraries.json', False), source_args.output))
+            captured.append(source)
         merged, divergent = merge_baselines(baselines, args.type, destination)
         merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
         merged['divergent_libraries'] = sorted(divergent)
-        merged['baseline_origins'] = sources
+        merged['baseline_origins'] = captured
+        if skipped:
+            merged['skipped_origins'] = skipped
         write_json(destination / 'shared-libraries.json', merged)
 
 
@@ -1362,26 +1378,6 @@ def cutoff_baseline(path, kind):
     result['consumer_versions'] = {stream: {} for stream in STREAMS}
     result['migration_cutoffs'] = value.get('migration_cutoffs', {})
     packages = value.get('published_packages', value['packages'])
-    if kind == 'apk' and value.get('logical_replacements', {}).get('apk'):
-        helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
-        replacements = value['logical_replacements']['apk']
-        proofs = value.get('replacement_candidates', {}).get('apk', {})
-        for logical, physical in replacements.items():
-            proof = proofs.get(logical, {})
-            archive = rooted(Path(path).parent, proof.get('path', ''))
-            core_path = rooted(Path(path).parent, proof.get('core_path', ''))
-            if (proof.get('name') != physical or file_sha256(archive) != proof.get('archive_sha256')
-                    or file_sha256(core_path) != proof.get('core_archive_sha256')):
-                raise RuntimeError('Frozen APK replacement archive differs from its receipt')
-            native, actual = apk_alias_candidate(archive, helper, value['php_stream'])
-            core = APK_ALIASES['archive_evidence'](core_path)
-            APK_ALIASES['verify_alias'](native, core=core)
-            if any(proof.get(key) != actual.get(key) for key in ['name', 'logical_name', 'version', 'module_sha256', 'core_capability']):
-                raise RuntimeError('Frozen APK replacement differs from native archive evidence')
-        packages = value.get('effective_published_packages')
-        if not isinstance(packages, list) or any(package['name'] in replacements for package in packages):
-            raise RuntimeError('Frozen APK effective inventory does not apply its verified replacements')
-        result['logical_replacements'] = {value['php_stream']: replacements}
     rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
     for package in packages:
         arch = package.get('architecture', package.get('arch'))
@@ -1409,24 +1405,10 @@ def cutoff_baseline(path, kind):
     return result
 
 
-def apk_alias_candidate(path, helper, stream=None):
-    native = APK_ALIASES['archive_evidence'](path)
-    embedded = helper['archive_embedded_metadata'](path, 'alpine', native['name'])
-    stream = stream or (embedded['consumer_metadata'] or {}).get('php_stream')
-    if stream not in STREAMS:
-        raise RuntimeError('APK runtime alias has no valid PHP stream')
-    metadata = helper['consumer_metadata_identity'](embedded['consumer_metadata'], native['name'], native['arch'], stream.replace('.', ''))
-    if metadata is None:
-        raise RuntimeError('APK runtime alias has no compiled consumer metadata')
-    proof = APK_ALIASES['verify_alias'](native, metadata)
-    return native, dict(proof, version=native['version'], php_stream=stream, archive_sha256=file_sha256(path))
-
-
 def migration_cutoffs(args):
     baselines = [cutoff_baseline(path, args.type) for path in args.baseline_manifest]
     published = {}
     inherited = {}
-    inherited_replacements = {}
     for baseline in baselines:
         for name, version in baseline.get('consumer_versions', {}).get(args.php_version, {}).items():
             if name not in published or native_compare(args.type, version, published[name]) > 0:
@@ -1435,11 +1417,6 @@ def migration_cutoffs(args):
             if name in inherited and inherited[name] != version:
                 raise RuntimeError('Published first-shared cutoffs disagree: ' + name)
             inherited[name] = version
-        for logical, physical in baseline.get('logical_replacements', {}).get(args.php_version, {}).items():
-            if (APK_ALIASES['physical_name'](logical) != physical
-                    or logical in inherited_replacements and inherited_replacements[logical] != physical):
-                raise RuntimeError('Published APK runtime replacement mappings disagree')
-            inherited_replacements[logical] = physical
     excluded = {'php-zts', 'php-zts-cli', 'php-zts-runtime-layout', 'pie-zts'}
     published = {name: version for name, version in published.items()
                  if name not in excluded and not name.startswith('php-zts-lib-')
@@ -1447,8 +1424,6 @@ def migration_cutoffs(args):
     required = {name for name, version in published.items()
                 if name not in inherited or native_compare(args.type, version, inherited[name]) < 0}
     candidates = {}
-    replacements = dict(inherited_replacements) if args.type == 'apk' else {}
-    replacement_candidates = {}
     architectures = set()
     helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
     rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
@@ -1459,20 +1434,9 @@ def migration_cutoffs(args):
             stream = rpm['php_stream'](package['version'])
         else:
             name, version, arch = helper['package_metadata'](path, 'debian' if args.type == 'deb' else 'alpine')
-            tag = re.search(r'(?:\+php|p)(\d)(\d+)[._]', version)
-            stream = '{}.{}'.format(*tag.groups()) if tag else re.match(r'\d+\.\d+', version).group() if re.match(r'\d+\.\d+', version) else None
-        alias = args.type == 'apk' and APK_ALIASES['logical_name'](name) != name and not name.endswith('-debuginfo')
-        if alias:
-            native, proof = apk_alias_candidate(path, helper, args.php_version)
-            stream = proof['php_stream']
+            stream = consumer_version_stream(version)
         if stream != args.php_version or name in excluded or name.startswith('php-zts-lib-') or name.endswith(('-debuginfo', '-dbgsym')):
             continue
-        if alias:
-            if (native['name'], native['version'], native['arch']) != (name, version, arch):
-                raise RuntimeError('APK replacement evidence differs from its native package identity')
-            logical = proof['logical_name']
-            replacements[logical] = name
-            replacement_candidates[logical] = proof
         if arch not in ['noarch', 'all']:
             architectures.add(normalized_arch(arch, args.type))
         if name in candidates and candidates[name]['version'] != version:
@@ -1484,7 +1448,7 @@ def migration_cutoffs(args):
         if name in inherited and native_compare(args.type, version, inherited[name]) < 0:
             raise RuntimeError('Candidate precedes the first shared consumer: ' + name)
         candidates[name] = {'version': version, 'sha256': file_sha256(path)}
-    missing = required - set(candidates) - set(replacement_candidates)
+    missing = required - set(candidates)
     if missing:
         raise RuntimeError('Missing published migration consumers: ' + ', '.join(sorted(missing)))
     if len(architectures) > 1:
@@ -1492,13 +1456,11 @@ def migration_cutoffs(args):
     write_json(args.output, {'schema': 1, 'php_stream': args.php_version,
                             'architecture': next(iter(architectures), next((normalized_arch(value['architecture'], args.type) for value in baselines if value.get('architecture')), None)),
                             'formats': {args.type: {**{name: value['version'] for name, value in candidates.items()},
-                                                  **{name: version for name, version in inherited.items() if name not in replacements}}},
-                            'published_versions': {args.type: published}, 'candidate_archives': candidates,
-                            'logical_replacements': {args.type: replacements},
-                            'replacement_candidates': {args.type: replacement_candidates}})
+                                                  **inherited}},
+                            'published_versions': {args.type: published}, 'candidate_archives': candidates})
 
 
-def candidate_progress(current, previous, plan, versions, archives=None, replacements=None):
+def candidate_progress(current, previous, plan, versions, archives=None):
     for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']:
         if current.get(key) != previous.get(key):
             if previous.get(key) is not None or current.get(key) != plan.get('candidate_environment', {}).get(key):
@@ -1522,9 +1484,6 @@ def candidate_progress(current, previous, plan, versions, archives=None, replace
         new = current.get('consumer_versions', {}).get(stream, {})
         for name in old.keys() | new.keys():
             if old.get(name) != new.get(name):
-                replacement = (replacements or {}).get(stream, {}).get(name)
-                if replacement and name not in new and new.get(replacement) == versions.get((stream, replacement)):
-                    continue
                 if (stream, name) not in versions or new.get(name) != versions[(stream, name)]:
                     return False
         old_cutoffs = previous.get('migration_cutoffs', {}).get(stream, {})
@@ -1534,9 +1493,6 @@ def candidate_progress(current, previous, plan, versions, archives=None, replace
                 return False
             for name in old_cutoffs.keys() | new_cutoffs.keys():
                 if name in old_cutoffs and old_cutoffs[name] != new_cutoffs.get(name):
-                    replacement = (replacements or {}).get(stream, {}).get(name)
-                    if replacement and name not in new_cutoffs and new_cutoffs.get(replacement) == versions.get((stream, replacement)):
-                        continue
                     return False
                 if name not in old_cutoffs and new_cutoffs[name] != versions.get((stream, name)):
                     return False
@@ -1564,9 +1520,6 @@ def cohort(args):
     files = []
     candidate_versions = {}
     candidate_archives = {}
-    alias_candidates = {}
-    native_cores = {}
-    embedded_cutoffs = {}
     helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
     rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
     for path in sorted(Path(args.artifacts).rglob('*.' + args.type)):
@@ -1576,25 +1529,12 @@ def cohort(args):
             stream = None if name.startswith('php-zts-lib-') else rpm['php_stream'](version)
         else:
             name, version, architecture = helper['package_metadata'](path, 'debian' if args.type == 'deb' else 'alpine')
-            tag = re.search(r'(?:\+php|p)(\d)(\d+)[._]', version)
-            stream = '{}.{}'.format(*tag.groups()) if tag else re.match(r'\d+\.\d+', version).group() if re.match(r'\d+\.\d+', version) else None
-        alias = args.type == 'apk' and APK_ALIASES['logical_name'](name) != name and not name.endswith('-debuginfo')
-        if alias:
-            native, proof = apk_alias_candidate(path, helper)
-            stream = proof['php_stream']
+            stream = consumer_version_stream(version)
         if name.startswith('php-zts-lib-') or name.removesuffix('-debuginfo') == 'php-zts-runtime-layout':
             stream = None
         members.add(name)
         candidate_versions[(stream, name)] = package['evr'] if args.type == 'rpm' else version
         candidate_archives[(stream, name)] = file_sha256(path)
-        if args.type == 'apk' and stream:
-            if name == 'php-zts-cli':
-                native_cores[stream] = APK_ALIASES['archive_evidence'](path)
-                embedded_cutoffs[stream] = helper['archive_embedded_metadata'](path, 'alpine', name)['migration_cutoffs']
-            elif alias:
-                if (native['name'], native['version'], native['arch']) != (name, version, architecture):
-                    raise RuntimeError('APK replacement evidence differs from its native package identity')
-                alias_candidates.setdefault(stream, {})[proof['logical_name']] = (native, proof)
         previous_consumer = plan.get('published_consumers', {}).get(stream, {}).get(name)
         if previous_consumer and native_compare(args.type, package['evr'] if args.type == 'rpm' else version, previous_consumer) <= 0:
             raise RuntimeError('ABI transition consumer must have a new package revision: ' + name)
@@ -1631,50 +1571,15 @@ def cohort(args):
         if name == 'php-zts-cli' and stream:
             streams.add(stream)
         files.append({'name': name, 'version': version, 'architecture': architecture, 'path': str(path), 'sha256': candidate_archives[(stream, name)]})
-    replacements = {}
-    for stream, candidates in alias_candidates.items():
-        core = native_cores.get(stream)
-        if core is None:
-            baselines = [current_baseline] if current_baseline else plan.get('baseline_states', [])
-            cores = [baseline.get('consumer_native_metadata', {}).get(stream, {}).get('php-zts-cli')
-                     for baseline in baselines if baseline]
-            core = next((value for value in cores if value), None)
-        if core is None:
-            raise RuntimeError('APK replacement cohort lacks a verified shared CLI generation')
-        for logical, (native, proof) in candidates.items():
-            APK_ALIASES['verify_alias'](native, core=core)
-            if stream in native_cores:
-                cutoffs = embedded_cutoffs[stream] or {}
-                recorded = cutoffs.get('replacement_candidates', {}).get('apk', {}).get(logical, {})
-                if (cutoffs.get('logical_replacements', {}).get('apk', {}).get(logical) != proof['name']
-                        or any(recorded.get(key) != proof.get(key) for key in ['name', 'logical_name', 'version', 'module_sha256', 'core_capability', 'archive_sha256'])):
-                    raise RuntimeError('APK CLI migration cutoffs differ from the replacement cohort')
-            replacements.setdefault(stream, {})[logical] = proof['name']
-            consumer_members[stream].add(logical)
-    for stream, core in native_cores.items():
-        for logical, physical in (embedded_cutoffs[stream] or {}).get('logical_replacements', {}).get('apk', {}).items():
-            if APK_ALIASES['physical_name'](logical) != physical:
-                raise RuntimeError('APK CLI cutoff names an unconfigured runtime replacement')
-            if replacements.get(stream, {}).get(logical) == physical:
-                continue
-            baselines = [current_baseline] if current_baseline else plan.get('baseline_states', [])
-            published = next((baseline.get('consumer_native_metadata', {}).get(stream, {}).get(physical)
-                              for baseline in baselines if baseline and baseline.get('logical_replacements', {}).get(stream, {}).get(logical) == physical
-                              and baseline.get('consumer_native_metadata', {}).get(stream, {}).get(physical)), None)
-            if published is None:
-                raise RuntimeError('APK CLI inherited replacement has no verified published alias')
-            APK_ALIASES['verify_alias'](published, core=core)
-            replacements.setdefault(stream, {})[logical] = physical
     missing = set(plan.get('expected_members', [])) - members
     missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full')} - streams
     missing_consumers = {stream: sorted(set(names) - consumer_members[stream]) for stream, names in plan.get('expected_consumers', {}).items()
                          if set(names) - consumer_members[stream]}
     if missing or missing_streams or missing_consumers:
         raise RuntimeError('Incomplete shared-library cohort; missing packages {}, full PHP streams {}, consumers {}'.format(', '.join(sorted(missing)), ', '.join(sorted(missing_streams)), json.dumps(missing_consumers, sort_keys=True)))
-    if baseline_changed and not any(candidate_progress(current_baseline, previous, plan, candidate_versions, candidate_archives, replacements) for previous in plan.get('baseline_states', [])):
+    if baseline_changed and not any(candidate_progress(current_baseline, previous, plan, candidate_versions, candidate_archives) for previous in plan.get('baseline_states', [])):
         raise RuntimeError('Published library baseline changed during the build; prepare a new cohort')
-    write_json(args.output, {'schema': 1, 'plan_fingerprint': digest(plan), 'baseline_fingerprint': plan['baseline_fingerprint'], 'files': files,
-                            'logical_replacements': replacements})
+    write_json(args.output, {'schema': 1, 'plan_fingerprint': digest(plan), 'baseline_fingerprint': plan['baseline_fingerprint'], 'files': files})
 
 
 def main():

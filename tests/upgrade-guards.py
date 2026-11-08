@@ -38,6 +38,18 @@ class UpgradeGuards(unittest.TestCase):
             result = forgejo['get_remote_packages']('https://example.com', '86', 'test', 'debian')
             self.assertEqual(len(result), 2)
             self.assertEqual([call[1]['params']['page'] for call in get.call_args_list], [1, 2, 3])
+            self.assertTrue(all(call[1]['auth'] == ('86', 'test') for call in get.call_args_list))
+
+    def test_public_forgejo_reads_omit_empty_credentials(self):
+        for password in ('', None):
+            with self.subTest(password=password):
+                package = {'name': 'php-zts-cli', 'version': '82.35'}
+                responses = [Mock(json=lambda: [package]), Mock(json=lambda: []), Mock(status_code=200, json=lambda: [])]
+                with patch.object(requests, 'get', side_effect=responses) as get:
+                    self.assertEqual(forgejo['get_remote_packages']('https://example.com', '82', password, 'debian'), [package])
+                    self.assertEqual(forgejo['get_remote_package_files']('https://example.com', '82', password, 'debian', 'php-zts-cli', '82.35'), [])
+                    self.assertEqual(get.call_count, 3)
+                    self.assertTrue(all(call[1]['auth'] is None for call in get.call_args_list))
 
     def test_forgejo_skips_lower_package(self):
         files = [root / 'safe.deb', root / 'older.deb', root / 'older-debuginfo.deb']

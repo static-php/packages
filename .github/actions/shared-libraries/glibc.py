@@ -289,7 +289,7 @@ def preflight_consumers(stream, package_type, packages):
         names = {'frankenphp' if name == 'frankenphp' else 'pie-zts' if name == 'pie' else 'php-zts-' + name
                  for name in packages.split(',')}
         candidates = read(candidates_path)
-        candidates['candidates'] = [candidate for candidate in candidates['candidates'] if candidate.get('logical_name', candidate['name']) in names]
+        candidates['candidates'] = [candidate for candidate in candidates['candidates'] if candidate['name'] in names]
         if not candidates['candidates']:
             raise RuntimeError('No immutable source version evidence for the requested PHP build')
         write(candidates_path, candidates)

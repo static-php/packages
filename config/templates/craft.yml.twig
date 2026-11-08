@@ -3,7 +3,6 @@
 {%- set type = type == 'apk' ? 'apk' : 'rpm' -%}
 {%- set use_php_lto = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 6) -%}
 {%- set use_tailcall_vm = use_php_lto -%}
-{%- set drop_memcache = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 5) -%}
 {# compile flags #}
 {%- set arch_flags = arch == 'x86_64' ? ' -mtls-dialect=gnu2 -m64 -fcf-protection' : '' -%}
 {%- if arch == 'x86_64' and os == '10' %} {% set arch_flags = arch_flags ~ ' -march=x86-64-v3' -%} {%- endif -%}
@@ -15,7 +14,7 @@
 {%- set specs_cflags = '-specs=/usr/lib/rpm/redhat/redhat-hardened-cc1' -%}
 {%- set specs_ldflags = '-specs=/usr/lib/rpm/redhat/redhat-hardened-ld' ~ (os == '10' ? ' -Wl,-z,pack-relative-relocs' : '') -%}
 {%- set cflags =
-  '-fPIC -O3 -pipe -fno-plt -fno-semantic-interposition -fstack-clash-protection -fno-omit-frame-pointer -momit-leaf-frame-pointer -ffunction-sections -fdata-sections' ~ arch_flags
+  '-g -fPIC -O3 -pipe -fno-plt -fno-semantic-interposition -fstack-clash-protection -fno-omit-frame-pointer -momit-leaf-frame-pointer -ffunction-sections -fdata-sections' ~ arch_flags
 -%}
 {%- set cflags = (using_gcc ? '' : '-flto=thin ') ~ cflags -%}
 {%- set php_optimization_flags = not using_gcc or use_php_lto ? ' -flto' : '' -%}
@@ -64,7 +63,8 @@
 
 {%- set base_extensions = base_extensions_str|split(',')|map(v => v|trim) -%}
 {%- set base_shared = base_shared_str|split(',')|map(v => v|trim) -%}
-{%- set base_shared = drop_memcache ? base_shared|filter(v => v != 'memcache') : base_shared -%}
+{%- set base_shared = php_version >= '8.5' ? base_shared|filter(v => v != 'memcache' ) : base_shared -%}
+{%- set base_shared = php_version >= '8.6' ? base_shared|filter(v => v != 'swoole' ) : base_shared -%}
 {%- set base_sapi = base_sapi_str|split(',')|map(v => v|trim) -%}
 
 {# Apply optional filtering #}

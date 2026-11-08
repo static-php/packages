@@ -5,7 +5,6 @@ declare(strict_types=1);
 
 use staticphp\Command\TestCommand;
 use staticphp\step\CreatePackages;
-use staticphp\util\ApkRuntimeAliases;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -60,8 +59,9 @@ function preflightVersionStream(string $type, string $version, ?string $ownerStr
     return preg_match('/^(8\.[2-6])(?:[.~]|$)/', $version, $match) ? $match[1] : null;
 }
 
-function preflightNumericUpstream(string $version): string
+function preflightNumericUpstream(string $version, ?string $type = null): string
 {
+    $version = $type === null ? $version : (CreatePackages::migrationUpstreamVersion($type, $version) ?? $version);
     $version = preg_replace('/^\d+:/', '', $version);
     if (!preg_match('/^(\d+(?:\.\d+)+)/', $version, $match)) {
         throw new RuntimeException('Cannot identify numeric upstream version: ' . $version);
@@ -69,17 +69,6 @@ function preflightNumericUpstream(string $version): string
     return $match[1];
 }
 
-
-function preflightHighestVersion(array $versions, callable $compare): ?string
-{
-    $highest = null;
-    foreach ($versions as $version) {
-        if ($highest === null || $compare($version, $highest) > 0) {
-            $highest = $version;
-        }
-    }
-    return $highest;
-}
 
 function preflightPublished(array $paths, string $type, string $architecture): array
 {
@@ -152,21 +141,8 @@ function preflightConsumerVersions(array $options): array
         }
         $stream = $candidate['php_stream'];
         $name = $type === 'deb' ? str_replace('_', '-', $candidate['name']) : $candidate['name'];
-        $logicalName = $name;
-        if ($type === 'apk') {
-            $logicalName = $candidate['logical_name'] ?? ApkRuntimeAliases::logicalName($name);
-            if (!is_string($logicalName)) {
-                throw new RuntimeException('Invalid candidate logical package identity');
-            }
-            $physicalName = ApkRuntimeAliases::physicalName($logicalName);
-            if (!in_array($name, [$logicalName, $physicalName], true)) {
-                throw new RuntimeException('Candidate package alias differs from the central configuration');
-            }
-            $name = $physicalName;
-            $extension = ApkRuntimeAliases::extension($name);
-            if ($extension !== null && isset($candidate['component']) && $candidate['component'] !== $extension) {
-                throw new RuntimeException('Candidate alias source component differs from the central configuration');
-            }
+        if (($candidate['logical_name'] ?? $name) !== $name) {
+            throw new RuntimeException('Candidate package renames are not supported');
         }
         if (!preg_match('/^8\.[2-6]$/D', $stream) || !preg_match('/^[a-z0-9][a-z0-9+_.-]*$/D', $name)) {
             throw new RuntimeException('Invalid candidate package identity');
@@ -183,7 +159,7 @@ function preflightConsumerVersions(array $options): array
         $runtime->setValue(null, [$php, $architecture]);
         $upstream = CreatePackages::normalizeVersion($candidate['upstream_version']);
         $base = $upstream === $php ? ($type === 'apk' ? CreatePackages::toApkVersion($php) : $php)
-            : CreatePackages::getTaggedPackageVersion($type, $upstream);
+            : CreatePackages::getTaggedPackageVersion($type, $upstream, !str_starts_with($name, 'pie-'));
         $base = CreatePackages::migrationPackageVersion($type, $name, $base, $architecture);
         $minimumMigration = $iteration->invoke(null, $name, $base, $architecture, $type);
         $revision = $minimumMigration;
@@ -208,35 +184,15 @@ function preflightConsumerVersions(array $options): array
         $record = array_merge($candidate, ['name' => $name, 'version' => $version, 'production_base_version' => $base,
             'migration_minimum_iteration' => $minimumMigration, 'packaging_iteration' => $revision,
             'published_versions' => array_keys($published[$stream][$name] ?? [])]);
-        if ($logicalName !== $name) {
-            $record['logical_name'] = $logicalName;
-            $record['published_source_versions'] = [];
-            foreach (array_unique([$logicalName, $name]) as $sourceName) {
-                $sourceVersions = array_keys($published[$stream][$sourceName] ?? []);
-                $highest = preflightHighestVersion($sourceVersions, $compare);
-                if ($highest === null) {
-                    continue;
-                }
-                $record['published_source_versions'][$sourceName] = $highest;
-                $currentUpstream = CreatePackages::migrationUpstreamVersion($type, $base) ?? $upstream;
-                foreach ($sourceVersions as $old) {
-                    $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($old));
-                    $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $old);
-                    $phase = $oldUpstream === null ? 0 : $compare(CreatePackages::toApkVersion($currentUpstream), CreatePackages::toApkVersion($oldUpstream));
-                    if ($numeric < 0 || $phase < 0) {
-                        $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'logical_name' => $logicalName,
-                            'candidate' => $version, 'published' => $old,
-                            'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'upstream-phase-rollback'];
-                    }
-                }
-            }
-        }
         foreach ($record['published_versions'] as $old) {
-            $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($old));
+            $numeric = $compare(preflightNumericUpstream($upstream), preflightNumericUpstream($old, $type));
+            $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $old);
+            $phase = $type !== 'apk' || $oldUpstream === null ? 0
+                : $compare(CreatePackages::toApkVersion($upstream), CreatePackages::toApkVersion($oldUpstream));
             $ordering = $compare($version, $old);
-            if ($numeric < 0 || $ordering < 0) {
+            if ($numeric < 0 || $phase < 0 || $ordering < 0) {
                 $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'candidate' => $version,
-                    'published' => $old, 'reason' => $numeric < 0 ? 'upstream-version-rollback' : 'native-version-downgrade'];
+                    'published' => $old, 'reason' => $numeric < 0 ? 'upstream-version-rollback' : ($phase < 0 ? 'upstream-phase-rollback' : 'native-version-downgrade')];
             }
         }
         $receipt['candidates'][] = $record;

@@ -6,7 +6,6 @@ import hashlib
 import json
 import requests
 import re
-import runpy
 import subprocess
 import tarfile
 import tempfile
@@ -25,8 +24,28 @@ host2 = "https://git.static-php.dev"
 
 STREAM_OWNERS = ('82', '83', '84', '85', '86')
 
-def apk_aliases():
-    return runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/apk-aliases.py'))
+def registry_auth(owner, password):
+    return (owner, password) if password else None
+
+
+def apk_native_metadata(path):
+    with gzip.GzipFile(filename=str(path)) as stream, tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
+        for member in archive:
+            if member.name.removeprefix('./').lstrip('/') != '.PKGINFO':
+                continue
+            if not member.isfile() or member.size > 1024 * 1024:
+                raise RuntimeError('Invalid APK control metadata')
+            fields = {}
+            for line in archive.extractfile(member).read().decode().splitlines():
+                if ' = ' in line:
+                    key, value = line.split(' = ', 1)
+                    fields.setdefault(key, []).append(value)
+            return {'name': fields.get('pkgname', [None])[0], 'version': fields.get('pkgver', [None])[0],
+                    'arch': fields.get('arch', [None])[0], 'depends': fields.get('depend', []),
+                    'provides': fields.get('provides', []), 'replaces': fields.get('replaces', []),
+                    'provider_priority': fields.get('provider_priority', [])}
+    raise RuntimeError('APK archive has no control metadata')
+
 
 def get_remote_packages(host, owner, password, pkg_type):
     url = f"{host}/api/v1/packages/{owner}"
@@ -35,7 +54,7 @@ def get_remote_packages(host, owner, password, pkg_type):
     previous = None
     while True:
         params = {"type": pkg_type, "limit": 1000, "page": page}
-        response = requests.get(url, params=params, auth=(owner, password), timeout=30)
+        response = requests.get(url, params=params, auth=registry_auth(owner, password), timeout=30)
         response.raise_for_status()
         batch = response.json()
         if not isinstance(batch, list):
@@ -54,7 +73,7 @@ def get_remote_packages_for_owners(host, owners, password, pkg_type):
 
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
-    response = requests.get(url, auth=(owner, password), timeout=30)
+    response = requests.get(url, auth=registry_auth(owner, password), timeout=30)
     if response.status_code == 404:
         return []
     response.raise_for_status()
@@ -149,12 +168,8 @@ def consumer_metadata_identity(value, name, architecture, owner):
             or any(not isinstance(library, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', library) for library in libraries)
             or len(libraries) != len(set(libraries))):
         raise RuntimeError(f'Consumer metadata identity differs from archive header or stream owner: {owner}/{name}')
-    logical = value.get('logical_name', name)
-    if logical != name:
-        aliases = apk_aliases()
-        if (aliases['physical_name'](logical) != name or aliases['extension_name'](name) != value.get('extension')
-                or not re.fullmatch('[a-f0-9]{64}', value.get('module_sha256', ''))):
-            raise RuntimeError('Consumer logical alias metadata differs from its runtime package')
+    if value.get('logical_name', name) != name:
+        raise RuntimeError('Consumer package renames are not supported')
     return dict(value, architecture=normalize_arch(value['architecture']))
 
 def consumer_sidecar_url(host, owner, digest):
@@ -179,17 +194,13 @@ def validate_consumer_sidecar(value, owner, pkg_type, name, version, digest):
     native = value.get('native_metadata')
     if native is not None and any(native.get(field) != value.get(field) for field in ('name', 'version', 'arch')):
         raise RuntimeError('Consumer sidecar native headers differ from its archive identity')
-    if pkg_type == 'alpine' and apk_aliases()['logical_name'](name) != name and not name.endswith('-debuginfo'):
-        if native is None:
-            raise RuntimeError('APK runtime alias sidecar lacks native replacement proof')
-        apk_aliases()['verify_alias'](native, consumer)
     return dict(value, consumer_metadata=consumer)
 
 def read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest):
     if not isinstance(digest, str) or not re.fullmatch(r'[a-fA-F0-9]{64}', digest):
         return None
     digest = digest.lower()
-    with requests.get(consumer_sidecar_url(host, owner, digest), auth=(owner, password), timeout=30, stream=True) as response:
+    with requests.get(consumer_sidecar_url(host, owner, digest), auth=registry_auth(owner, password), timeout=30, stream=True) as response:
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -210,7 +221,7 @@ def publish_consumer_sidecar(host, owner, password, pkg_type, path):
     if embedded['consumer_metadata'] is None and embedded['migration_cutoffs'] is None:
         return
     digest = archive_sha256(path)
-    native = apk_aliases()['archive_evidence'](path) if pkg_type == 'alpine' else None
+    native = apk_native_metadata(path) if pkg_type == 'alpine' else None
     value = validate_consumer_sidecar(dict(schema=1, package_type=pkg_type, name=name, version=version,
                                           arch=arch, sha256=digest, native_metadata=native, **embedded), owner, pkg_type, name, version, digest)
     existing = read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest)
@@ -243,7 +254,7 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
                 continue
             path = Path(temporary) / ('archive' + extension)
             digest = hashlib.sha256()
-            with requests.get(url, auth=(owner, password), timeout=60, stream=True) as response:
+            with requests.get(url, auth=registry_auth(owner, password), timeout=60, stream=True) as response:
                 response.raise_for_status()
                 with path.open('wb') as archive:
                     for block in response.iter_content(1024 * 1024):
@@ -258,9 +269,7 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
             embedded = archive_embedded_metadata(path, pkg_type, name)
             cutoffs = embedded['migration_cutoffs'] if name.endswith('-cli') else None
             consumer = consumer_metadata_identity(embedded['consumer_metadata'], name, arch, owner)
-            native = apk_aliases()['archive_evidence'](path) if pkg_type == 'alpine' else None
-            if pkg_type == 'alpine' and apk_aliases()['logical_name'](name) != name and not name.endswith('-debuginfo'):
-                apk_aliases()['verify_alias'](native, consumer)
+            native = apk_native_metadata(path) if pkg_type == 'alpine' else None
             if cutoffs is not None:
                 normalize_arch = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
                 stream = re.match(r'(?:\d+:)?(\d+\.\d+)', version)
@@ -281,7 +290,7 @@ def get_remote_package_archs(host, owner, password, pkg_type, name, version, str
     if pkg_type in ('debian', 'alpine'):
         return {record['arch'] for record in remote_package_archives(host, owner, password, pkg_type, name, version)}
     url = f"{host}/api/v1/packages/{owner}/{pkg_type}/{name}/{version}/files"
-    resp = requests.get(url, auth=(owner, password), timeout=30)
+    resp = requests.get(url, auth=registry_auth(owner, password), timeout=30)
     if strict:
         resp.raise_for_status()
     archs = set()

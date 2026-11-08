@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import runpy
@@ -50,11 +51,32 @@ function readBytes($socket,$count) {$result='';while(strlen($result)<$count){$ch
 while(true){$h=unpack('Cversion/Ctype/nid/nlength/Cpadding/Creserved',readBytes($socket,8));$body=readBytes($socket,$h['length']);if($h['padding'])readBytes($socket,$h['padding']);if($h['type']===6)$output.=$body;if($h['type']===7)$errors.=$body;if($h['type']===3)break;}
 if($errors!==''){fwrite(STDERR,$errors);exit(1);}echo $output;
 '''
+SERVICE_PROBE = r'''<?php
+$exe = readlink('/proc/self/exe');
+if (str_ends_with($exe, ' (deleted)')) throw new RuntimeException('Deleted service executable');
+$mapped = stat('/proc/self/exe');
+$installed = stat($exe);
+if ($mapped['dev'] !== $installed['dev'] || $mapped['ino'] !== $installed['ino']) throw new RuntimeException('Stale service executable');
+$rows = [];
+foreach (explode("\n", file_get_contents('/proc/self/maps')) as $line) {
+    $fields = preg_split('/\s+/', $line, 6);
+    if (count($fields) < 6) continue;
+    $name = $fields[5];
+    if (!str_contains($name, '/php-zts/') && !str_contains($name, '/libphp-zts')) continue;
+    if (str_ends_with($name, ' (deleted)')) throw new RuntimeException('Deleted runtime mapping: ' . $name);
+    $current = stat($name);
+    if ($current['ino'] !== (int) $fields[4]) throw new RuntimeException('Stale runtime inode: ' . $name);
+    $rows[] = ['path' => $name, 'inode' => $current['ino']];
+}
+echo "SPP_SERVICE_OK\n", json_encode(['pid' => getmypid(), 'exe' => $exe,
+    'exe_inode' => $mapped['ino'], 'exe_device' => $mapped['dev'], 'runtime_mappings' => $rows], JSON_THROW_ON_ERROR);
+'''
 
 
 class Harness:
     def __init__(self, args):
         self.args = args
+        self.engine = getattr(args, 'container_engine', 'docker')
         self.temporary = tempfile.TemporaryDirectory(prefix='spp-real-services-')
         self.directory = Path(self.temporary.name)
         self.token = self.directory.name.rsplit('-', 1)[-1]
@@ -66,7 +88,30 @@ class Harness:
         self.report = {'schema': 1, 'type': args.type, 'php_stream': args.php_stream, 'scenarios': [], 'commands': [], 'real_service_manager': True, 'probe_only': args.probe_only, 'scope': 'Real service lifecycle; local signed repository URL. Production URL migration is validated separately.', 'host_cgroup_bind': False, 'public_changes': False, 'complete': False}
 
     def command(self, command, check=True, timeout=1800, input=None):
+        if Path(command[0]).name in ('systemctl', 'service', 'rc-service', 'rc-update', 'openrc',
+                                     'shutdown', 'reboot', 'poweroff', 'halt', 'init', 'telinit', 'loginctl'):
+            raise RuntimeError('Host service and shutdown commands are forbidden; execute in a tracked test container')
+        podman_resources = False
+        podman_image = False
+        if command[0] == 'docker':
+            command = [self.engine, *command[1:]]
+            if Path(self.engine).name == 'podman':
+                if command[1:3] == ['rm', '-f']:
+                    command = [*command[:3], '--time', '0', *command[3:]]
+                if command[1:3] == ['info', '--format']:
+                    command = [*command[:3], command[3].replace('{{.Architecture}}', '{{.Host.Arch}}')
+                               .replace('{{.ID}}', '{{.Store.GraphRoot}}'), *command[4:]]
+                if command[1:4] == ['inspect', '--format', '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.NanoCpus}}']:
+                    command = [self.engine, 'inspect', *command[4:]]
+                    podman_resources = True
+                podman_image = command[1:4] == ['inspect', '--format', '{{.Image}}']
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, input=input)
+        if result.returncode == 0 and podman_resources:
+            config = json.loads(result.stdout)[0]['HostConfig']
+            nanocpus = config.get('NanoCpus') or int(config.get('CpuQuota', 0) * 1_000_000_000 / (config.get('CpuPeriod') or 100000))
+            result.stdout = '{} {} {}'.format(config['Memory'], config['MemorySwap'], nanocpus)
+        if result.returncode == 0 and podman_image and re.fullmatch(r'[0-9a-f]{64}', result.stdout.strip()):
+            result.stdout = 'sha256:' + result.stdout.strip()
         self.report['commands'].append({'command': command, 'returncode': result.returncode, 'stdout_tail': result.stdout[-2500:], 'stderr_tail': result.stderr[-2500:]})
         if check and result.returncode:
             raise RuntimeError('Command failed: ' + ' '.join(command) + '\n' + result.stdout[-2500:] + result.stderr[-2500:])
@@ -76,22 +121,60 @@ class Harness:
         resource_role = kwargs.pop('resource_role', 'client')
         if arguments[0] != 'run':
             return self.command(['docker', *arguments], **kwargs)
+        namespace_options = {'--pid', '--ipc', '--cgroupns', '--network', '--net', '--uts', '--userns'}
+        for index, value in enumerate(arguments):
+            option, _, inline = value.partition('=')
+            if option in namespace_options:
+                mode = inline or (arguments[index + 1] if index + 1 < len(arguments) else '')
+                if mode == 'host' or mode.startswith('container:'):
+                    raise RuntimeError('Host or shared container namespaces are forbidden')
+            if option in ('-v', '--volume', '--mount'):
+                mount = inline or (arguments[index + 1] if index + 1 < len(arguments) else '')
+                if option == '--mount':
+                    fields = dict(part.split('=', 1) for part in mount.split(',') if '=' in part)
+                    source = fields.get('src', fields.get('source', ''))
+                else:
+                    source = mount.split(':', 1)[0]
+                self.check_host_mount(source)
         identity = ARCHITECTURE['engine_identity'](self.command, getattr(self.args, 'arch', None),
                                                   getattr(self.args, 'allow_emulation', False))
         if self.execution is not None and identity != self.execution:
-            raise RuntimeError('Docker engine/execution mode changed during runtime validation')
+            raise RuntimeError('Container engine/execution mode changed during runtime validation')
         self.execution = identity
         self.report.update(execution=identity, native=identity['native'], emulated=identity['emulated'],
                            runtime_evidence=self.runtime_evidence)
         limits = ARCHITECTURE['resource_limits'](resource_role, self.args.image)
         result = self.command(['docker', 'run', *ARCHITECTURE['container_options'](identity),
                                *ARCHITECTURE['resource_options'](limits), *arguments[1:]], **kwargs)
-        self.runtime_evidence.append(ARCHITECTURE['container_identity'](self.command, result.stdout.strip(), identity, limits))
+        evidence = ARCHITECTURE['container_identity'](self.command, result.stdout.strip(), identity, limits)
+        inspected = json.loads(self.command(['docker', 'inspect', result.stdout.strip()]).stdout)[0]
+        security = inspected['HostConfig']
+        if any(security.get(key, '') == 'host' or str(security.get(key, '')).startswith('container:')
+               for key in ('PidMode', 'IpcMode', 'CgroupnsMode', 'NetworkMode', 'UTSMode', 'UsernsMode')):
+            raise RuntimeError('Runtime container shares a host or another container namespace')
+        for mount in inspected.get('Mounts', []):
+            if mount.get('Type') == 'bind':
+                self.check_host_mount(mount['Source'])
+        evidence.update(container_engine=self.engine, privileged=security['Privileged'],
+                        added_capabilities=security.get('CapAdd') or [],
+                        host_namespaces=False, host_control_mounts=False)
+        self.runtime_evidence.append(evidence)
         return result
 
     def execute(self, container, *arguments, **kwargs):
+        if container not in self.containers:
+            raise RuntimeError('Container execution requires a tracked test container')
         options = ['-i'] if kwargs.get('input') is not None else []
         return self.docker('exec', *options, container, 'env', '-u', 'LD_LIBRARY_PATH', '-u', 'PHPRC', '-u', 'PHP_INI_SCAN_DIR', *arguments, **kwargs)
+
+    @staticmethod
+    def check_host_mount(source):
+        if not source.startswith('/'):
+            return
+        path = Path(source).resolve()
+        protected = ['/run', '/sys', '/proc', '/dev', '/etc/systemd', '/usr/lib/systemd', '/var/lib/docker']
+        if path == Path('/') or path.is_socket() or any(path == Path(root) or Path(root) in path.parents for root in protected):
+            raise RuntimeError('Host-control mounts are forbidden: ' + source)
 
     def write(self, container, path, contents):
         source = self.directory / ('write-' + str(len(self.report['commands'])))
@@ -114,13 +197,16 @@ class Harness:
     def boot(self, image, scenario):
         name = 'spp-services-' + self.token + '-' + scenario
         self.containers.append(name)
-        options = ['run', '-d', '--name', name, '--tmpfs', '/run', '--tmpfs', '/run/lock', '--tmpfs', '/tmp']
-        if self.args.type == 'apk':
-            options += ['--cap-add', 'SYS_PTRACE']
+        options = ['run', '-d', '--name', name, '--pid=private', '--ipc=private', '--cgroupns=private',
+                   '--tmpfs', '/run', '--tmpfs', '/run/lock', '--tmpfs', '/tmp']
         if self.network:
             options += ['--network', self.network]
-        if self.args.type != 'apk':
-            options += ['--privileged', '--cgroupns=private', '--stop-signal', 'SIGRTMIN+3']
+        if Path(self.engine).name == 'podman':
+            options += ['--systemd=always', '--security-opt', 'no-new-privileges']
+        elif self.args.type == 'apk':
+            options += ['--cap-add', 'SYS_PTRACE']
+        else:
+            options += ['--privileged', '--stop-signal', 'SIGRTMIN+3']
         self.docker(*options, image, '/sbin/init')
         for _ in range(40):
             if self.args.type == 'apk':
@@ -219,7 +305,7 @@ class Harness:
             self.service(container, service, 'stop', check=False)
         self.write(container, confdir + '/fpm.d/www.conf', '[www]\nuser=frankenphp\ngroup=frankenphp\nlisten=127.0.0.1:9074\npm=static\npm.max_children=2\ncatch_workers_output=yes\n')
         self.write(container, '/etc/frankenphp/Caddyfile', '{\n admin off\n auto_https off\n frankenphp\n}\n:8087 {\n root * /usr/share/php-zts-service-test\n php_server\n}\n')
-        self.write(container, '/usr/share/php-zts-service-test/index.php', '<?php echo "SPP_SERVICE_OK";\n')
+        self.write(container, '/usr/share/php-zts-service-test/index.php', SERVICE_PROBE)
         self.write(container, '/usr/share/php-zts-service-test/fcgi-client.php', FCGI)
         self.execute(container, 'chmod', '0755', '/usr/share/php-zts-service-test')
         self.execute(container, 'chmod', '0644', '/usr/share/php-zts-service-test/index.php')
@@ -241,7 +327,7 @@ class Harness:
             raw = self.execute(container, 'python3', '-c', program).stdout
         return {name: version for name, version in (line.split('|', 1) for line in raw.splitlines()) if name.startswith(self.args.prefix) or name.startswith(self.args.frankenphp) or name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout'}
 
-    def inspect(self, container, service):
+    def inspect(self, container, service, response=None):
         if self.args.type == 'apk':
             pidfile = '/run/' + service + ('/openrc.pid' if service.startswith('php-fpm') else '/' + service + '.pid')
             pid = int(self.execute(container, 'cat', pidfile).stdout.strip())
@@ -250,8 +336,20 @@ class Harness:
         if pid <= 1:
             raise RuntimeError('Invalid managed service PID: ' + service)
         executable = ('/usr/sbin/' if service.startswith('php-fpm') else '/usr/bin/') + service
+        if not service.startswith('php-fpm'):
+            result = json.loads(response.split('SPP_SERVICE_OK\n', 1)[1])
+            installed = self.execute(container, 'stat', '-Lc', '%d:%i', executable).stdout.strip()
+            if (result['pid'] != pid or result['exe'] != executable
+                    or '{}:{}'.format(result['exe_device'], result['exe_inode']) != installed):
+                raise RuntimeError('Service response does not match its managed executable: ' + service)
+            return result
         program = r'''import pathlib,os,json,sys
 p=int(sys.argv[1]); rows=[]; expected=sys.argv[2]
+owner=os.stat('/proc/%d'%p)
+if os.geteuid()!=owner.st_uid:
+    os.setgroups([])
+    os.setgid(owner.st_gid)
+    os.setuid(owner.st_uid)
 actual=os.readlink('/proc/%d/exe'%p)
 if actual.endswith(' (deleted)'): raise RuntimeError('Deleted service executable: '+actual)
 mapped=os.stat('/proc/%d/exe'%p); installed=os.stat(expected)
@@ -265,7 +363,7 @@ for line in pathlib.Path('/proc/%d/maps'%p).read_text().splitlines():
     st=os.stat(name)
     if st.st_ino != int(fields[4]): raise RuntimeError('Stale runtime inode: '+name)
     rows.append({'path':name,'inode':st.st_ino})
-print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappings':rows}))'''
+print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappings':rows,'inspector_uid':os.geteuid(),'service_uid':owner.st_uid}))'''
         return json.loads(self.execute(container, 'python3', '-c', program, str(pid), executable).stdout)
 
     def health(self, container, expected_active, expected_enabled=None):
@@ -290,7 +388,7 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
                         body = self.execute(container, 'curl', '--fail', '--silent', '--max-time', '10', 'http://127.0.0.1:8087/').stdout
                     if 'SPP_SERVICE_OK' not in body:
                         raise RuntimeError('Incorrect service response: ' + service)
-                    result[service] = dict(self.inspect(container, service), active=True, enabled=self.enabled(container, service), response_sha256=hashlib.sha256(body.encode()).hexdigest())
+                    result[service] = dict(self.inspect(container, service, body), active=True, enabled=self.enabled(container, service), response_sha256=hashlib.sha256(body.encode()).hexdigest())
                 return result
             except (RuntimeError, ValueError):
                 time.sleep(.5)
@@ -386,6 +484,7 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
 def main():
     parser = argparse.ArgumentParser(description='Real init-system PHP service upgrade validation; never mounts host cgroups or changes host services.')
     parser.add_argument('--type', choices=['rpm', 'deb', 'apk'], required=True)
+    parser.add_argument('--container-engine', default='docker', help='Container engine executable (default: docker)')
     parser.add_argument('--image')
     parser.add_argument('--arch', choices=['x86_64', 'arm64'])
     parser.add_argument('--allow-emulation', action='store_true', help='Allow explicitly labeled local QEMU validation; CI requires a native engine')

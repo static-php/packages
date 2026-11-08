@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "88815aba6b23ad4407e752d89625f8d0",
+    "content-hash": "703faa60e1502cb078b3697a7073e319",
     "packages": [
         {
             "name": "carbonphp/carbon-doctrine-types",
@@ -82,16 +82,16 @@
         },
         {
             "name": "crazywhalecc/static-php-cli",
-            "version": "dev-feat/pgo-v3",
+            "version": "dev-feat/el8-shared-libraries",
             "source": {
                 "type": "git",
                 "url": "https://github.com/crazywhalecc/static-php-cli.git",
-                "reference": "fbff6898d85b56a172aedc47051fab09939c2a97"
+                "reference": "dfc33a7963cad4135a8353b34b0d87e1a49a6589"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/fbff6898d85b56a172aedc47051fab09939c2a97",
-                "reference": "fbff6898d85b56a172aedc47051fab09939c2a97",
+                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/dfc33a7963cad4135a8353b34b0d87e1a49a6589",
+                "reference": "dfc33a7963cad4135a8353b34b0d87e1a49a6589",
                 "shasum": ""
             },
             "require": {
@@ -143,7 +143,7 @@
             "description": "Build single static PHP binary, with PHP project together, with popular extensions included.",
             "support": {
                 "issues": "https://github.com/crazywhalecc/static-php-cli/issues",
-                "source": "https://github.com/crazywhalecc/static-php-cli/tree/feat/pgo-v3"
+                "source": "https://github.com/crazywhalecc/static-php-cli/tree/feat/el8-shared-libraries"
             },
             "funding": [
                 {
@@ -151,7 +151,8 @@
                     "type": "other"
                 }
             ],
-            "time": "2026-10-25T00:13:53+02:00"
+            "time": "2026-11-06T00:39:39+00:00",
+            "published-time": "2026-11-07T11:05:33+00:00"
         },
         {
             "name": "doctrine/inflector",
@@ -4628,5 +4629,5 @@
         "ext-zlib": "*"
     },
     "platform-dev": {},
-    "plugin-api-version": "2.6.0"
+    "plugin-api-version": "2.11.0"
 }

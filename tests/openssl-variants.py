@@ -88,6 +88,33 @@ class VariantTests(unittest.TestCase):
         for profile in variants.PROFILES:
             self.assertEqual((self.output / profile).stat().st_mode & 0o777, 0o755)
 
+    def test_profile_sdk_keeps_all_owned_dependency_outputs_and_rebuilds_openssl(self):
+        dependency_files = ["lib/libz.so.1", "lib/libz.a", "include/zlib.h", "include/zconf.h"]
+        for name in dependency_files + ["bin/openssl"]:
+            path = self.sdk / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(name.encode())
+        self.manifest["libraries"]["openssl"]["depends"] = ["zlib"]
+        self.manifest["libraries"]["zlib"] = {"files": ["lib/libz.so.1"]}
+        ownership = {"schema": 1, "libraries": {
+            "openssl": {"files": self.entry["files"] + ["bin/openssl"]},
+            "zlib": {"files": dependency_files},
+            "other": {"files": ["lib/libother.so.1"]}}}
+        cache = {name: {"package": name, "files": record["files"]}
+                 for name, record in ownership["libraries"].items()}
+        variants.write(self.sdk / ".shared-library-ownership.json", ownership)
+        variants.write(self.sdk / ".build.json", cache)
+        before = {name: variants.file_record(self.sdk / name) for name in dependency_files}
+        target = self.root / "profile-sdk"
+        target.mkdir()
+        variants.copy_sdk(self.sdk, target, self.manifest)
+        self.assertEqual({name: variants.file_record(target / name) for name in dependency_files}, before)
+        self.assertEqual(variants.read(target / ".build.json"), {"zlib": cache["zlib"]})
+        self.assertEqual(set(variants.read(target / ".shared-library-ownership.json")["libraries"]), {"openssl", "zlib"})
+        self.assertFalse((target / "lib/libother.so.1").exists())
+        self.assertEqual(variants.read(self.sdk / ".build.json"), cache)
+        self.assertEqual({name: variants.file_record(self.sdk / name) for name in dependency_files}, before)
+
     def test_profile_path_change_only_rebuilds_that_profile(self):
         self.build()
         rpm = (self.output / "rpm/overlay.json").read_bytes()
@@ -123,6 +150,38 @@ class VariantTests(unittest.TestCase):
             self.assertTrue((target / "lib/libcrypto.so").is_symlink())
             marker = variants.read(target / "openssl-variant.json")
             self.assertEqual(marker["files"]["lib/libcrypto.so.3"], variants.file_record(target / "lib/libcrypto.so.3"))
+
+    def test_apply_accepts_abi_cache_added_after_profile_export(self):
+        self.build()
+        manifest = variants.read(self.sdk / variants.MANIFEST)
+        relative = "usr/share/php-zts/libraries/abi/openssl/libcrypto.so.3.xml"
+        cache = self.sdk / relative
+        cache.parent.mkdir(parents=True)
+        cache.write_text("classified ABI cache\n")
+        manifest["libraries"]["openssl"].update(abi_dump={"libcrypto.so.3": relative},
+            abi_dump_hashes={"libcrypto.so.3": variants.file_hash(cache)})
+        variants.write(self.sdk / variants.MANIFEST, manifest)
+        for profile in variants.PROFILES:
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                target = Path(temporary)
+                shutil.copytree(self.sdk, target, dirs_exist_ok=True, symlinks=True)
+                variants.apply(target, self.output, profile)
+                self.assertFalse((target / relative).exists())
+                entry = variants.read(target / variants.MANIFEST)["libraries"]["openssl"]
+                self.assertNotIn("abi_dump", entry)
+                self.assertEqual(entry["abi_epoch"], manifest["libraries"]["openssl"]["abi_epoch"])
+                self.assertEqual((target / "lib/libother.so.1").read_bytes(), b"unrelated consumer")
+        self.assertEqual(cache.read_text(), "classified ABI cache\n")
+
+    def test_apply_still_rejects_changed_runtime_ownership(self):
+        self.build()
+        manifest = variants.read(self.sdk / variants.MANIFEST)
+        manifest["libraries"]["openssl"]["files"].append("lib/unexpected.so")
+        (self.sdk / "lib/unexpected.so").write_bytes(b"unexpected runtime")
+        variants.write(self.sdk / variants.MANIFEST, manifest)
+        with self.assertRaisesRegex(RuntimeError, "ownership set"):
+            variants.apply(self.sdk, self.output, "rpm")
+        self.assertEqual((self.sdk / "lib/libcrypto.so.3").read_bytes(), b"common crypto")
 
     def test_corrupt_overlay_is_rejected(self):
         self.build()

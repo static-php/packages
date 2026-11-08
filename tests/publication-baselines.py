@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
@@ -62,6 +64,40 @@ class PublicationBaselines(unittest.TestCase):
         result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
         self.assertEqual(len(sources), 3)
         self.assertEqual(result['consumer_versions']['8.6']['php-zts-cli'], '10')
+
+    def test_confirmed_absent_stream_owner_does_not_discard_existing_baselines(self):
+        response = requests.Response()
+        response.status_code = 404
+        def capture(args):
+            if args.owner == '86':
+                raise requests.HTTPError(response=response)
+            value = planner['empty_manifest']()
+            value['consumer_inventory_complete'] = True
+            value['consumer_versions'] = {args.owner[0] + '.' + args.owner[1:]: {'php-zts-cli': '1'}}
+            planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
+        with patch.dict(plan_globals, {'baseline_single': capture}), patch.object(requests, 'get', return_value=Mock(status_code=404)) as lookup:
+            planner['baseline'](self.baseline_args())
+        result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
+        self.assertEqual([value['owner'] for value in result['baseline_origins']], ['82', '83', '84', '85'])
+        self.assertEqual(result['skipped_origins'], [{'owner': '86', 'password_env': 'PASSWORD', 'reason': 'owner-not-found'}])
+        self.assertTrue(result['consumer_inventory_complete'])
+        self.assertEqual(result['consumer_versions']['8.6'], {})
+        self.assertEqual(lookup.call_args.args[0], 'https://fixture.invalid/api/v1/users/86')
+
+    def test_missing_archive_of_existing_owner_is_fatal(self):
+        response = requests.Response()
+        response.status_code = 404
+        with patch.dict(plan_globals, {'baseline_single': Mock(side_effect=requests.HTTPError(response=response))}), \
+                patch.object(requests, 'get', return_value=Mock(status_code=200)), self.assertRaises(requests.HTTPError):
+            planner['baseline'](self.baseline_args())
+
+    def test_authentication_failure_cannot_be_treated_as_an_absent_owner(self):
+        response = requests.Response()
+        response.status_code = 401
+        with patch.dict(plan_globals, {'baseline_single': Mock(side_effect=requests.HTTPError(response=response))}), \
+                patch.object(requests, 'get') as lookup, self.assertRaises(requests.HTTPError):
+            planner['baseline'](self.baseline_args())
+        lookup.assert_not_called()
 
     def test_owner_abi_divergence_survives_outer_mirror_merge(self):
         value = planner['empty_manifest']()
@@ -194,6 +230,36 @@ class PublicationBaselines(unittest.TestCase):
         self.assertEqual(result['formats'], {'rpm': {'php-zts-intl': '0:8.6.0~rc4-8'}})
         self.assertEqual(result['architecture'], 'x86_64')
         self.assertEqual(result['candidate_archives']['php-zts-intl']['sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_stream_only_deb_and_apk_tags_enter_migration_cutoffs(self):
+        original = runpy.run_path
+        for kind, versions in [('deb', ['1.13.6+php86-1', '1.13.6~rc1+php86-1', '1.13.5+php86.0~rc4-2']),
+                               ('apk', ['1.13.6p86-r1', '1.13.6_rc1_p86-r1', '1.13.5p86.0_rc4-r2'])]:
+            for version in versions:
+                with self.subTest(kind=kind, version=version):
+                    args = self.cutoff_args({'frankenphp': 'older-release'})
+                    args.type = kind
+                    artifacts = Path(args.artifacts)
+                    artifacts.mkdir(exist_ok=True)
+                    archive = artifacts / ('frankenphp.' + kind)
+                    archive.write_bytes(b'native archive fixture')
+                    def modules(path):
+                        value = original(path)
+                        if Path(path).name == 'forgejo-helper':
+                            value['package_metadata'] = lambda *args: ('frankenphp', version, 'x86_64')
+                        return value
+                    with patch.dict(plan_globals, {'native_compare': lambda *args: 1}), patch.object(plan_globals['runpy'], 'run_path', side_effect=modules):
+                        planner['migration_cutoffs'](args)
+                    result = json.loads(Path(args.output).read_text())
+                    self.assertEqual(result['formats'], {kind: {'frankenphp': version}})
+                    self.assertEqual(result['candidate_archives']['frankenphp']['sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_consumer_stream_parsing_keeps_core_and_historical_versions(self):
+        for version, expected in [('8.2.35-3', '8.2'), ('1.13.6+php82-1', '8.2'),
+                                  ('1.13.6p82-r1', '8.2'), ('3.6.0_alpha1_p86_p0_rc4-r1', '8.6'),
+                                  ('1.13.6+php100-1', '10.0'), ('1.13.6_rc1_p100-r1', '10.0')]:
+            with self.subTest(version=version):
+                self.assertEqual(planner['consumer_version_stream'](version), expected)
 
     def test_equal_rpm_evr_requires_identical_archive_bytes(self):
         archive = self.root / 'candidate.rpm'

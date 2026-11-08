@@ -9,13 +9,11 @@ use staticphp\util\ExtMeta;
 use staticphp\util\SkippedExtensions;
 use staticphp\util\SharedLibraries;
 use staticphp\util\BuildPayload;
-use staticphp\util\ApkRuntimeAliases;
 use staticphp\package\library;
+use staticphp\package\pie;
 use staticphp\package\runtime_layout;
 use Symfony\Component\Process\Process;
 use staticphp\CraftConfig;
-
-require_once dirname(__DIR__) . '/util/ApkRuntimeAliases.php';
 
 class CreatePackages
 {
@@ -396,14 +394,16 @@ class CreatePackages
             if ($oldIdentity !== null && explode('.', $oldIdentity[1])[0] === explode('.', $identity[1])[0]
                 && preg_match('/^' . preg_quote($numeric[1], '/') . '(?:~|$)/D', $oldIdentity[0])) {
                 $candidatePhase = substr($identity[0], strlen($numeric[1]));
-                if ($oldIdentity === $identity) {
+                if ($oldIdentity[0] === $identity[0]) {
                     $floor = $published;
-                } elseif ($type !== 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2})(?:_|\+php)\d.*\+ext(.*)$/D', $published, $parts)
-                    && preg_match('/(?:_|\+php)\d.*$/D', $proposed, $tag)) {
-                    $floor = $parts[1] . $tag[0] . '+ext' . ($oldIdentity[0] === $identity[0] ? $parts[2] : $candidatePhase);
-                } elseif ($type === 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2})p\d+\.\d+.*_p0(.*)$/D', $published, $parts)) {
-                    $floor = $parts[1] . 'p' . self::toApkVersion($identity[1]) . '_p0' . ($oldIdentity[0] === $identity[0] ? $parts[2] : self::toApkVersion($candidatePhase));
+                } elseif ($type !== 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2}(?:_|\+php)\d.*)\+ext(.*)$/D', $published, $parts)) {
+                    $floor = $parts[1] . '+ext' . $candidatePhase;
+                } elseif ($type === 'apk' && preg_match('/^([0-9]+(?:\.[0-9]+){1,2}p\d+\.\d+.*)_p0(.*)$/D', $published, $parts)) {
+                    $floor = $parts[1] . '_p0' . self::toApkVersion($candidatePhase);
                 }
+            }
+            if ($floor !== null) {
+                $floor = self::replaceMigrationPhpPhase($type, $floor, preg_replace('/^[0-9.]+/', '', $identity[1]));
             }
             if ($floor !== null && ($retained === null || self::compareMigrationVersions($type, $floor, $retained) > 0)) {
                 $retained = $floor;
@@ -457,19 +457,15 @@ class CreatePackages
             return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) ($parts[4] ?: 0) . $php];
         }
         $phase = '((?:_(?:alpha|beta|rc|pre)\d*)*)';
-        if (preg_match('/^' . $number . $phase . '_p(\d{2,})_p(\d+)' . $phase . '$/D', $version, $parts)) {
+        if (preg_match('/^' . $number . $phase . '_p(\d{2,})(?:_p(\d+))?' . $phase . '$/D', $version, $parts)) {
             $upstream = self::migrationPhase($parts[2], true);
             $php = self::migrationPhase($parts[5], true);
-            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) $parts[4] . $php];
+            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[3] . '.' . (int) ($parts[4] ?: 0) . $php];
         }
-        if (preg_match('/^' . $number . '(_(?:alpha|beta|rc|pre)\d*)_p(\d{2,})$/D', $version, $parts)) {
-            $upstream = self::migrationPhase($parts[2], true);
-            return $upstream === null ? null : [$parts[1] . $upstream, $parts[3] . '.0'];
-        }
-        if (preg_match('/^' . $number . 'p(\d{2,})\.(\d+)' . $phase . '(?:_p0' . $phase . ')?$/D', $version, $parts)) {
+        if (preg_match('/^' . $number . 'p(\d{2,})(?:\.(\d+))?' . $phase . '(?:_p0' . $phase . ')?$/D', $version, $parts)) {
             $upstream = self::migrationPhase($parts[5] ?? '', true);
             $php = self::migrationPhase($parts[4], true);
-            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[2] . '.' . (int) $parts[3] . $php];
+            return $upstream === null || $php === null ? null : [$parts[1] . $upstream, $parts[2] . '.' . (int) ($parts[3] ?: 0) . $php];
         }
         return null;
     }
@@ -486,6 +482,28 @@ class CreatePackages
             return $parts[1] . self::migrationPhase('~' . $parts[2]);
         }
         return null;
+    }
+
+    private static function replaceMigrationPhpPhase(string $type, string $version, string $phpPhase): string
+    {
+        $number = '[0-9]+(?:\.[0-9]+){1,2}';
+        if ($type !== 'apk') {
+            $phase = '(?:~{1,2}(?:alpha|beta|rc|dev)\d*)*';
+            $tag = $type === 'rpm' ? '_' : '\+php';
+            $pattern = '/^(' . $number . $phase . $tag . '\d{2,}(?:\.\d+)?)' . $phase . '(\+ext' . $phase . ')?$/D';
+        } else {
+            $phase = '(?:_(?:alpha|beta|rc|pre)\d*)*';
+            $phpPhase = self::toApkVersion($phpPhase);
+            $pattern = '/^(' . $number . $phase . '_p\d{2,}(?:_p\d+)?)' . $phase . '$/D';
+            if (preg_match($pattern, $version, $parts)) {
+                return $parts[1] . $phpPhase;
+            }
+            $pattern = '/^(' . $number . 'p\d{2,}(?:\.\d+)?)' . $phase . '(_p0' . $phase . ')?$/D';
+        }
+        if (!preg_match($pattern, $version, $parts)) {
+            throw new RuntimeException('Cannot update the PHP phase in a retained package version: ' . $version);
+        }
+        return $parts[1] . $phpPhase . ($parts[2] ?? '');
     }
 
     private static function compareMigrationVersions(string $type, string $left, string $right): int
@@ -571,19 +589,6 @@ class CreatePackages
                 default => $name . ' < ' . $version,
             };
         }
-        if (self::$packageType === 'apk') {
-            $replacements = $data['logical_replacements']['apk'] ?? [];
-            if (!is_array($replacements)) {
-                throw new RuntimeException('Invalid APK migration replacement manifest');
-            }
-            foreach ($replacements as $logical => $physical) {
-                if (!is_string($logical) || !is_string($physical) || $logical === $physical
-                    || ApkRuntimeAliases::physicalName($logical) !== $physical) {
-                    throw new RuntimeException('APK migration replacement does not match the configured aliases');
-                }
-                $conflicts[] = $logical . '>0';
-            }
-        }
         return array_values(array_unique($conflicts));
     }
 
@@ -605,7 +610,9 @@ class CreatePackages
             throw new RuntimeException('Recorded PHP payload lacks the Zend module ABI');
         }
         $api ??= sprintf('%d%02d00', (int) $parts[1], (int) $parts[2]);
-        return self::getPrefix() . '-shared-runtime-' . $parts[1] . $parts[2] . '-abi' . $api . '-1';
+        $phase = self::getPhpAbiPrerelease();
+        $qualifier = $phase === '' ? '' : '-' . preg_replace('/~+/', '-', ltrim($phase, '~'));
+        return self::getPrefix() . '-shared-runtime-' . $parts[1] . $parts[2] . '-abi' . $api . $qualifier . '-1';
     }
 
     private static function createLibraryPackages(?array $ids): void
@@ -924,38 +931,43 @@ class CreatePackages
     }
 
     /**
-     * The tag binding a package to the PHP it was built against, appended to that package's own
-     * version: '_86.0' (rpm), '+php86.0' (deb), 'p86.0' (apk).
-     *
-     * The package's own prerelease precedes the PHP tag, so upstream version ordering
-     * takes precedence over the PHP version it was built against.
-     * APK needs separate _p suffixes for the PHP stream and patch after a package prerelease.
+     * APK requires a suffix after an upstream prerelease instead of the stable version's p tag.
      */
-    public static function getPhpVersionTag(string $packageType, string $packageVersion): string
+    public static function getPhpVersionTag(string $packageType, string $packageVersion, bool $includePhpPrerelease = true): string
     {
         [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
-        if (preg_match('/^(\d+)\.(\d+)(?:\.(\d+))?/', $fullPhpVersion, $m)) {
-            $phpVersionSuffix = sprintf('%d%d.%d', (int)$m[1], (int)$m[2], (int)($m[3] ?? 0));
+        if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
+            $phpVersionSuffix = sprintf('%d%d', (int)$m[1], (int)$m[2]);
         } else {
             $phpVersionSuffix = str_replace('.', '', $fullPhpVersion);
         }
-        $preRelease = preg_match('/~(.+)$/', $fullPhpVersion, $m) ? '~' . $m[1] : '';
-
+        if ($includePhpPrerelease) {
+            $phpVersionSuffix .= self::getPhpAbiPrerelease();
+        }
         return match ($packageType) {
-            'deb' => '+php' . $phpVersionSuffix . $preRelease,
-            'apk' => (str_contains($packageVersion, '~') ? '_p' . str_replace('.', '_p', $phpVersionSuffix) : 'p' . $phpVersionSuffix) . $preRelease,
-            default => '_' . $phpVersionSuffix . $preRelease,
+            'deb' => '+php' . $phpVersionSuffix,
+            'apk' => (str_contains($packageVersion, '~') ? '_p' : 'p') . $phpVersionSuffix,
+            default => '_' . $phpVersionSuffix,
         };
     }
 
-    public static function getTaggedPackageVersion(string $packageType, string $packageVersion): string
+    public static function getTaggedPackageVersion(string $packageType, string $packageVersion, bool $includePhpPrerelease = true): string
     {
         $packageVersion = self::normalizeVersion($packageVersion);
         // Otherwise RPM compares the PHP tag's digits as the prerelease number.
         $packageVersion = preg_replace('/(~{1,2}(?:alpha|beta|rc|dev))$/', '${1}0', $packageVersion);
-        $version = $packageVersion . self::getPhpVersionTag($packageType, $packageVersion);
+        $version = $packageVersion . self::getPhpVersionTag($packageType, $packageVersion, $includePhpPrerelease);
 
         return $packageType === 'apk' ? self::toApkVersion($version) : $version;
+    }
+
+    public static function getPhpAbiPrerelease(): string
+    {
+        [$version] = self::getPhpVersionAndArchitecture();
+        if (!preg_match('/^\d+\.\d+\.0(~.*)$/D', self::normalizeVersion($version), $parts)) {
+            return '';
+        }
+        return self::migrationPhase($parts[1]) ?? '';
     }
 
     public static function toApkVersion(string $version): string
@@ -974,6 +986,9 @@ class CreatePackages
         $done = true;
         $spcRoot = getenv('SPP_SPC_ROOT') ?: BASE_PATH . '/vendor/crazywhalecc/static-php-cli';
         require_once $spcRoot . '/src/globals/internal-env.php';
+        if (!is_dir(SPC_LOGS_DIR) && !mkdir(SPC_LOGS_DIR, 0755, true) && !is_dir(SPC_LOGS_DIR)) {
+            throw new RuntimeException('Cannot create SPC log directory: ' . SPC_LOGS_DIR);
+        }
         foreach (['lib', 'target', 'ext'] as $kind) {
             \StaticPHP\Config\PackageConfig::loadFromDir($spcRoot . "/config/pkg/{$kind}", 'core');
         }
@@ -1060,7 +1075,7 @@ class CreatePackages
             if (!$package instanceof runtime_layout) {
                 $config['depends'][] = 'php-zts-runtime-layout';
             }
-            if (!self::isPhpIndependent($package)) {
+            if (!self::isPhpIndependent($package) && !$package instanceof pie) {
                 $capability = self::getSharedRuntimeCapability();
                 if ($package->getName() === self::getPrefix() . '-cli') {
                     $config['provides_unversioned'][] = $capability;
@@ -1158,7 +1173,6 @@ class CreatePackages
         $libraries = $id === null ? self::consumerLibraryIds($files, $dlopen)
             : array_column(self::$sharedLibraries->dependenciesForFiles($files, $id, $dlopen), 'id');
         self::$consumerManifest[$name] = [
-            ...(self::$packageType === 'apk' && $id === null ? self::consumerAliasMetadata($name, $files) : []),
             'php_version' => $id === null ? (defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : null) : null,
             'architecture' => self::$sharedLibraries->architecture(),
             'libraries' => $libraries,
@@ -1184,9 +1198,6 @@ class CreatePackages
         }
         $metadata = ['schema' => 1, 'name' => $name, 'php_stream' => $match[1],
             'architecture' => self::$sharedLibraries->architecture(), 'libraries' => self::$consumerManifest[$name]['libraries']];
-        if (self::$packageType === 'apk') {
-            $metadata = array_merge($metadata, self::consumerAliasMetadata($name, $files));
-        }
         $directory = TEMP_DIR . '/consumer-metadata/' . self::$packageType;
         if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) {
             throw new RuntimeException('Cannot create PHP consumer metadata directory');
@@ -1197,26 +1208,6 @@ class CreatePackages
             throw new RuntimeException('Cannot persist PHP consumer metadata');
         }
         return [$path => '/usr/share/php-zts/consumers/' . $name . '.json'];
-    }
-
-    private static function consumerAliasMetadata(string $name, array $files): array
-    {
-        $metadata = ApkRuntimeAliases::metadata($name);
-        if ($metadata === []) {
-            return [];
-        }
-        $modules = [];
-        foreach ($files as $source => $destination) {
-            if (str_contains($destination, '/modules/')
-                && preg_match('/^' . preg_quote($metadata['extension'], '/') . '(?:-[A-Za-z0-9._-]+)?\.so$/D', basename($destination))
-                && is_file($source)) {
-                $modules[] = $source;
-            }
-        }
-        if (count($modules) !== 1) {
-            throw new RuntimeException('APK extension alias must own exactly one runtime module');
-        }
-        return [...$metadata, 'module_sha256' => hash_file('sha256', $modules[0])];
     }
 
     private static function consumerLibraryIds(array $files, array $dlopen): array
@@ -1269,7 +1260,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $rpmVersion = self::getTaggedPackageVersion('rpm', $phpVersion);
+            $rpmVersion = self::getTaggedPackageVersion('rpm', $phpVersion, !$package instanceof pie);
         }
 
         $rpmVersion = self::migrationPackageVersion('rpm', $name, $rpmVersion, $architecture);
@@ -1471,7 +1462,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $debVersion = self::getTaggedPackageVersion('deb', $phpVersion);
+            $debVersion = self::getTaggedPackageVersion('deb', $phpVersion, !$package instanceof pie);
         }
 
         $debVersion = self::migrationPackageVersion('deb', $name, $debVersion, $debArch);
@@ -1681,7 +1672,7 @@ class CreatePackages
 
         // If package version differs from PHP version, it's an extension - append PHP version
         if ($phpVersion !== $fullPhpVersion) {
-            $apkVersion = self::getTaggedPackageVersion('apk', $phpVersion);
+            $apkVersion = self::getTaggedPackageVersion('apk', $phpVersion, !$package instanceof pie);
         }
 
         $apkVersion = self::migrationPackageVersion('apk', $name, self::toApkVersion($apkVersion), $architecture);

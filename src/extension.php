@@ -6,9 +6,6 @@ use Exception;
 use staticphp\step\CreatePackages;
 use staticphp\util\ExtMeta;
 use staticphp\util\TwigRenderer;
-use staticphp\util\ApkRuntimeAliases;
-
-require_once __DIR__ . '/util/ApkRuntimeAliases.php';
 
 class extension implements package
 {
@@ -141,11 +138,6 @@ class extension implements package
                 ),
             ]
         ];
-        if (defined('SPP_TYPE') && SPP_TYPE === 'apk') {
-            foreach (ApkRuntimeAliases::relationships($this->getName()) as $field => $values) {
-                $config[$field] = is_array($values) ? array_values(array_unique([...($config[$field] ?? []), ...$values])) : $values;
-            }
-        }
         return $config;
     }
 
@@ -260,16 +252,12 @@ SH;
                 $src => $target,
             ],
         ];
-        if (defined('SPP_TYPE') && SPP_TYPE === 'apk') {
-            $config = array_merge($config, ApkRuntimeAliases::relationships($this->getName() . '-debuginfo'));
-        }
         return $config;
     }
 
     public function getName(): string
     {
-        $logical = CreatePackages::getPrefix() . '-' . $this->name;
-        return defined('SPP_TYPE') && SPP_TYPE === 'apk' ? ApkRuntimeAliases::physicalName($logical) : $logical;
+        return CreatePackages::getPrefix() . '-' . $this->name;
     }
 
     public function getLicense(): string

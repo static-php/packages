@@ -24,7 +24,8 @@ OpenSSL has two EL8-built runtime profiles: `/etc/pki/tls` for RPM and `/etc/ssl
 for DEB. Both use the same source/toolchain, headers, SONAMEs and verified symbol
 and type ABI. PHP, cURL and FrankenPHP remain common. Profile changes are isolated
 from unrelated library build inputs. Runtime data, engines and providers stay
-with their owning library.
+with their owning library. OpenSSL 3's `libcrypto.so.3` links to the private
+`libz.so.1`; `libssl.so.3` links to `libcrypto.so.3`.
 
 `bin/build-payload` records and seals source versions, architecture, enabled and
 skipped extensions, PHP module ABI, build configuration, common ELF/debug hashes
@@ -58,6 +59,46 @@ migration constraints prevent an installed old extension from being silently lef
 in an incompatible mixed set. A published extension missing from the candidate
 cohort blocks that migration; `allow-shared-ext-failure` does not authorize loss
 of an installed feature.
+
+Extension packages keep their original names on every format, including Alpine.
+Runtime and debuginfo packages upgrade in place; no `-shared` replacement names
+or versioned compatibility aliases are used.
+
+## Package versions
+
+FrankenPHP, PIE and independently versioned extensions use their own upstream
+version followed by the PHP stream: `1.13.6_82` for RPM, `1.13.6+php82` for DEB,
+and `1.13.6p82` for APK. FrankenPHP and compiled extensions also include PHP's
+phase during the initial `x.y.0` prerelease cycle: `1.13.6_86~rc5`,
+`1.13.6+php86~rc5`, or `1.13.6p86_rc5`. Their own prerelease precedes the PHP
+tag, for example `3.2.17~rc1_86~rc5` or `3.2.17_rc1_p86_rc5`.
+After PHP reaches GA, stable patches and patch RCs such as `8.6.1RC1` keep
+the stream-only tag. PIE always uses the stream-only tag. PHP-versioned
+packages keep the full PHP version, including patch RCs.
+
+Compiled consumers require the shared-runtime capability for the exact initial
+PHP prerelease, even if two prereleases report the same module API number.
+GA and subsequent patches/patch RCs share the stable capability. PIE has no
+compiled PHP ABI requirement.
+
+For an already published upstream release, packaging retains its historical
+structure and advances the revision when needed for an ordinary upgrade. The
+PHP phase within that structure still advances with the runtime, and is removed
+at GA or for PIE. Each package switches to the shorter tag at its next upstream
+release, without an epoch. Historical tags remain readable by repository and
+upgrade tooling.
+
+Malformed historical APK versions containing `~`, such as `3.2.17~rc1_82-r1`,
+block corrected spellings of the same numeric upstream version: APK treats
+revision changes after the malformed part as equal, and valid spellings sort
+lower. A real higher numeric upstream release can upgrade normally: for example,
+`3.2.18p82-r0` sorts above `3.2.17~rc1_82-r1`, whereas `3.2.17p82-r999` does not.
+The published blockers affect AMQP on PHP 8.5 at git.henderkes.com and igbinary
+on PHP 8.2–8.5 at both Forgejo hosts. Package names and real upstream versions
+stay unchanged; no synthetic prefixes are added. Until a real higher upstream
+release is available, preflight rejects lower candidates. Valid historical
+versions continue using ordinary revision bumps. Preflight checks the real
+source version and prerelease phase as well as native ordering.
 
 ## One RPM repository
 
@@ -94,6 +135,12 @@ changes reuse sealed PHP payloads; extension-only changes reuse the verified cor
 `bump` defaults to false; explicit iterations take precedence. `publish=false`
 builds and tests without repository or release-cache writes.
 
+Each producer and architecture caches its whole SDK buildroot as a weekly release
+asset. Daily builds restore a compatible SDK, check source and build inputs,
+rebuild changed libraries and genuine ABI dependents, and save the whole updated
+SDK. They compile the whole SDK only when no compatible seed exists. Monday's
+full PHP request still reuses a compatible SDK.
+
 To bump just the selected library package revisions, add `-f bump=true` to the
 example above. An unchanged compatible SDK is repackaged without recompilation.
 Changed sources or recipes rebuild the selected libraries and required dependents.
@@ -112,20 +159,31 @@ production signing/download verification remains a separate publication gate.
 `--profile all` and independent extension profiles require a complete frozen
 baseline. `--library-only` checks that PHP versions remain unchanged.
 
-`tests/runtime-service-containers.py` exercises real systemd/OpenRC service state,
-requests and mapped executable/library identities across core and library-only
-upgrades, including stopped/disabled state. Native arm64 validation requires the
+`tests/runtime-service-containers.py` defaults to Docker; `--container-engine`
+selects an alternative engine to exercise real systemd/OpenRC service state. Privileged init-system containers
+use private namespaces without host cgroup, systemd/D-Bus or engine socket mounts.
+Service commands run only through the selected engine's exec command in tracked test containers;
+host shutdown and service-manager commands are rejected by the harness.
+The checks cover requests and mapped executable/library identities across core
+and library-only upgrades, including stopped/disabled state. Native arm64 validation requires the
 GitHub runners; local x86_64 results do not establish arm64 or minimum-kernel
 compatibility.
 
-GCC assets must contain genuine DWARF4 type information, licenses and a development
+GCC assets must contain genuine DWARF type information, licenses and a development
 selector that links shared libstdc++. `bin/build-gcc-runtime --check` verifies them;
-repair builds matching target runtimes only when needed. A validated SDK import
-records actual old compiler/recipe identities and deployment relocation separately,
+it accepts DWARF4 and DWARF5. Repair builds matching target runtimes only when
+needed. A validated SDK import records actual old compiler/recipe identities and
+deployment relocation separately,
 so compatible C-only libraries survive a layout or runtime-asset repair.
 
-The SPC lock currently pins local revision
-`fbff6898d85b56a172aedc47051fab09939c2a97`; remote CI needs that revision available
-from its configured source. No push, package upload, repository promotion or
-public installer replacement is performed by local preparation. Those operations
+The SPC lock pins `dfc33a7963cad4135a8353b34b0d87e1a49a6589` on
+`feat/el8-shared-libraries`. This reconstructs the missing prerequisite with
+opt-in shared-library support; static builds keep their existing defaults.
+[Reconstruction checks](spc-reconstruction-validation.json) record the current
+EL8/Alpine checks separately from historical migration validation. The current
+EL8 SDK includes all 67 ordinary libraries with typed ABI verification. PHP
+consumer and package upgrade coverage is recorded in that report; historical
+results do not validate this reconstruction. Remote CI needs the pinned revision
+available from its configured source. No push, package upload, repository promotion
+or public installer replacement is performed by local preparation. Those operations
 require explicit authorization.

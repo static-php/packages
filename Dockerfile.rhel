@@ -6,6 +6,7 @@ ARG TARGETARCH
 ARG RPM_ARCH
 ARG UID=1000
 ARG GID=1000
+ARG BUILD_JOBS
 
 SHELL ["/bin/bash", "-c"]
 
@@ -44,7 +45,7 @@ RUN if [[ "${ALMA_VERSION}" == "9" || "${ALMA_VERSION}" == "10" ]]; then \
     else \
         dnf -y install python39 python39-pyyaml python39-requests dpkg && \
         curl -L https://github.com/skvadrik/re2c/releases/download/4.3/re2c-4.3.tar.xz | tar xJ && \
-        cd re2c-4.3 && ./configure && make -j"$(nproc)" && make install && cd .. && rm -rf re2c-4.3; \
+        cd re2c-4.3 && ./configure && make -j"${BUILD_JOBS:-$(nproc)}" && make install && cd .. && rm -rf re2c-4.3; \
     fi
 
 RUN curl -o cmake.tar.gz -fsSL "https://github.com/Kitware/CMake/releases/download/v3.31.4/cmake-3.31.4-linux-$(uname -m).tar.gz" && \
@@ -93,7 +94,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
         cd /tmp/binutils-${BINUTILS_VERSION} && mkdir build && cd build && \
         ../configure --prefix=/opt/gcc --disable-multilib --disable-nls --with-system-zlib \
             --enable-plugins --enable-ld=default --disable-gprofng && \
-        make -j"$(nproc)" && make install-strip && \
+        make -j"${BUILD_JOBS:-$(nproc)}" && make install-strip && \
         cd / && rm -rf /tmp/binutils-${BINUTILS_VERSION} && \
         curl -fsSL --retry 5 https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz | tar -xJ -C /tmp && \
         cd /tmp/gcc-${GCC_VERSION} && \
@@ -103,7 +104,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
             --enable-checking=release --enable-languages=c,c++ --with-system-zlib \
             --with-as=/opt/gcc/bin/as --with-ld=/opt/gcc/bin/ld \
             --enable-default-pie --with-pkgversion="static-php GCC" && \
-        make -j"$(nproc)" CFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' CXXFLAGS_FOR_TARGET='-g -O2 -gdwarf-4' LIBGCC2_DEBUG_CFLAGS='-g -gdwarf-4' && \
+        make -j"${BUILD_JOBS:-$(nproc)}" CFLAGS_FOR_TARGET='-g -O2' CXXFLAGS_FOR_TARGET='-g -O2' LIBGCC2_DEBUG_CFLAGS='-g' && \
         make install-strip && \
         make install-target && \
         install -Dm644 ../COPYING3 /opt/gcc/share/licenses/gcc/COPYING3 && \
@@ -112,7 +113,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
     fi
 
 COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
-RUN GCC_VERSION="${GCC_VERSION}" /usr/local/bin/build-gcc-runtime
+RUN GCC_VERSION="${GCC_VERSION}" SPP_GCC_BUILD_JOBS="${BUILD_JOBS:-$(nproc)}" /usr/local/bin/build-gcc-runtime
 
 RUN ln -sf gcc /opt/gcc/bin/cc && \
     echo 'export PATH=/opt/gcc/bin:$PATH' > /etc/profile.d/gcc16.sh && \

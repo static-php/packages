@@ -6,9 +6,6 @@ use staticphp\package;
 use staticphp\CraftConfig;
 use staticphp\step\CreatePackages;
 use staticphp\util\TwigRenderer;
-use staticphp\util\ApkRuntimeAliases;
-
-require_once dirname(__DIR__) . '/util/ApkRuntimeAliases.php';
 
 class cli implements package
 {
@@ -33,9 +30,6 @@ class cli implements package
         $versionedConflicts = CreatePackages::getVersionedConflicts('-cli');
         $replaces = $versionedConflicts;
         $conflicts = $versionedConflicts;
-        if (SPP_TYPE === 'apk') {
-            $conflicts = [...$conflicts, ...ApkRuntimeAliases::conflicts($prefix)];
-        }
         $configFiles = [
             getConfdir(),
             getConfdir() . '/php.ini'
@@ -171,16 +165,16 @@ fi
 BASH;
         $afterInstallScript = <<<BASH
 #!/bin/sh
-if [ ! -e /usr/bin/php ]; then
-    ln -sf /usr/bin/php{$binarySuffix} /usr/bin/php
+if [ ! -e /usr/bin/php ] || { [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; }; then
+    ln -sf php{$binarySuffix} /usr/bin/php
 fi
 BASH;
         $apkRemoval = SPP_TYPE === 'apk' ? 'true' : 'false';
         $afterRemoveScript = <<<BASH
 #!/bin/sh
 if { {$apkRemoval} || [ "\${1-}" = 0 ] || [ "\${1-}" = remove ] || [ "\${1-}" = purge ]; } &&
-    [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; then
-    rm -f /usr/bin/php
+    [ -L /usr/bin/php ]; then
+    case "\$(readlink /usr/bin/php)" in php{$binarySuffix}|/usr/bin/php{$binarySuffix}) rm -f /usr/bin/php ;; esac
 fi
 BASH;
 
@@ -210,8 +204,8 @@ BASH;
         $debAfterInstallScript = <<<BASH
 #!/bin/sh
 set -e
-if [ ! -e /usr/bin/php ]; then
-    ln -sf /usr/bin/php{$binarySuffix} /usr/bin/php
+if [ ! -e /usr/bin/php ] || { [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; }; then
+    ln -sf php{$binarySuffix} /usr/bin/php
 fi
 
 if getent group frankenphp > /dev/null 2>&1; then

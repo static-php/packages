@@ -341,7 +341,7 @@ class SourceIdentities(unittest.TestCase):
             registry.write_text(registry.read_text().replace('    display-name: swoole', '    display-name: swoole\n    extra-build-flag: true'))
             self.assertTrue(all(entry == {'full': False, 'packages': ['swoole']} for entry in self.request(root, previous)['requests'].values()))
 
-    def test_apk_provider_alias_configuration_is_format_only_packaging_input(self):
+    def test_retired_apk_alias_configuration_has_no_effect(self):
         with TemporaryDirectory(prefix='source-plan-apk-alias-') as temporary:
             root = Path(temporary)
             self.actor_template(root, ['amqp', 'igbinary'])
@@ -358,9 +358,7 @@ class SourceIdentities(unittest.TestCase):
             self.assertEqual(after['package_requests'], {})
             self.assertEqual(after['libraries'], [])
             self.assertEqual(after['payload_inputs'], before['payload_inputs'])
-            self.assertEqual(set(after['format_package_requests']), {'apk'})
-            self.assertTrue(all(entry == {'full': False, 'packages': ['amqp', 'cli', 'igbinary']}
-                                for entry in after['format_package_requests']['apk'].values()))
+            self.assertEqual(after['format_package_requests'], {})
 
 
 if __name__ == '__main__':

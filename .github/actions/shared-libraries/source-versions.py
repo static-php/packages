@@ -61,21 +61,6 @@ def parse_version(value):
     return match[0]
 
 
-def apk_aliases(root):
-    path = Path(root) / 'config/apk-runtime-aliases.json'
-    if not path.is_file():
-        return {}
-    value = read(path)
-    aliases = value.get('extensions')
-    if value.get('schema') != 1 or not isinstance(aliases, dict):
-        raise RuntimeError('Invalid APK runtime alias configuration')
-    for component, entry in aliases.items():
-        if (not re.fullmatch('[a-z][a-z0-9_]*', component) or not isinstance(entry, dict)
-                or not isinstance(entry.get('suffix'), str) or not re.fullmatch('-[a-z][a-z0-9-]*', entry['suffix'])):
-            raise RuntimeError('Invalid APK runtime alias entry')
-    return aliases
-
-
 class SourceReader:
     def __init__(self, downloads):
         self.downloads = Path(downloads)
@@ -258,19 +243,13 @@ def candidates(root, stream, package_type=None):
     if overrides and (stream not in overrides or not isinstance(overrides[stream], dict)):
         raise RuntimeError('Missing frozen extension source profile for PHP ' + stream)
     overrides = overrides.get(stream, {})
-    aliases = apk_aliases(root) if package_type == 'apk' else {}
     result = []
 
     def add(name, version, evidence, component=None):
-        logical = name
-        if component in aliases:
-            name += aliases[component]['suffix']
         entry = {'php_stream': stream, 'name': name, 'upstream_version': version,
                  'php_version': php_version, 'evidence': evidence}
         if component is not None:
             entry['component'] = component
-        if name != logical:
-            entry['logical_name'] = logical
         result.append(entry)
 
     for component in profile['shared']:

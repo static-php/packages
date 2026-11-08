@@ -43,6 +43,18 @@ class PackageVersions(unittest.TestCase):
                 filename = f"php-zts-cli-{version}-1.el10.x86_64.rpm"
                 self.assertEqual(repo["parse_rpm_info"](filename), ("php-zts-cli", version, "1.el10", "x86_64", "8.6"))
 
+    def test_stream_only_versions(self):
+        for name in ["frankenphp", "pie-zts", "php-zts-swoole", "php-zts-xdebug-debuginfo"]:
+            for upstream in ["3.6.0", "3.6.0~alpha1", "3.6.0~~dev0", "3.6.0~rc2~~dev9"]:
+                for tag, stream in [("82", "8.2"), ("86", "8.6"), ("100", "10.0")]:
+                    for phase in [""] if name == "pie-zts" else ["", "~rc5", "~beta3", "~~dev0"]:
+                        with self.subTest(name=name, upstream=upstream, tag=tag, phase=phase):
+                            version = f"{upstream}_{tag}{phase}"
+                            filename = f"{name}-{version}-2.x86_64.rpm"
+                            self.assertEqual(repo["parse_rpm_info"](filename), (name, version, "2", "x86_64", stream))
+                            module = repo["build_module_structure"]({stream: [filename]}, "el8", "x86_64")[0]
+                            self.assertEqual(module["data"]["artifacts"]["rpms"], [f"{name}-0:{version}-2.x86_64"])
+
     def test_stable_packages(self):
         for name, version in [("frankenphp", "1.13.1_82.35"), ("pie-zts", "1.3.4_82.35"), ("php-zts-clickhouse", "0.13.0_82.35")]:
             with self.subTest(name=name):
