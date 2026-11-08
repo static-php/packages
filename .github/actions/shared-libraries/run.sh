@@ -185,8 +185,8 @@ case "$command" in
         python3 ../../.github/actions/shared-libraries/publish-forgejo.py upload "$TYPE" "$host"
         ;;
     record)
-        jq -n --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
-            '{arch: $arch, alma: $alma, target: $target, image: $image, source_run_id: $source}' > stage/target.json
+        jq -n --arg type "$TYPE" --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
+            '{type: $type, arch: $arch, alma: $alma, target: $target, image: $image, source_run_id: $source}' > stage/target.json
         printf '%s\n' "$CACHE_KEY" > stage/cache-key
         python3 .github/actions/shared-libraries/workflow.py receipt --kind libraries \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \

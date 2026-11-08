@@ -30,6 +30,31 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_real_alpine_target_record_selects_services_and_tls_once_per_architecture(self):
+        with tempfile.TemporaryDirectory(prefix='spp-apk-target-record-') as temporary:
+            root = Path(temporary)
+            for arch in ['arm64', 'x86_64']:
+                target = root / arch
+                (target / 'stage').mkdir(parents=True)
+                helpers = target / '.github/actions/shared-libraries'
+                helpers.mkdir(parents=True)
+                shutil.copy2(HELPERS / 'workflow.py', helpers / 'workflow.py')
+                (target / 'stage/shared-library-plan.json').write_text(json.dumps({'php_requests': {
+                    stream: {'full': True} for stream in workflow.STREAMS}}))
+                env = dict(os.environ, TYPE='apk', IN_BUILDER='true', MODE='full', LIBRARIES='',
+                           MATRIX_ARCH=arch, TARGET=arch, ALMA='', CACHE_KEY='fixture', SOURCE_RUN_ID='42',
+                           IMAGE='ghcr.io/example/builder@sha256:' + 'a' * 64)
+                subprocess.run(['bash', HELPERS / 'run.sh', 'record'], cwd=target, env=env, check=True, capture_output=True)
+                shutil.copytree(target / 'stage', root / ('plans-' + arch))
+                shutil.rmtree(target)
+            result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'matrix', '--plans', root], text=True)
+            entries = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
+            self.assertEqual(len(entries), 10)
+            for arch in ['arm64', 'x86_64']:
+                selected = [entry for entry in entries if entry['arch'] == arch]
+                self.assertEqual([entry['php-version'] for entry in selected if entry['runtime-checks']], ['8.6'])
+                self.assertEqual([entry['php-version'] for entry in selected if entry['tls-checks']], ['8.6'])
+
     def test_packaging_uses_native_stream_baseline_before_creating_candidates(self):
         import yaml
         for filename, package_step in [('build-apk-forgejo.yml', 'Build and test PHP packages'),

@@ -99,6 +99,8 @@ Fresh installation checks in that job also mistook `php-zts-shared-runtime-86-ab
 
 Run `42502917126` passed baseline capture and packaging, but its Alpine upgrade tests retained installed versions despite strictly higher candidates. A native reproduction with two small signed APK generations confirmed that plain `apk update` reused the fresh old index after the test mirror switched generations. The upgrade helper now uses `apk update --cache-max-age 0` before ordinary `apk upgrade`. Calling that exact helper in the signed reproduction upgraded revision r0 to r1 with the same repository, trust key and world file. No dependency installation, solver override or weakened upgrade assertion was added. Both SDK jobs in this run separately confirmed no library compilation, all 68 ABI classifications reused, zero libraries analyzed and no consumer archive reads.
 
+Run `42505024995` then passed x86_64 PHP 8.2's 84 native upgrade profiles and PHP 8.5's 83 profiles, both reusing sealed PHP payloads with no changed components. Inspection also found that Alpine's shell target recorder omitted `type: apk`, so the matrix's format filter silently omitted service/TLS selection. The recorder now includes its format. A regression runs the actual recorder into the actual matrix CLI and requires one service/TLS target per architecture, selecting the highest requested stream. Passing ordinary upgrade tests without these separately required checks is not full pipeline validation.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
