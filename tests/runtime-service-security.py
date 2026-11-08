@@ -12,6 +12,18 @@ scope = runpy.run_path(str(Path(__file__).with_name('runtime-service-containers.
 
 
 class ServiceContainerSecurity(unittest.TestCase):
+    def test_temporary_directory_suffix_cannot_make_invalid_image_names(self):
+        for suffix in ('06nqxbp_', '_06nqxbp', '06_nqxbp'):
+            temporary = SimpleNamespace(name='/tmp/spp-real-services-' + suffix, cleanup=lambda: None)
+            with self.subTest(suffix=suffix), patch.object(scope['tempfile'], 'TemporaryDirectory', return_value=temporary):
+                harness = self.harness('docker', 'apk')
+                harness.docker = Mock()
+                harness.execute = Mock()
+                image = harness.bootstrap()
+                self.assertRegex(image, r'^spp-services-[a-z0-9]+:init$')
+                self.assertIn(unittest.mock.call('commit', '--change', 'ENV container=docker',
+                    'spp-services-bootstrap-' + harness.token, image), harness.docker.call_args_list)
+
     def test_apk_service_upgrades_refresh_indexes_without_changing_solver(self):
         harness = self.harness('docker', 'apk')
         harness.execute = Mock()

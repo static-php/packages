@@ -79,7 +79,7 @@ class Harness:
         self.engine = getattr(args, 'container_engine', 'docker')
         self.temporary = tempfile.TemporaryDirectory(prefix='spp-real-services-')
         self.directory = Path(self.temporary.name)
-        self.token = self.directory.name.rsplit('-', 1)[-1]
+        self.token = hashlib.sha256(os.fsencode(self.directory)).hexdigest()[:12]
         self.containers = []
         self.images = []
         self.network = None
