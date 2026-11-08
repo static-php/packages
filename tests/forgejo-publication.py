@@ -147,7 +147,7 @@ class ForgejoPublication(unittest.TestCase):
             allowed = helper['verify_upload_versions']('https://example.com', '86', 'test', 'alpine', [path], [{'name': 'php-zts-lib-ssl', 'version': '3.6.0-r1'}])
         self.assertEqual(allowed, [])
 
-    def test_idempotent_archive_is_verified_and_relinked_without_upload(self):
+    def test_idempotent_archive_is_verified_without_upload_or_git_repository_link(self):
         path = self.archive()
         record = {'arch': 'x86_64', 'sha256': helper['archive_sha256'](path)}
         with patch.dict(helper_globals, {
@@ -156,7 +156,20 @@ class ForgejoPublication(unittest.TestCase):
         }), patch.object(helper_globals['requests'], 'put') as upload, patch.object(helper_globals['requests'], 'post', return_value=response(status=409)) as link, contextlib.redirect_stdout(io.StringIO()):
             helper['upload_verified_archive']('https://example.com', '86', 'test', 'alpine', path)
         upload.assert_not_called()
-        link.assert_called_once()
+        link.assert_not_called()
+
+    def test_new_archive_is_verified_without_a_git_repository_association(self):
+        path = self.archive()
+        record = {'arch': 'x86_64', 'sha256': helper['archive_sha256'](path)}
+        with patch.dict(helper_globals, {
+            'get_remote_packages': lambda *args: [],
+            'remote_package_archives': Mock(side_effect=[[], [record]]),
+        }), patch.object(helper_globals['requests'], 'put', return_value=response(status=201)) as upload, \
+                patch.object(helper_globals['requests'], 'post', return_value=response(status=400)) as link, \
+                contextlib.redirect_stdout(io.StringIO()):
+            helper['upload_verified_archive']('https://example.com', '86', 'test', 'alpine', path)
+        upload.assert_called_once()
+        link.assert_not_called()
 
     def test_second_architecture_cannot_remove_existing_archive(self):
         path = self.archive(arch='aarch64')

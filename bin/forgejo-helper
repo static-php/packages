@@ -477,10 +477,6 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
             response = requests.put(url, files={'file': archive}, auth=(owner, password), timeout=120)
         if response.status_code not in (201, 409):
             raise RuntimeError(f"Upload failed for {owner}/{path.name}: HTTP {response.status_code}")
-    link = f"{host}/api/v1/packages/{owner}/{pkg_type}/{quote(name, safe='')}/-/link/{repo}"
-    response = requests.post(link, auth=(owner, password), timeout=30)
-    if response.status_code not in (200, 201, 204, 409):
-        raise RuntimeError(f"Package linking failed for {owner}/{name}: HTTP {response.status_code}")
     after = remote_package_archives(host, owner, password, pkg_type, name, version)
     identities = {(record['arch'], record['sha256']) for record in after}
     if (arch, digest) not in identities:
@@ -548,15 +544,6 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
                 print(f"Error: {resp.text}")
                 skipped += 1
                 continue
-
-            link_name = name.replace('_', '-') if pkg_type == 'debian' else name
-            print(f"Linking: {link_name} to {repo}")
-            url = f"{host}/api/v1/packages/{owner}/{pkg_type}/{link_name}/-/link/{repo}"
-            resp = requests.post(url, auth=(owner, password))
-            print(f"Link response: {resp.status_code}")
-            if resp.status_code != 201:
-                print(f"Error: {resp.text}")
-                skipped += 1
 
     if skipped:
         print(f"::error::Skipped {skipped} package files after upgrade checks; remaining uploads completed.")
