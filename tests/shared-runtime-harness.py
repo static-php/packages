@@ -87,6 +87,11 @@ class RuntimeHarness(unittest.TestCase):
         capabilities = ['php-zts', 'php-zts-cli', 'php-zts-devel', 'php-zts-lib-openssl',
                         'php-zts-shared-runtime', 'php-zts-shared-runtime-82-abi20220829-1',
                         'php-zts-shared-runtime-86-abi20260924-1',
+                        'php-zts-shared-runtime-86-abi20260924-alpha2-1',
+                        'php-zts-shared-runtime-86-abi20260924-dev-1',
+                        'php-zts-shared-runtime-86-abi20260924-dev0-1',
+                        'php-zts-shared-runtime-86-abi20260924-beta3-1',
+                        'php-zts-shared-runtime-86-abi20260924-rc5-1',
                         *['php-zts-' + feature for feature in expected]]
         formats = {
             'rpm': '\n'.join(name + ' = 8.4.24-1' for name in capabilities) + '\nphp-zts-cli(x86-64) = 8.4.24-1\n',

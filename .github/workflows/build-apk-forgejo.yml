@@ -443,6 +443,8 @@ jobs:
                     key: ${{ steps.payload-cache-key.outputs.cache-key }}
                     seed-key: ${{ (!matrix.abi-break || (matrix.compile && !matrix.abi-core-rebuild)) && steps.payload-cache-key.outputs.seed-key || '' }}
                     path: php-payload-cache.tar.zst
+            -   name: Freeze actual published baseline
+                run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Build and test PHP packages
                 run: bash .github/actions/shared-libraries/run.sh php
             -   name: Save sealed PHP payload cache
@@ -453,8 +455,6 @@ jobs:
                     key: ${{ steps.payload-cache-key.outputs.cache-key }}
                     seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
                     path: php-payload-cache-ready.tar.zst
-            -   name: Freeze actual published baseline
-                run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Prepare real library revision for service validation
                 if: matrix.runtime-checks == true
                 run: bash .github/actions/shared-libraries/run.sh prepare-runtime

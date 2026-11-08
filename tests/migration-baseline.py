@@ -42,6 +42,31 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_frozen_baseline_preserves_existing_shared_migration_cutoffs(self):
+        cutoffs = {'schema': 1, 'php_stream': '8.6', 'architecture': 'x86_64',
+                   'formats': {'apk': {'php-zts-amqp': '2.2.0p86.0_rc5-r0'}}}
+        for metadata in (None, cutoffs, dict(cutoffs, php_stream='8.5')):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as temporary:
+                data = apk_fixture('php-zts-cli', '8.6.0_rc5-r0')
+                if metadata is not None:
+                    data += tar_member('usr/share/php-zts/migration/cutoffs.json', json.dumps(metadata).encode())
+                package = {'name': 'php-zts-cli', 'version': '8.6.0_rc5-r0', 'architecture': 'x86_64',
+                           'publication_url': 'https://example.test/php-zts-cli.apk',
+                           'published_checksum': {'algorithm': 'apk-control-sha1', 'value': helper['apk_control_checksum'](data)}}
+                args = SimpleNamespace(type='apk', php='8.6', arch='x86_64', base_url='https://example.test/',
+                                       profile='all', output=Path(temporary), include_debug=False)
+                with patch.dict(helper['freeze'].__globals__, {'apk_index': lambda *args: ([package], {}, []), 'fetch': lambda url: data}):
+                    if metadata is not None and metadata['php_stream'] != args.php:
+                        with self.assertRaisesRegex(RuntimeError, 'wrong stream or architecture'):
+                            helper['freeze'](args)
+                        continue
+                    helper['freeze'](args)
+                result = json.loads((args.output / 'baseline.json').read_text())
+                if metadata is None:
+                    self.assertNotIn('migration_cutoffs', result)
+                else:
+                    self.assertEqual(result['migration_cutoffs'], {'8.6': cutoffs['formats']['apk']})
+
     def test_deleted_apk_versions_are_not_selected_from_stale_index(self):
         stale = {'name': 'php-zts-igbinary', 'version': '3.2.17~rc1_84-r1'}
         current = {'name': 'php-zts-igbinary', 'version': '3.2.17_rc1_p84-r0'}

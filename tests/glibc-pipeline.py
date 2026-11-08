@@ -30,6 +30,16 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_packaging_uses_native_stream_baseline_before_creating_candidates(self):
+        import yaml
+        for filename, package_step in [('build-apk-forgejo.yml', 'Build and test PHP packages'),
+                                       ('build-rpm-modular-packages.yml', 'Package sealed payload without compilation')]:
+            data = yaml.safe_load((ROOT / '.github/workflows' / filename).read_text())
+            steps = next(job['steps'] for job in data['jobs'].values()
+                         if any(step.get('name') == package_step for step in job.get('steps', [])))
+            names = [step.get('name') for step in steps]
+            self.assertLess(names.index('Freeze actual published baseline'), names.index(package_step))
+
     def test_payload_cache_key_initializes_build_inputs_and_sealed_output_survives_export_failure(self):
         import yaml
         workflow = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())

@@ -89,6 +89,12 @@ The corrected Alpine jobs `128790898718` and `128790898725` passed that guard an
 
 Alpine job `128795850139` in run `42500878781` restored PHP 8.4 with `consumer_cache_reused: true` and `changed_components: []`, then passed package creation, installation and loader checks. Freezing its published upgrade baseline failed with HTTP 404. The served APK index still listed two historical igbinary versions containing `~` that no longer existed in the primary registry. Their corrected version existed and downloaded with its original index checksum. Baseline selection now cross-checks indexed APK identities against the primary registry before native version selection. Registry errors still abort, and archives still require their published checksum. The live PHP 8.4 x86_64 check removed exactly those two stale entries and verified both remaining igbinary versions. This does not waive native upgrade testing or authorize skipping an existing package whose download fails.
 
+### Packaging lost native stream versions when consumer scanning was narrowed
+
+PHP 8.6 x86_64 job `128795850150` in the same run reached native upgrade validation. Static-to-shared upgrades failed because candidate package revisions were not strictly newer than installed packages. Packaging consumed the SDK's canonical PHP 8.5 dependency inventory without the other stream's actual native version baseline. The existing baseline capture now precedes packaging and is included in its version/revision inputs for Alpine and both glibc formats. It preserves an installed shared CLI's migration cutoffs so already-shared streams retain `bump=false` semantics. Do not restore all-stream consumer archive scans to obtain version metadata, relax strict upgrade ordering, or force every request to use `bump=true`.
+
+Fresh installation checks in that job also mistook `php-zts-shared-runtime-86-abi20260924-rc5-1` for an advertised PHP extension. Runtime capability parsing now recognizes initial PHP prerelease ABI qualifiers, including development, alpha, beta and RC. Real builtin-extension assertions remain enabled.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

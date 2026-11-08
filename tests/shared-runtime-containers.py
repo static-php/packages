@@ -104,7 +104,7 @@ def parse_builtin_provides(kind, output):
             if not match or not match[1].lower().startswith('php-zts-'):
                 continue
             feature = match[1].lower()[len('php-zts-'):]
-            private_runtime = re.fullmatch(r'shared-runtime(?:-\d+-abi\d+-\d+)?', feature)
+            private_runtime = re.fullmatch(r'shared-runtime(?:-\d+-abi\d+(?:-(?:(?:alpha|beta|rc)\d+|dev\d*))?-\d+)?', feature)
             if feature not in metadata_names and not feature.startswith('lib-') and private_runtime is None:
                 features.add(feature)
     return sorted(features)

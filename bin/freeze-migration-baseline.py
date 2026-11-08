@@ -286,6 +286,15 @@ def freeze(args):
                                 'include_debug': args.include_debug,
                                 'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},
                   'repository': {'publication_url': base, 'metadata': ['metadata/' + name for name in metadata]}}
+        cli = next(package for package in packages if package['name'] == 'php-zts-cli')
+        planner = runpy.run_path(str(Path(__file__).resolve().parent / 'shared-library-plan'))
+        cutoffs = planner['archive_migration_cutoffs'](output / cli['path'], args.type)
+        if cutoffs is not None:
+            normalize_arch = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
+            if (cutoffs.get('php_stream') != args.php
+                    or normalize_arch(cutoffs.get('architecture')) != normalize_arch(args.arch)):
+                raise RuntimeError('Published CLI migration metadata has the wrong stream or architecture')
+            result['migration_cutoffs'] = {args.php: cutoffs['formats'].get(args.type, {})}
         (output / 'baseline.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({'baseline': str(output / 'baseline.json'), 'packages': len(packages),
                       'published_inventory': len(inventory)}))

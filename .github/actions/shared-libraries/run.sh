@@ -216,7 +216,7 @@ case "$command" in
             mv php-payload-cache-export.tar.zst php-payload-cache-ready.tar.zst
         fi
         export SPP_BASELINE_MANIFESTS
-        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline/shared-libraries.json")]))')
+        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for pattern in ["baseline/shared-libraries.json", "published-baseline/baseline.json"] for p in pathlib.Path("stage").glob(pattern)]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         php bin/spp package "${flags[@]}"
         test_flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE")

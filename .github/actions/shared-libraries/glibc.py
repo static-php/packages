@@ -412,7 +412,8 @@ def package():
         flags += ['--packages=' + os.environ['PACKAGES']]
     environment = dict(os.environ)
     environment['SPP_SHARED_LIBRARY_PLAN'] = str(STAGE / kind / 'shared-library-plan.json')
-    environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in (STAGE / kind).glob('baseline/shared-libraries.json')])
+    environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in [
+        STAGE / kind / 'baseline/shared-libraries.json', STAGE / 'published-baseline/baseline.json'] if path.is_file()])
     run(['php', 'tests/package-versions.php', '--type=' + kind])
     run(['php', 'tests/package-iterations.php'])
     run(['python3', 'tests/upgrade-guards.py'])
