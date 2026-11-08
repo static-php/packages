@@ -446,6 +446,8 @@ jobs:
             -   name: Freeze actual published baseline
                 run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Build and test PHP packages
+                env:
+                    EXPORT_PAYLOAD_CACHE: ${{ inputs.publish == true && steps.payload-cache.outputs.cache-current != 'true' }}
                 run: bash .github/actions/shared-libraries/run.sh php
             -   name: Save sealed PHP payload cache
                 if: ${{ !cancelled() && inputs.publish == true && matrix.library-only != true && steps.payload-cache.outputs.cache-current != 'true' && hashFiles('php-payload-cache-ready.tar.zst') != '' }}

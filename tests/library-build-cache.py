@@ -150,8 +150,8 @@ class WorkflowCacheOrderTests(unittest.TestCase):
         self.assertIn('!cancelled()', save['if'])
         self.assertIn('hashFiles', save['if'])
         self.assertEqual(save['with']['path'], 'php-payload-cache-ready.tar.zst')
-        for failed_export in [False, True]:
-            with self.subTest(failed_export=failed_export), tempfile.TemporaryDirectory() as temporary:
+        for export_requested, failed_export in [(False, False), (True, False), (True, True)]:
+            with self.subTest(export_requested=export_requested, failed_export=failed_export), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 for directory in ['shims', 'stage', 'buildroot', 'bin']:
                     (root / directory).mkdir()
@@ -178,12 +178,13 @@ PY''',
                     shim.chmod(0o755)
                 environment = dict(os.environ, PATH=str(root / 'shims') + ':' + os.environ['PATH'],
                     TYPE='apk', IN_BUILDER='true', MODE='full', LIBRARIES='', LIBRARY_ONLY='false',
-                    PHPV='8.4', PACKAGES='', ITERATION='', BUMP='false')
+                    PHPV='8.4', PACKAGES='', ITERATION='', BUMP='false',
+                    EXPORT_PAYLOAD_CACHE=str(export_requested).lower())
                 result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'php'],
                                         cwd=root, env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 5 if failed_export else 9, result.stdout + result.stderr)
                 ready = root / save['with']['path']
-                self.assertEqual(ready.exists(), not failed_export)
+                self.assertEqual(ready.exists(), export_requested and not failed_export)
                 if ready.exists():
                     self.assertEqual(ready.read_text(), 'fresh exported archive')
                 self.assertEqual((root / 'php-payload-cache.tar.zst').read_text(), 'old restored archive')

@@ -16,7 +16,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e IN_BUILDER=true -e COMPOSER_CACHE_DIR=/composer-cache \
         -e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)" \
         -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP \
-        -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY \
+        -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
@@ -210,7 +210,7 @@ case "$command" in
         php tests/package-iterations.php
         python3 tests/upgrade-guards.py
         python3 .github/actions/shared-libraries/glibc.py payload
-        if [[ -f stage/payload-cache-key ]]; then
+        if [[ "${EXPORT_PAYLOAD_CACHE:-false}" == true && -f stage/payload-cache-key ]]; then
             source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
             python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV"                 --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)"                 --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache-export.tar.zst
             mv php-payload-cache-export.tar.zst php-payload-cache-ready.tar.zst
