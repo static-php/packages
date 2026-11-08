@@ -2,6 +2,8 @@
 
 ## Assignment
 
+The user has explicitly prohibited publication. Run CI with `publish=false`; do not dispatch publish-only workflows or resume canceled publishers. Preserve publication safeguards in the implementation, but verify this assignment through build/test-only runs unless the user explicitly authorizes publication again.
+
 Make routine upstream updates stable, fast and understandable. The shared-library migration introduced too much orchestration: cache restoration, planning, ABI classification, packaging and publication have overlapping state and failure points. Hours of successful compilation can be followed by an unrelated metadata or packaging failure.
 
 Simplify the design aggressively. The behavior requirements below are necessary; the current helpers, schemas, receipts, intermediate artifacts and job boundaries are replaceable. Delete superseded logic. Do not hide the same complexity inside one enormous script or add another framework around it. A sequence of isolated fixes that eventually produces one green run does not fulfill this assignment.
@@ -73,7 +75,7 @@ There is an unrelated staged-add/worktree-delete entry at `.github/actions/publi
 - [ ] A real single-library update rebuilds only changed inputs and genuine dependents; ABI comparisons cover only regenerated libraries requiring comparison. An unchanged manual selection compiles nothing.
 - [ ] Consumer discovery uses PHP 8.5 only, runs only after a library rebuild, and is shared between RPM/DEB per architecture.
 - [ ] Existing uploaded SDKs and PHP payloads survive the transition and are reused without forced cold builds. Interrupted cache writes preserve the previous usable cache.
-- [ ] Actual Alpine and EL8 CI builds, native install/load/upgrade/TLS checks and required primary publication succeed for both architectures. RPM/DEB continue sharing the same common compiled bytes.
+- [ ] Actual Alpine and EL8 build/test-only CI runs and native install/load/upgrade/TLS checks succeed for both architectures. RPM/DEB continue sharing the same common compiled bytes. Publication stays disabled as instructed.
 - [ ] Existing PHP-specific DEB/APK repository users and legacy RPM URLs continue upgrading without configuration changes. Native version ordering, signing, identity checks and coherent ABI publication remain enforced.
 - [ ] A subsequent unchanged update demonstrates the fast path in actual logs. Report elapsed time, reused outputs, rebuilt libraries, ABI comparison counts and consumer downloads; local green tests alone do not prove success.
 
