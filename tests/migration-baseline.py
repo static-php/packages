@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 
@@ -41,6 +42,37 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 
 class BaselineCapture(unittest.TestCase):
+
+    def test_deb_baseline_reads_architecture_independent_dependency_index(self):
+        native = b'Package: php-zts-cli\nVersion: 8.3.36-3\nArchitecture: amd64\nDepends: php-zts-runtime-layout\nFilename: cli.deb\nSHA256: cli\n'
+        common = b'Package: php-zts-runtime-layout\nVersion: 1-1\nArchitecture: all\nFilename: layout.deb\nSHA256: layout\n'
+        base = 'https://example.test/'
+        replies = {base + 'dists/php-zts/main/binary-amd64/Packages': native,
+                   base + 'dists/php-zts/main/binary-all/Packages': common,
+                   base + 'repository.key': b'key'}
+        with patch.dict(helper['deb_index'].__globals__, {'fetch': replies.__getitem__}):
+            packages, metadata, keys = helper['deb_index'](base, 'amd64')
+        selected = helper['select_packages']('deb', packages, {'cli'})
+        self.assertEqual(set(selected), {'php-zts-cli', 'php-zts-runtime-layout'})
+        self.assertEqual(metadata, {'Packages': native, 'Packages-all': common})
+        self.assertEqual(keys, [('repository.asc', b'key')])
+
+    def test_deb_missing_optional_all_index_is_allowed_but_other_errors_fail(self):
+        native = b'Package: php-zts-cli\nVersion: 8.3.36-3\nArchitecture: amd64\nFilename: cli.deb\nSHA256: cli\n'
+        for status in (404, 503):
+            def fetch(url):
+                if '/binary-all/' in url:
+                    error = urllib.error.HTTPError(url, status, 'fixture', {}, io.BytesIO())
+                    error.close()
+                    raise error
+                return b'key' if url.endswith('repository.key') else native
+            with self.subTest(status=status), patch.dict(helper['deb_index'].__globals__, {'fetch': fetch}):
+                if status == 503:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        helper['deb_index']('https://example.test/', 'amd64')
+                else:
+                    packages, _, _ = helper['deb_index']('https://example.test/', 'amd64')
+                    self.assertEqual(len(packages), 1)
 
     def test_frozen_baseline_preserves_existing_shared_migration_cutoffs(self):
         cutoffs = {'schema': 1, 'php_stream': '8.6', 'architecture': 'x86_64',
@@ -117,6 +149,20 @@ class BaselineCapture(unittest.TestCase):
                      for name in ['openssl', 'another']]
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli, *providers], {'cli'})
+
+    def test_full_user_baseline_excludes_unreferenced_partial_sdk_publication(self):
+        cli = {'name': 'php-zts-cli', 'version': '8.3.36-2', 'requires': []}
+        library = {'name': 'php-zts-lib-curl', 'version': '8.20.0-1', 'requires': ['php-zts-lib-nghttp3']}
+        selected = helper['select_packages']('deb', [cli, library], {'all'})
+        self.assertEqual(set(selected), {'php-zts-cli'})
+        with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
+            helper['select_packages']('deb', [dict(cli, requires=['php-zts-lib-curl']), library], {'all'})
+
+    def test_full_user_baseline_keeps_required_private_libraries_and_layout(self):
+        packages = [{'name': 'php-zts-cli', 'version': '8.3.36-3', 'requires': ['php-zts-lib-zlib-abi-1']},
+                    {'name': 'php-zts-lib-zlib', 'version': '1.4-1', 'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib-abi-1']},
+                    {'name': 'php-zts-runtime-layout', 'version': '1-1', 'requires': []}]
+        self.assertEqual(set(helper['select_packages']('deb', packages, {'all'})), {p['name'] for p in packages})
 
     def test_frankenphp_closure_includes_embed_soname_provider(self):
         packages = [

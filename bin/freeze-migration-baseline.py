@@ -18,6 +18,7 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.parse
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zlib
@@ -109,21 +110,30 @@ def rpm_index(base, architecture, php):
 
 
 def deb_index(base, architecture):
-    relative = 'dists/php-zts/main/binary-' + architecture + '/Packages'
-    data = fetch(base + relative)
     packages = []
-    for fields in paragraphs(data.decode()):
-        if fields.get('Architecture') not in (architecture, 'all'):
-            continue
-        names = lambda value: re.findall(r'\b(?:php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
-        packages.append({'name': fields['Package'], 'version': fields['Version'],
-                         'architecture': fields['Architecture'],
-                         'requires': names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
-                         'provides': names(fields.get('Provides', '')),
-                         'publication_url': urllib.parse.urljoin(base, fields['Filename']),
-                         'published_checksum': {'algorithm': 'sha256', 'value': fields['SHA256']}})
+    metadata = {}
+    for index_arch in dict.fromkeys((architecture, 'all')):
+        relative = 'dists/php-zts/main/binary-' + index_arch + '/Packages'
+        try:
+            data = fetch(base + relative)
+        except urllib.error.HTTPError as error:
+            if index_arch == 'all' and index_arch != architecture and error.code == 404:
+                error.close()
+                continue
+            raise
+        metadata['Packages' if index_arch == architecture else 'Packages-all'] = data
+        for fields in paragraphs(data.decode()):
+            if fields.get('Architecture') not in (architecture, 'all'):
+                continue
+            names = lambda value: re.findall(r'\b(?:php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
+            packages.append({'name': fields['Package'], 'version': fields['Version'],
+                             'architecture': fields['Architecture'],
+                             'requires': names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
+                             'provides': names(fields.get('Provides', '')),
+                             'publication_url': urllib.parse.urljoin(base, fields['Filename']),
+                             'published_checksum': {'algorithm': 'sha256', 'value': fields['SHA256']}})
     key = fetch(base + 'repository.key')
-    return packages, {'Packages': data}, [('repository.asc', key)]
+    return packages, metadata, [('repository.asc', key)]
 
 
 def apk_index(base, architecture):
@@ -205,6 +215,9 @@ def select_packages(kind, inventory, profile, include_debug=False):
         if 'all' not in profile:
             return name.removeprefix('php-zts-').replace('_', '-') in profile
         managed = name.startswith('php-zts-') or name in ('php-zts', 'frankenphp', 'pie-zts')
+        # Private SDK uploads may precede the consumers that require them.
+        if not include_debug and (name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout'):
+            return False
         return managed and (include_debug or not name.endswith(('-debuginfo', '-dbgsym')))
     selected = {name: package for name, package in latest.items() if wanted(name)}
     providers = {}
