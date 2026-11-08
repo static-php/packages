@@ -23,7 +23,7 @@
         "ext-simplexml": "*",
         "ext-yaml": "*",
         "ext-zlib": "*",
-        "crazywhalecc/static-php-cli": "dev-feat/el8-shared-libraries",
+        "crazywhalecc/static-php-cli": "dev-feat/pgo-v3",
         "laravel/helpers": "^1.7",
         "twig/twig": "^3.0"
     },

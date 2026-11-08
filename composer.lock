@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "703faa60e1502cb078b3697a7073e319",
+    "content-hash": "88815aba6b23ad4407e752d89625f8d0",
     "packages": [
         {
             "name": "carbonphp/carbon-doctrine-types",
@@ -82,16 +82,16 @@
         },
         {
             "name": "crazywhalecc/static-php-cli",
-            "version": "dev-feat/el8-shared-libraries",
+            "version": "dev-feat/pgo-v3",
             "source": {
                 "type": "git",
                 "url": "https://github.com/crazywhalecc/static-php-cli.git",
-                "reference": "cb8c859aef7f483363921ffa6d223433f3834404"
+                "reference": "b7821ece199234d2ec3affec5e42e1cbf29c42e5"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/cb8c859aef7f483363921ffa6d223433f3834404",
-                "reference": "cb8c859aef7f483363921ffa6d223433f3834404",
+                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/b7821ece199234d2ec3affec5e42e1cbf29c42e5",
+                "reference": "b7821ece199234d2ec3affec5e42e1cbf29c42e5",
                 "shasum": ""
             },
             "require": {
@@ -143,7 +143,7 @@
             "description": "Build single static PHP binary, with PHP project together, with popular extensions included.",
             "support": {
                 "issues": "https://github.com/crazywhalecc/static-php-cli/issues",
-                "source": "https://github.com/crazywhalecc/static-php-cli/tree/feat/el8-shared-libraries"
+                "source": "https://github.com/crazywhalecc/static-php-cli/tree/feat/pgo-v3"
             },
             "funding": [
                 {
@@ -151,8 +151,8 @@
                     "type": "other"
                 }
             ],
-            "time": "2026-11-08T06:05:56+00:00",
-            "published-time": "2026-11-08T06:06:02+00:00"
+            "time": "2026-11-08T06:12:13+00:00",
+            "published-time": "2026-11-08T06:12:24+00:00"
         },
         {
             "name": "doctrine/inflector",

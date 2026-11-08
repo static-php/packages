@@ -198,9 +198,9 @@ needed. A validated SDK import records actual old compiler/recipe identities and
 deployment relocation separately,
 so compatible C-only libraries survive a layout or runtime-asset repair.
 
-The SPC lock pins `dfc33a7963cad4135a8353b34b0d87e1a49a6589` on
-`feat/el8-shared-libraries`. This reconstructs the missing prerequisite with
-opt-in shared-library support; static builds keep their existing defaults.
+The SPC dependency follows `feat/pgo-v3`, with its exact revision pinned in
+`composer.lock`. It includes opt-in shared-library support; static builds keep
+their existing defaults.
 [Reconstruction checks](spc-reconstruction-validation.json) record the current
 EL8/Alpine checks separately from historical migration validation. The current
 EL8 SDK includes all 67 ordinary libraries with typed ABI verification. PHP
