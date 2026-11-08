@@ -424,7 +424,7 @@ try {
             }
         }
         (new ReflectionProperty(CreatePackages::class, 'httpCache'))->setValue(null, $indexes);
-        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-lib-migration-contract', '1.2.3', 'amd64', 'deb') === 13, 'Library revision discovery lost a higher stream-owner/mirror revision');
+        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-lib-migration-contract', '1.2.3', 'amd64', 'deb') === 11, 'Library revision discovery must use primary stream owners and ignore mirror revisions');
     }
 
     migrationLayoutContracts($stage, $type);

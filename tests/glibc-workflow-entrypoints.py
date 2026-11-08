@@ -102,12 +102,16 @@ class SharedGlibcEntrypoints(unittest.TestCase):
                 expected = [suffix.replace(' php', ' ') for suffix in suffixes]
                 self.assertEqual(tuples.stdout.splitlines(), expected)
 
-    def test_second_registry_cannot_bypass_cohort_validation(self):
+    def test_optional_mirror_cannot_bypass_cohort_validation(self):
         data, _ = workflow('build-rpm-modular-packages.yml')
         publisher = data['jobs']['publish']['uses']
         steps = yaml.safe_load((ROOT / publisher).read_text())['jobs']['publish-glibc']['steps']
         guard = next(step for step in steps if step.get('name') == 'Verify complete cohort and all upgrade guards')
-        second = next(step for step in steps if step.get('name') == 'Publish cohort to second existing registry')
+        second = next(step for step in steps if step.get('name') == 'Mirror cohort to secondary registry')
+        self.assertTrue(second['continue-on-error'])
+        failure = next(step for step in steps if step.get('name') == 'Report primary registry publication failure')
+        self.assertIn('steps.registry-1.outcome', failure['if'])
+        self.assertNotIn('registry-2', failure['if'])
         cases = [('failure', False, 'deb', False), ('skipped', False, 'deb', False),
                  ('success', False, 'deb', True), ('success', True, 'deb', False),
                  ('success', False, 'rpm', False)]

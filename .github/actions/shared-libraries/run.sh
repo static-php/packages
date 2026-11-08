@@ -38,7 +38,7 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
 fi
 
 baseline() {
-    local output=$1 host=${2:-1}
+    local output=$1
     local args=(--type "$TYPE" --arch "$MATRIX_ARCH" --output "$output")
     if [[ "$TYPE" == rpm ]]; then
         if [[ "${GLIBC_PIPELINE:-}" == true ]]; then
@@ -49,9 +49,7 @@ baseline() {
             args+=(--host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY")
         fi
     else
-        local url=https://git.henderkes.com
-        [[ "$host" == 2 ]] && url=https://git.static-php.dev
-        args+=(--host "$url" --password-env FORGEJO_PASSWORD --consumer-password-env FORGEJO_PASSWORD)
+        args+=(--host https://git.henderkes.com --password-env FORGEJO_PASSWORD --consumer-password-env FORGEJO_PASSWORD)
     fi
     python3 bin/shared-library-plan baseline "${args[@]}"
 }
@@ -98,10 +96,6 @@ case "$command" in
         if [[ -f stage/effective-source-plan.json ]]; then
             args+=(--request stage/effective-source-plan.json)
         fi
-        if [[ "$TYPE" != rpm ]]; then
-            baseline stage/baseline-2 2
-            args+=(--peer-baseline stage/baseline-2)
-        fi
         if [[ -z "$LIBRARIES" ]] && { [[ "$MODE" == full ]] || python3 -c 'import json,sys; from pathlib import Path; b=Path("stage/baseline/shared-libraries.json"); p=json.load(open("downloads/build-plan.json")); empty=not b.exists() or not json.loads(b.read_text()).get("libraries"); sys.exit(not (empty and all(p.get("requests",{}).get(s,{}).get("full") for s in ["8.2","8.3","8.4","8.5","8.6"])))'; }; then
             args+=(--bootstrap)
         fi
@@ -129,10 +123,10 @@ case "$command" in
         python3 .github/actions/shared-libraries/incremental-build.py validate-final --root .
         php bin/build-payload seal --root buildroot
         export SPP_BASELINE_MANIFESTS
-        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline*/shared-libraries.json")]))')
+        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline/shared-libraries.json")]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         retry_args=(--plan stage/shared-library-plan.json --destination "dist/$TYPE" --manifest buildroot/shared-libraries.json --manifest-output buildroot/shared-libraries.json --output stage/publication-retries.json)
-        for baseline_manifest in stage/baseline*/shared-libraries.json; do retry_args+=(--baseline-manifest "$baseline_manifest"); done
+        [[ ! -f stage/baseline/shared-libraries.json ]] || retry_args+=(--baseline-manifest stage/baseline/shared-libraries.json)
         python3 bin/shared-library-plan stage-publication-retries "${retry_args[@]}"
         selected=$(python3 -c 'import json; print(",".join(json.load(open("stage/publication-retries.json"))["remaining_libraries"]))')
         layout_required=$(python3 -c 'import json; print(str(json.load(open("stage/publication-retries.json")).get("layout_required", False)).lower())')
@@ -193,7 +187,7 @@ case "$command" in
         python3 tests/upgrade-guards.py
         python3 .github/actions/shared-libraries/glibc.py payload
         export SPP_BASELINE_MANIFESTS
-        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline*/shared-libraries.json")]))')
+        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline/shared-libraries.json")]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         php bin/spp package "${flags[@]}"
         if [[ -f stage/payload-cache-key ]]; then
@@ -256,13 +250,7 @@ REMOTE
         if [[ "$TYPE" == rpm ]]; then
             python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --baseline-directory "${RPM_DIRECTORY%/el8}/el9" --baseline-directory "${RPM_DIRECTORY%/el8}/el10"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"
         else
-            for host in 1 2; do
-                baseline "current-baseline-$host" "$host"
-                baseline_args=()
-                [[ -f "current-baseline-$host/shared-libraries.json" ]] && baseline_args+=(--baseline-manifest "current-baseline-$host/shared-libraries.json")
-                python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" --output "cohort-result-$host.json"
-                (cd "dist/$TYPE"; python3 ../../.github/actions/shared-libraries/publish-forgejo.py check "$TYPE" "$host")
-            done
+            (cd "dist/$TYPE"; python3 ../../.github/actions/shared-libraries/publish-forgejo.py check "$TYPE" 1)
         fi
         ;;
     *) echo "Unknown shared-library workflow command: $command" >&2; exit 1 ;;

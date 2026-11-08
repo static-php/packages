@@ -42,7 +42,7 @@ def architecture():
     return 'aarch64' if os.environ['MATRIX_ARCH'] == 'arm64' else 'x86_64'
 
 
-def baseline(kind, directory, peer=False):
+def baseline(kind, directory):
     args = ['python3', 'bin/shared-library-plan', 'baseline', '--type', kind,
             '--arch', os.environ['MATRIX_ARCH'], '--output', directory]
     if kind == 'rpm':
@@ -51,7 +51,7 @@ def baseline(kind, directory, peer=False):
         for version in ('9', '10'):
             args += ['--baseline-url', host + '/' + architecture() + '/el' + version]
     else:
-        args += ['--host', 'https://git.static-php.dev' if peer else 'https://git.henderkes.com',
+        args += ['--host', 'https://git.henderkes.com',
                  '--password-env', 'FORGEJO_PASSWORD', '--consumer-password-env', 'FORGEJO_PASSWORD']
     run(args)
 
@@ -135,8 +135,6 @@ def classify():
     for kind in FORMATS:
         run(['php', 'tests/package-versions.php', '--type=' + kind])
         baseline(kind, STAGE / kind / 'baseline')
-        if kind == 'deb':
-            baseline(kind, STAGE / kind / 'baseline-2', peer=True)
     rebuilt = set(read(STAGE / 'library-build-plan.json').get('rebuilt_libraries', []))
     variants_ready = False
     for phase in range(100):
@@ -156,8 +154,6 @@ def classify():
                     '--manifest-output', directory / 'shared-libraries.json', '--rebuilt-libraries', ','.join(sorted(rebuilt))]
             if (STAGE / 'effective-source-plan.json').is_file():
                 args += ['--request', STAGE / 'effective-source-plan.json']
-            if kind == 'deb':
-                args += ['--peer-baseline', directory / 'baseline-2']
             old = directory / 'baseline/shared-libraries.json'
             request = read(STAGE / 'effective-source-plan.json')
             if not os.environ.get('LIBRARIES') and (os.environ.get('MODE', 'full') == 'full' or
@@ -211,12 +207,12 @@ def classify():
                           '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
                           '--manifest', sdk / 'shared-libraries.json', '--manifest-output', sdk / 'shared-libraries.json',
                           '--output', directory / 'publication-retries.json']
-            for baseline_path in directory.glob('baseline*/shared-libraries.json'):
+            for baseline_path in directory.glob('baseline/shared-libraries.json'):
                 retry_args += ['--baseline-manifest', baseline_path]
             run(retry_args)
             selected = read(directory / 'publication-retries.json')['remaining_libraries']
             if selected or read(directory / 'publication-retries.json').get('layout_required'):
-                environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline*/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
+                environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
                 selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
                 run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind,
                      *selection, '--debuginfo', *revision_flags()], env=environment)
@@ -256,10 +252,9 @@ def classify():
             shutil.copy2(STAGE / kind / name, target)
         if (STAGE / kind / 'abi').exists():
             copy_tree(STAGE / kind / 'abi', common / kind / 'abi')
-        for baseline_name in ['baseline', 'baseline-2']:
-            source = STAGE / kind / baseline_name
-            if source.exists():
-                copy_tree(source, common / kind / baseline_name)
+        source = STAGE / kind / 'baseline'
+        if source.exists():
+            copy_tree(source, common / kind / 'baseline')
 
 
 def record():
@@ -298,7 +293,7 @@ def preflight_consumers(stream, package_type, packages):
         arguments = ['php', 'bin/preflight-consumer-versions', '--type=' + kind,
                      '--candidates=' + str(candidates_path), '--architecture=' + architecture(),
                      '--output=' + str(STAGE / ('consumer-version-preflight-' + kind + '.json')), *revision_flags()]
-        baselines = list(directory.glob('baseline*/shared-libraries.json'))
+        baselines = list(directory.glob('baseline/shared-libraries.json'))
         if not baselines:
             raise RuntimeError('Cold PHP build requires captured native package version baselines')
         for baseline_path in baselines:
@@ -400,7 +395,7 @@ def package():
         flags += ['--packages=' + os.environ['PACKAGES']]
     environment = dict(os.environ)
     environment['SPP_SHARED_LIBRARY_PLAN'] = str(STAGE / kind / 'shared-library-plan.json')
-    environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in (STAGE / kind).glob('baseline*/shared-libraries.json')])
+    environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in (STAGE / kind).glob('baseline/shared-libraries.json')])
     run(['php', 'tests/package-versions.php', '--type=' + kind])
     run(['php', 'tests/package-iterations.php'])
     run(['python3', 'tests/upgrade-guards.py'])

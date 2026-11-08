@@ -129,12 +129,12 @@ jobs:
             -   name: Verify complete cohort and all upgrade guards
                 id: cohort-guard
                 run: bash .github/actions/shared-libraries/run.sh publish
-            -   name: Publish cohort to first existing registry
+            -   name: Publish cohort to primary registry
                 id: registry-1
                 if: env.TYPE != 'rpm'
                 continue-on-error: true
                 run: bash .github/actions/shared-libraries/run.sh upload-1
-            -   name: Publish cohort to second existing registry
+            -   name: Mirror cohort to secondary registry
                 id: registry-2
                 continue-on-error: true
                 if: ${{ !cancelled() && env.TYPE != 'rpm' && steps.cohort-guard.outcome == 'success' }}
@@ -142,8 +142,8 @@ jobs:
             -   name: Stage and promote canonical RPM generation
                 if: env.TYPE == 'rpm'
                 run: bash .github/actions/shared-libraries/run.sh publish-rpm
-            -   name: Report registry publication failures
-                if: ${{ !cancelled() && (steps.registry-1.outcome == 'failure' || steps.registry-2.outcome == 'failure') }}
+            -   name: Report primary registry publication failure
+                if: ${{ !cancelled() && steps.registry-1.outcome == 'failure' }}
                 run: exit 1
 
     publish-apk:

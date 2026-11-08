@@ -242,7 +242,7 @@ class WorkflowContracts(unittest.TestCase):
         steps = self.publisher['jobs']['publish-glibc']['steps']
         names = [step['name'] for step in steps]
         self.assertLess(names.index('Verify native ordinary upgrade receipts'), names.index('Sign RPM packages'))
-        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Publish cohort to first existing registry'))
+        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Publish cohort to primary registry'))
         self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Stage and promote canonical RPM generation'))
         commands = [step['run'] for step in steps if 'run.sh' in step.get('run', '')]
         self.assertEqual({command.rsplit(' ', 1)[1] for command in commands}, {'assemble', 'publish', 'upload-1', 'upload-2', 'publish-rpm'})

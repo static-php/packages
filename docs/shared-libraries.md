@@ -97,12 +97,16 @@ block corrected spellings of the same numeric upstream version: APK treats
 revision changes after the malformed part as equal, and valid spellings sort
 lower. A real higher numeric upstream release can upgrade normally: for example,
 `3.2.18p82-r0` sorts above `3.2.17~rc1_82-r1`, whereas `3.2.17p82-r999` does not.
-The published blockers affect AMQP on PHP 8.5 at git.henderkes.com and igbinary
-on PHP 8.2–8.5 at both Forgejo hosts. Package names and real upstream versions
+At git.henderkes.com, the published blockers affect AMQP on PHP 8.5 and igbinary
+on PHP 8.2–8.5. Package names and real upstream versions
 stay unchanged; no synthetic prefixes are added. Until a real higher upstream
 release is available, preflight rejects lower candidates. Valid historical
 versions continue using ordinary revision bumps. Preflight checks the real
 source version and prerelease phase as well as native ordering.
+
+DEB/APK version lookup, revision selection, ABI baselines and publication
+preflight use only `git.henderkes.com`. Secondary Forgejo publication is a
+best-effort mirror and cannot block the primary workflow or change its versions.
 
 ## One RPM repository
 

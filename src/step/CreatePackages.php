@@ -2332,13 +2332,7 @@ class CreatePackages
         }
 
         $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
-        $hosts = (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')
-            ? array_values(array_filter(array_map('trim', explode(',', getenv('SPP_FORGEJO_HOSTS') ?: $host . ',https://git.static-php.dev'))))
-            : [$host];
-        foreach (array_unique($hosts) as $forgejoHost) {
-            $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $forgejoHost) - 1);
-        }
-        return $maxIteration + 1;
+        return self::getForgejoNextIteration($name, $version, $packageType, $host);
     }
 
     private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
