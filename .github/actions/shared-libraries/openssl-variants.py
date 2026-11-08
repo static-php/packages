@@ -542,11 +542,12 @@ def apply(sdk, variants, profile):
     if set(receipt["files"]) & other_owners:
         raise RuntimeError("OpenSSL variant would overwrite another library's files")
     old_paths = entry_paths(old)
+    retained_abi = set(mapping(old.get('abi_dump', {}), 'abi_dump').values()) if not receipt['entry'].get('abi_dump') else set()
     for name in list(old_paths):
         debug = "debug/" + name + ".debug"
         if rooted(sdk, debug).is_file():
             old_paths.add(debug)
-    for name in sorted(old_paths - receipt["files"].keys()):
+    for name in sorted(old_paths - receipt["files"].keys() - retained_abi):
         path = rooted(sdk, name)
         if path.is_symlink() or path.is_file():
             path.unlink()
@@ -556,6 +557,10 @@ def apply(sdk, variants, profile):
     for field in ("abi_epoch", "abi_capability", "abi_capabilities", "abi_comparison", "package_versions"):
         if field in old:
             entry[field] = copy.deepcopy(old[field])
+    if retained_abi:
+        for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
+            if field in old:
+                entry[field] = copy.deepcopy(old[field])
     manifest["libraries"]["openssl"] = entry
     manifest["build_identity"] = digest({key: value for key, value in manifest.items() if key != "build_identity"})
     write(sdk / MANIFEST, manifest)

@@ -159,7 +159,7 @@ class VariantTests(unittest.TestCase):
             marker = variants.read(target / "openssl-variant.json")
             self.assertEqual(marker["files"]["lib/libcrypto.so.3"], variants.file_record(target / "lib/libcrypto.so.3"))
 
-    def test_apply_accepts_abi_cache_added_after_profile_export(self):
+    def test_apply_retains_classified_abi_added_after_profile_export(self):
         self.build()
         manifest = variants.read(self.sdk / variants.MANIFEST)
         relative = "usr/share/php-zts/libraries/abi/openssl/libcrypto.so.3.xml"
@@ -167,16 +167,17 @@ class VariantTests(unittest.TestCase):
         cache.parent.mkdir(parents=True)
         cache.write_text("classified ABI cache\n")
         manifest["libraries"]["openssl"].update(abi_dump={"libcrypto.so.3": relative},
-            abi_dump_hashes={"libcrypto.so.3": variants.file_hash(cache)})
+            abi_dump_hashes={"libcrypto.so.3": variants.file_hash(cache)}, abi_empty=[])
         variants.write(self.sdk / variants.MANIFEST, manifest)
         for profile in variants.PROFILES:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(dir=self.root) as temporary:
                 target = Path(temporary)
                 shutil.copytree(self.sdk, target, dirs_exist_ok=True, symlinks=True)
                 variants.apply(target, self.output, profile)
-                self.assertFalse((target / relative).exists())
+                self.assertEqual((target / relative).read_text(), cache.read_text())
                 entry = variants.read(target / variants.MANIFEST)["libraries"]["openssl"]
-                self.assertNotIn("abi_dump", entry)
+                for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
+                    self.assertEqual(entry[field], manifest['libraries']['openssl'][field])
                 self.assertEqual(entry["abi_epoch"], manifest["libraries"]["openssl"]["abi_epoch"])
                 self.assertEqual((target / "lib/libother.so.1").read_bytes(), b"unrelated consumer")
         self.assertEqual(cache.read_text(), "classified ABI cache\n")
