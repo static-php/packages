@@ -72,6 +72,8 @@ Alpine ARM64 PHP 8.6 job `128773504109` completed compilation, packaging and nat
 
 Alpine x86_64 SDK job `128789019049` then rebuilt exactly ngtcp2 in 31 seconds, but the isolation guard rejected unselected outputs because it compared SONAME symlink timestamps. Native Alpine `ldconfig -n` recreates unchanged symlinks: a real zlib link retained the same target while its timestamp changed. The guard now compares symlink targets and modes, retaining byte, mode and timestamp checks for regular files. Regression checks reject changed link targets and regular-file timestamp changes. Genuine differences also report affected paths rather than only a generic error. Do not restore timestamp/inode comparisons for symlinks or weaken actual output checks to handle this case.
 
+The corrected Alpine jobs `128790898718` and `128790898725` passed that guard and confirmed the intended ABI scope: 67 cached classifications reused and only ngtcp2 analyzed. Planning then failed at `package_versions.pop(type, None)` because SPC's PHP associative-array round-trip changed an empty map from `{}` to `[]`. The planner normalizes only an empty list back to a map at its manifest boundary and rejects populated lists. Native PHP round-trip tests preserve real per-format versions. This is a representation correction, not permission to discard published versions or weaken publication checks.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

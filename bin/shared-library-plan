@@ -104,6 +104,12 @@ def validate_manifest(value, complete=True, allow_pending=False):
             raise RuntimeError('Invalid library ID: ' + identifier)
         if not library.get('version') or not isinstance(library.get('elf'), dict):
             raise RuntimeError('Missing version or ELF inventory for ' + identifier)
+        versions = library.get('package_versions', {})
+        # PHP round-trips an empty JSON object as an empty array.
+        if versions == []:
+            library['package_versions'] = {}
+        elif not isinstance(versions, dict):
+            raise RuntimeError('Invalid library package versions for ' + identifier)
         epoch = library.get('abi_epoch', 1)
         if type(epoch) is not int or epoch < 1:
             raise RuntimeError('Invalid ABI epoch for ' + identifier)

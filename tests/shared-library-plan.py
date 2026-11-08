@@ -31,6 +31,28 @@ def manifest(libraries=None):
 
 
 class SharedLibraryPlan(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('php'), 'PHP manifest round-trip required')
+    def test_php_empty_package_version_map_is_normalized_without_losing_versions(self):
+        for versions in [{}, {'rpm': '1.0-4', 'deb': '1.0-7'}]:
+            with self.subTest(versions=versions):
+                value = manifest()
+                value['libraries']['fixture']['package_versions'] = versions
+                output = subprocess.check_output(['php', '-r',
+                    'echo json_encode(json_decode(stream_get_contents(STDIN), true));'],
+                    input=json.dumps(value).encode())
+                parsed = json.loads(output)
+                self.assertEqual(parsed['libraries']['fixture']['package_versions'], versions or [])
+                result = planner['validate_manifest'](parsed)
+                actual = result['libraries']['fixture']['package_versions']
+                self.assertEqual(actual, versions)
+                actual.pop('apk', None)
+
+    def test_populated_list_cannot_impersonate_a_package_version_map(self):
+        value = manifest()
+        value['libraries']['fixture']['package_versions'] = ['1.0-r2']
+        with self.assertRaisesRegex(RuntimeError, 'Invalid library package versions'):
+            planner['validate_manifest'](value)
+
     def test_pending_transition_is_available_only_for_intermediate_planning(self):
         value = manifest({'fixture': library(soname='libfixture.so.2'), 'consumer': library(soname='libconsumer.so.1', depends=['fixture'])})
         value['pending_rebuilds'] = {'consumer': {'libfixture.so.1': 'fixture'}}
