@@ -1,0 +1,109 @@
+name: Publish staged packages
+description: Verify and publish an existing package cohort without rebuilding
+inputs:
+    build-run-id:
+        description: Build run containing the package artifacts; empty uses the current run
+        default: ""
+    artifact-ids:
+        description: Exact artifact IDs selected for a previous build; empty uses the current target pattern
+        default: ""
+    rpm-ssh-key:
+        description: RPM repository SSH key
+        default: ""
+    rpm-signing-key:
+        description: RPM signing key
+        default: ""
+    rpm-signing-password:
+        description: RPM signing key passphrase
+        default: ""
+runs:
+    using: composite
+    steps:
+        -   name: Select supported Python
+            shell: bash
+            run: |
+                if command -v python3.9 >/dev/null 2>&1; then
+                    mkdir -p "$RUNNER_TEMP/spp-python"
+                    ln -sf "$(command -v python3.9)" "$RUNNER_TEMP/spp-python/python3"
+                    echo "$RUNNER_TEMP/spp-python" >> "$GITHUB_PATH"
+                fi
+        -   name: Set up SSH key
+            if: env.TYPE == 'rpm'
+            uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
+            with:
+                ssh-private-key: ${{ inputs.rpm-ssh-key }}
+        -   name: Trust repository host
+            if: env.TYPE == 'rpm'
+            shell: bash
+            run: |
+                host=${RPM_HOST#*@}
+                mkdir -p ~/.ssh
+                cat >> ~/.ssh/known_hosts <<EOF
+                $host ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPQq0y77dDEtxECVMhCxjcqiV369goMcbInsY/d+F1yXGwqOXQ6RqIEzgaVhgq0joMJT5BiGXNXQ+OI10/KtzGI=
+                $host ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2laCc5jifgjL/2zLzgP1E/X3kouXdaZv00KtAV1DOO5umThoWzb16cswnVtjtLUEMIuo9rPLB79xX2Asa+nN3uMgJDANnr/xnhRoI++yOGLga40/O69U88j5x+5FXODscH/k4n85mfcjzm/fZLXcHlb17ibCmU20I3v46sydn95Pp4/ShDvqsHVB4gWEKJ+jStkooUz2H1UZ8ZquNtaPTlmkOeClNj6gxag74P5b9VB6M5YNac2Emi3Nm0dYkc+BL0Qv+NEtFR1lR63DLa3O/NGTALGJYGmTUkjwiv8KygegaKhd2zxESmWhV7eYIPax8zL+GE9sX1Xwwh1huS0vsuwr2dXPP1/q5slz1AQV/lx85fGdiHc0F8RUXwqXbvGxZJheTuC/Mgu0cFzp5gqO4kTP28X+9fokzScBKBCIfObDXrl7rZgTXAA8IQ5gHk1tGchaEOIcDsjdISW5HVOiwocYSwUNMHzuZ08qAulatIywtOGcWVRdvOs7TcvSgfZ0=
+                $host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
+                EOF
+                chmod 600 ~/.ssh/known_hosts
+        -   name: Set canonical RPM repository paths
+            if: env.TYPE == 'rpm'
+            shell: bash
+            run: |
+                arch="$MATRIX_ARCH"
+                if [[ "$arch" == arm64 ]]; then arch=aarch64; fi
+                echo "RPM_DIRECTORY=/mnt/data/rpm/$arch/el8" >> "$GITHUB_ENV"
+        -   name: Pull pinned Alpine builder
+            if: env.TYPE == 'apk'
+            env:
+                ACTOR: ${{ github.actor }}
+            shell: bash
+            run: |
+                echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                docker pull "$IMAGE"
+        -   name: Download complete staged cohort
+            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+            with:
+                github-token: ${{ github.token }}
+                run-id: ${{ inputs.build-run-id || github.run_id }}
+                artifact-ids: ${{ inputs.artifact-ids }}
+                pattern: ${{ inputs.artifact-ids == '' && format('shared-*-{0}-{1}*', env.TYPE, env.TARGET) || '' }}
+                path: cohort
+        -   name: Verify selected build target
+            shell: bash
+            run: python3 .github/actions/shared-libraries/publication.py verify-target --directory "cohort/shared-libs-$TYPE-$TARGET"
+        -   name: Assemble cohort packages
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh assemble
+        -   name: Verify native ordinary upgrade receipts
+            shell: bash
+            run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
+        -   name: Sign RPM packages
+            if: env.TYPE == 'rpm'
+            env:
+                RPM_SIGNING_KEY: ${{ inputs.rpm-signing-key }}
+                RPM_SIGNING_PASSWORD: ${{ inputs.rpm-signing-password }}
+            shell: bash
+            run: bash .github/actions/shared-libraries/sign-rpm.sh
+        -   name: Verify complete cohort and all upgrade guards
+            id: cohort-guard
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh publish
+        -   name: Publish cohort to first existing registry
+            id: registry-1
+            if: env.TYPE != 'rpm'
+            continue-on-error: true
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh upload-1
+        -   name: Publish cohort to second existing registry
+            id: registry-2
+            continue-on-error: true
+            if: ${{ !cancelled() && env.TYPE != 'rpm' && steps.cohort-guard.outcome == 'success' }}
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh upload-2
+        -   name: Stage and promote canonical RPM generation
+            if: env.TYPE == 'rpm'
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh publish-rpm
+        -   name: Report registry publication failures
+            if: ${{ !cancelled() && (steps.registry-1.outcome == 'failure' || steps.registry-2.outcome == 'failure') }}
+            shell: bash
+            run: exit 1

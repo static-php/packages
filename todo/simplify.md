@@ -6,6 +6,8 @@ Make routine upstream updates stable, fast and easy to understand. The shared-li
 
 The user explicitly wants aggressive simplification. Preserve the necessary behavior below, but remove, merge or replace everything else that makes routine updates fragile. Do not preserve an abstraction, helper, receipt, workflow step or compatibility layer merely because it already exists. Do not add another orchestration layer to repair the existing ones.
 
+This is a simplification assignment, not a request to keep patching the current design until one run happens to pass. First identify the smallest pipeline that satisfies the requirements, then replace the redundant paths and delete their superseded code. Prefer fewer independently maintained contracts and one source of truth for each decision. The specific helper files, plan schemas, intermediate artifacts, job boundaries and metadata formats are not requirements.
+
 Success means working Alpine and EL8 builds, reusable caches, reliable publication and ordinary package-manager upgrades. Passing mocked tests alone is insufficient.
 
 ## Confirmed failures
@@ -34,7 +36,7 @@ Its remaining long SDK step was package creation: gRPC RPM debuginfo took approx
 - SPC doctor printed `go-xcaddy is not installed`, attempted `install-go-xcaddy`, then reported `Download artifact 'go-xcaddy' failed` and exited with code 69.
 - Both `Dockerfile.alpine` and `Dockerfile.rhel` explicitly install go-xcaddy while building the image, set `PKG_ROOT_PATH=/opt/spc-pkgroot`, and preserve bootstrap download metadata there.
 
-The reason the runtime build does not recognize the preinstalled tool is **not yet established**. Inspect the exact resolved image, its installed executable and package metadata, SPC's installed-artifact detection, and the environment passed to the child process. Fix the producer-image/runtime contract. Do not hide the problem by adding another routine network download or rebuilding the compiler images without evidence that their contents are wrong.
+Follow-up investigation traced detection to shallow metadata merging and SPC requiring the downloaded binary archive before checking its installed directory. `bin/spp` now merges the image's binary metadata by platform and registers physically installed tools as local binaries, retaining the original archive hash. An offline test against the real EL8 image passed. Treat this as an implemented correction requiring end-to-end verification, not a reason to preserve the surrounding setup complexity. Routine builds must use the image's installed tool; do not add another network download or rebuild the compiler images without evidence that their contents are wrong.
 
 The downloaded job log is currently `/tmp/packages-apk-failure.log`; it is temporary evidence, not a repository dependency.
 
@@ -79,6 +81,16 @@ These are behavior requirements. Their present implementations are replaceable.
 6. **Preserve the already compiled SDKs.** Do not change cache keys/compatibility casually, delete useful archives, or start a two-hour cold rebuild to test orchestration edits. If a future workflow expects a renamed asset, make the already uploaded asset available under that name and verify lookup before pushing or dispatching. The previous cache migration and obsolete-cache deletion are already complete; do not repeat them.
 7. **Reduce the number of independent moving parts.** Inspect overlapping responsibilities in `glibc.py`, `run.sh`, `workflow.py`, `source-plan.py`, `incremental-build.py`, `payload-cache.py`, `openssl-variants.py`, `bin/shared-library-plan` and the workflows. Collapse duplicate control flow and calculations. Remove redundant copies, baseline reads, extraction, validation and metadata refreshes. Fewer steps alone is not enough if the same complexity is hidden inside one enormous helper.
 8. **Simplify tests along with production code.** Retain useful native regression and upgrade coverage. Replace implementation-shaped tests with checks of required behavior. Verify an actual restored SDK and an actual preinstalled tool, not only mocked commands that cannot expose the observed failures.
+9. **Avoid unnecessary SDK transfers.** If an unchanged request needs neither library compilation nor SDK contents, use its metadata and existing published outputs. Extract the SDK when a PHP build or actual library update needs it. A cache hit is not itself a reason to download, unpack, reclassify, repack and upload the same multi-gigabyte tree.
+
+## How to approach the replacement
+
+- Trace one unchanged update and one changed-library update from source selection through publication. List each expensive operation and the concrete requirement it serves. Delete operations without one; consolidate repeated operations that serve the same requirement.
+- Define the decision once: no change, changed PHP/extensions, changed libraries with compatible ABI, or changed libraries requiring dependent rebuilds. Downstream stages should consume that decision rather than rediscover it through another plan, baseline fetch or metadata rewrite.
+- Keep compatibility checks tied to actual compiler/source inputs. Orchestration-only edits must not invalidate compiled SDKs. Do not bypass real compiler incompatibility to force cache reuse.
+- Before pushing a cache-layout change or dispatching CI, verify that the already uploaded SDKs resolve through the future lookup path. Preserve the working archive throughout replacement, including cancellation. Never use a cold rebuild as the default recovery for a broken cache transaction.
+- Verify the narrow path locally first, using the real native tool or builder where needed. Then use CI to validate the replacement. Do not repeatedly launch all streams and architectures while a known preparation or packaging failure guarantees failure.
+- Deliver the simpler implementation, deletion of superseded logic, updated documentation and measured evidence: which outputs were reused, which libraries actually rebuilt, how many ABI comparisons ran, and where time was spent. Do not substitute a large new framework or a growing collection of workaround steps.
 
 ## Working tree at the original handoff
 
@@ -93,8 +105,6 @@ The implementation changes present at that handoff were:
 - Regression additions in `tests/abi-dump-cache.py`, `tests/glibc-pipeline.py`, `tests/openssl-variants.py` and `tests/publication-baselines.py`.
 
 These changes are **not a completed simplification**. Review, simplify or replace them. In particular, the unchanged-library path fails fast if the published ABI baseline differs and no matching cached comparison is available; make sure its recovery behavior is usable and does not create another unexpected failure for existing caches.
-
-On resuming the active goal, the go-xcaddy detection problem was traced to shallow metadata merging and SPC requiring a downloaded binary archive before checking the installed directory. `bin/spp` now merges image binary records by platform and registers tools physically installed under the image's package root as local binaries. It preserves pinned source records. `tests/builder-tool-cache.php` passed against the real EL8 image with networking disabled, for both foreign-platform and stale-native snapshot metadata; the installed xcaddy executable also ran successfully. This fix still requires real Alpine ARM64 CI verification.
 
 Installed-tool metadata is initialized before SDK/PHP cache identities are selected, remains idempotent, and retains the image's original archive hash. This prevents the build's later tool setup from changing the inputs used to select its payload cache key.
 
