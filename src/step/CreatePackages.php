@@ -1851,11 +1851,10 @@ class CreatePackages
                         : ['src' => $source, 'dst' => $dest];
                     if (!is_link($source) && is_dir($source)) {
                         $contentItem['dst'] = rtrim($dest, '/');
-                        $contentItem['type'] = 'tree';
                     }
                     // Mark config files
                     if (!is_link($source) && isset($config['config-files']) && in_array($dest, $config['config-files'])) {
-                        $contentItem['type'] = is_dir($source) ? 'config|tree' : 'config';
+                        $contentItem['type'] = 'config';
                     }
                     $contents[] = $contentItem;
                 } else {

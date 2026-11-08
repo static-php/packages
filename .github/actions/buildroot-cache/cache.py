@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -111,6 +112,9 @@ class GitHub:
         asset_id = self.asset_inventories[tag].get(asset)
         if asset_id is None:
             return False
+        return self.download_id(asset_id, destination)
+
+    def download_id(self, asset_id, destination):
         url = "https://api.github.com/repos/" + self.repository + "/releases/assets/" + str(asset_id)
         headers = {"User-Agent": "buildroot-cache", "Accept": "application/octet-stream"}
         if self.token:
@@ -136,15 +140,23 @@ class GitHub:
                     raise
         return release
 
-    def find_asset(self, release, name):
+    def list_assets(self, release):
+        result = []
         for page in range(1, 101):
             assets = self.api("/releases/" + str(release["id"]) + "/assets?per_page=100&page=" + str(page))
-            for asset in assets:
-                if asset["name"] == name:
-                    return asset
+            result.extend(assets)
             if len(assets) < 100:
                 break
-        return None
+        return result
+
+    def find_asset(self, release, name):
+        return next((asset for asset in self.list_assets(release) if asset['name'] == name), None)
+
+    def rename(self, asset_id, name):
+        return self.api('/releases/assets/' + str(asset_id), method='PATCH', data={'name': name})
+
+    def delete(self, asset_id):
+        self.api('/releases/assets/' + str(asset_id), method='DELETE', missing=True)
 
     def upload(self, release, name, path, immutable=False):
         url = "https://uploads.github.com/repos/" + self.repository + "/releases/" + str(release["id"]) + "/assets?name=" + urllib.parse.quote(name, safe="")
@@ -159,8 +171,7 @@ class GitHub:
                 self.api("/releases/assets/" + str(asset["id"]), method="DELETE", missing=True)
             try:
                 with path.open("rb") as stream:
-                    self.request(url, method="POST", data=stream, headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)})
-                return
+                    return self.request(url, method="POST", data=stream, headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)})
             except CacheError as error:
                 if attempt == 3 or not isinstance(error.__cause__, urllib.error.HTTPError) or error.__cause__.code != 422:
                     raise
@@ -178,7 +189,8 @@ class ReleaseCache:
     def metadata(self, tag, name, temporary):
         destination = temporary / "metadata.json"
         if not self.backend.download(tag, name, destination):
-            return None
+            if name != self.receipt or not self.backend.download(tag, name + '.previous', destination):
+                return None
         try:
             value = json.loads(destination.read_text())
         except (ValueError, OSError) as error:
@@ -202,10 +214,16 @@ class ReleaseCache:
             raise CacheError("Cache compatibility identity mismatch")
         if not re.fullmatch(r"[a-f0-9]{64}", value.get("sha256", "")) or not isinstance(value.get("size"), int) or value["size"] < 1:
             raise CacheError("Cache metadata has no valid digest/size")
+        if 'asset_id' in value and (type(value['asset_id']) is not int or value['asset_id'] < 1):
+            raise CacheError('Cache metadata has an invalid asset ID')
 
     def install(self, tag, asset, value, temporary):
         candidate = temporary / "buildroot.tar.zst"
-        if not self.backend.download(tag, asset, candidate):
+        downloaded = (self.backend.download_id(value['asset_id'], candidate) if value and value.get('schema') == 2 and value.get('asset_id')
+                      else self.backend.download(tag, asset, candidate))
+        if not downloaded:
+            if value is not None:
+                raise CacheError('Compiled cache receipt points to a missing archive; refusing a cold rebuild: ' + asset)
             return False
         if value is not None and (candidate.stat().st_size != value["size"] or digest(candidate) != value["sha256"]):
             raise CacheError("Compiled buildroot cache checksum mismatch")
@@ -279,11 +297,34 @@ class ReleaseCache:
         checksum = digest(self.path)
         value = {"schema": 2, "key": self.key, "tag": self.tag, "asset": self.asset, "compatibility": self.seed_key or None, "sha256": checksum, "size": self.path.stat().st_size, "created_at": datetime.now(timezone.utc).isoformat()}
         release = self.backend.release(self.tag)
+        suffix = '.upload-' + uuid.uuid4().hex[:12]
+        staged = self.backend.find_asset(release, self.asset)
+        if staged is None or staged.get('size') != value['size'] or staged.get('digest') != 'sha256:' + checksum:
+            staged = self.backend.upload(release, self.asset + suffix, self.path)
+        value['asset_id'] = staged['id']
         with tempfile.TemporaryDirectory(prefix="buildroot-cache-", dir=self.path.parent) as directory:
             metadata = Path(directory) / "metadata.json"
             metadata.write_text(json.dumps(value, sort_keys=True) + "\n")
-            self.backend.upload(release, self.asset, self.path)
-            self.backend.upload(release, self.receipt, metadata)
+            pointer = self.backend.upload(release, self.receipt + suffix, metadata)
+        previous = self.backend.find_asset(release, self.receipt + '.previous')
+        current = self.backend.find_asset(release, self.receipt)
+        if current:
+            if previous:
+                self.backend.delete(previous['id'])
+            self.backend.rename(current['id'], self.receipt + '.previous')
+        # The committed pointer can restore by ID before the readable archive name changes.
+        self.backend.rename(pointer['id'], self.receipt)
+        current = self.backend.find_asset(release, self.asset)
+        if current and current['id'] != staged['id']:
+            self.backend.delete(current['id'])
+        if staged['name'] != self.asset:
+            self.backend.rename(staged['id'], self.asset)
+        previous = self.backend.find_asset(release, self.receipt + '.previous')
+        if previous:
+            self.backend.delete(previous['id'])
+        for asset in self.backend.list_assets(release):
+            if asset['id'] != staged['id'] and asset['name'].startswith((self.asset + '.upload-', self.receipt + '.upload-')):
+                self.backend.delete(asset['id'])
         return value
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import hashlib
+import copy
 import importlib.util
 import io
 import json
@@ -20,6 +21,51 @@ class MemoryBackend:
     def __init__(self):
         self.assets = {}
         self.events = []
+        self.ids = {}
+        self.next_id = 1
+        self.interrupt_after = None
+
+    def event(self, *value):
+        self.events.append(value)
+        if self.interrupt_after is not None and len(self.events) == self.interrupt_after:
+            raise InterruptedError('simulated cancellation')
+
+    def record(self, key):
+        if key not in self.assets:
+            return None
+        if key not in self.ids:
+            self.ids[key] = self.next_id
+            self.next_id += 1
+        return {'id': self.ids[key], 'name': key[1], 'size': len(self.assets[key]),
+                'digest': 'sha256:' + hashlib.sha256(self.assets[key]).hexdigest()}
+
+    def list_assets(self, release):
+        return [self.record(key) for key in self.assets if key[0] == release['tag_name']]
+
+    def find_asset(self, release, name):
+        return self.record((release['tag_name'], name))
+
+    def rename(self, asset_id, name):
+        key = next(key for key, value in self.ids.items() if value == asset_id)
+        destination = (key[0], name)
+        if destination in self.assets:
+            raise cache.CacheError('Asset name already exists')
+        self.assets[destination] = self.assets.pop(key)
+        self.ids[destination] = self.ids.pop(key)
+        self.event('rename', asset_id, name)
+
+    def delete(self, asset_id):
+        key = next(key for key, value in self.ids.items() if value == asset_id)
+        self.assets.pop(key, None)
+        self.ids.pop(key)
+        self.event('delete', asset_id)
+
+    def download_id(self, asset_id, destination):
+        key = next((key for key, value in self.ids.items() if value == asset_id), None)
+        if key not in self.assets:
+            return False
+        Path(destination).write_bytes(self.assets[key])
+        return True
 
     def tags(self):
         return sorted({tag for tag, asset in self.assets}, reverse=True)
@@ -36,9 +82,12 @@ class MemoryBackend:
 
     def upload(self, release, name, path, immutable=False):
         key = (release["tag_name"], name)
-        self.events.append(("upload", key[0], name, immutable))
         if not immutable or key not in self.assets:
             self.assets[key] = Path(path).read_bytes()
+            self.ids.pop(key, None)
+        result = self.record(key)
+        self.event('upload', key[0], name, immutable)
+        return result
 
 
 class ReleaseCacheTests(unittest.TestCase):
@@ -78,9 +127,11 @@ class ReleaseCacheTests(unittest.TestCase):
         events = [event for event in self.backend.events if event[0] == "upload"]
         self.assertEqual(len(events), 2)
         self.assertFalse(events[0][3])
-        self.assertEqual(events[0][2], 'buildroot-glibc-alma8-x86_64.tar.zst')
-        self.assertEqual(events[1][2], 'buildroot-glibc-alma8-x86_64.json')
-        self.assertEqual(json.loads(self.backend.assets[value["tag"], events[1][2]]), value)
+        self.assertTrue(events[0][2].startswith('buildroot-glibc-alma8-x86_64.tar.zst.upload-'))
+        self.assertTrue(events[1][2].startswith('buildroot-glibc-alma8-x86_64.json.upload-'))
+        receipt = cache.cache_names(self.key)[1]
+        self.assertEqual(json.loads(self.backend.assets[value['tag'], receipt]), value)
+        self.assertEqual(set(self.backend.assets), {('cache', value['asset']), ('cache', receipt)})
         self.assertEqual(value['sha256'], hashlib.sha256(self.path.read_bytes()).hexdigest())
         self.assertEqual(value['compatibility'], self.seed)
         self.assertEqual(value['tag'], 'cache')
@@ -107,6 +158,64 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), b'updated library payload')
         with self.assertRaisesRegex(cache.CacheError, 'No exact'):
             self.restore(required=True)
+
+    def test_cancellation_at_each_replacement_boundary_keeps_a_restorable_sdk(self):
+        self.store()
+        original = copy.deepcopy(self.backend)
+        newer = self.key.replace('a' * 32, 'b' * 32)
+        for boundary in range(1, 8):
+            with self.subTest(boundary=boundary):
+                self.backend = copy.deepcopy(original)
+                self.backend.events = []
+                self.backend.interrupt_after = boundary
+                with self.assertRaises(InterruptedError):
+                    self.store(newer, body=b'updated library payload')
+                self.backend.interrupt_after = None
+                result = self.restore(newer)
+                self.assertTrue(result['cache-hit'] == 'true' or result['seed-hit'] == 'true')
+                self.assertIn(self.path.read_bytes(), [b'compiled library payload', b'updated library payload'])
+                self.store(newer, body=b'updated library payload')
+                self.assertEqual(len(self.backend.assets), 2)
+                self.assertEqual(self.restore(newer)['cache-hit'], 'true')
+                self.assertEqual(self.path.read_bytes(), b'updated library payload')
+
+    def test_receipt_without_archive_fails_instead_of_starting_a_cold_rebuild(self):
+        value = self.store()
+        del self.backend.assets['cache', value['asset']]
+        with self.assertRaisesRegex(cache.CacheError, 'missing archive; refusing a cold rebuild'):
+            self.restore(self.key.replace('a' * 32, 'b' * 32))
+
+    def test_metadata_only_update_reuses_the_uploaded_archive(self):
+        value = self.store()
+        self.backend.events = []
+        updated = self.store(self.key.replace('a' * 32, 'b' * 32))
+        self.assertEqual(updated['asset_id'], value['asset_id'])
+        self.assertEqual(len([event for event in self.backend.events if event[0] == 'upload']), 1)
+        self.assertEqual(len(self.backend.assets), 2)
+
+    def test_partial_archive_or_metadata_upload_preserves_the_working_cache(self):
+        self.store()
+        original = copy.deepcopy(self.backend)
+        newer = self.key.replace('a' * 32, 'b' * 32)
+        for failed_upload in [1, 2]:
+            with self.subTest(failed_upload=failed_upload):
+                self.backend = copy.deepcopy(original)
+                upload = self.backend.upload
+                count = 0
+                def interrupted(release, name, path, **kwargs):
+                    nonlocal count
+                    result = upload(release, name, path, **kwargs)
+                    count += 1
+                    if count == failed_upload:
+                        self.backend.assets[release['tag_name'], name] = b'partial upload'
+                        raise InterruptedError('connection closed during upload')
+                    return result
+                with mock.patch.object(self.backend, 'upload', interrupted), self.assertRaises(InterruptedError):
+                    self.store(newer, body=b'updated library payload')
+                self.assertEqual(self.restore(newer)['seed-hit'], 'true')
+                self.assertEqual(self.path.read_bytes(), b'compiled library payload')
+                self.store(newer, body=b'updated library payload')
+                self.assertEqual(len(self.backend.assets), 2)
 
     def test_older_exact_cache_wins_over_newer_compatible_seed(self):
         self.store_weekly()

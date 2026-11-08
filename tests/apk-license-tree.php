@@ -48,6 +48,13 @@ with gzip.open(sys.argv[1], 'rb') as stream, tarfile.open(fileobj=stream, mode='
     assert 'usr/share/licenses/php-zts/0.txt' not in found, found
 PY, DIST_APK_PATH . '/php-zts-cli-8.4.27-r1.x86_64.apk']);
     $inspect->mustRun();
+    if (in_array('--native', $argv, true)) {
+        $install = new Process([getenv('CONTAINER_ENGINE') ?: 'docker', 'run', '--rm', '-i', '--network', 'none',
+            'alpine:3.21', 'sh', '-c', 'cat > /tmp/fixture.apk && apk add --no-network --allow-untrusted /tmp/fixture.apk']);
+        $install->setInput(fopen(DIST_APK_PATH . '/php-zts-cli-8.4.27-r1.x86_64.apk', 'rb'));
+        $install->mustRun();
+        echo $install->getOutput();
+    }
     echo "Passed real APK packaging with duplicate license basenames and a preserved symlink.\n";
 } finally {
     (new Process(['rm', '-rf', $root]))->mustRun();

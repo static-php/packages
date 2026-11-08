@@ -40,7 +40,15 @@ The downloaded job log is currently `/tmp/packages-apk-failure.log`; it is tempo
 
 ### Alpine: successful PHP compilation followed by a license collision
 
-The older run's x86_64 PHP 8.4 job (`128741721952`) completed compilation, then nFPM failed because the CLI license directory mapping flattened multiple libraries' `0.txt` files onto `/usr/share/licenses/php-zts/0.txt`. Directory mappings need nFPM's tree semantics. The compiled payload was not cached because export occurred after packaging. A subsequent correction uses explicit tree mappings and exports a verified sealed payload before packaging; only a successfully completed export becomes eligible for release-cache saving, including after a packaging failure. Package tests and publication guards remain required.
+The older run's x86_64 PHP 8.4 job (`128741721952`) completed compilation, then nFPM failed because the CLI license directory mapping flattened multiple libraries' `0.txt` files onto `/usr/share/licenses/php-zts/0.txt`. Directory destinations must omit their trailing slash to preserve nesting. The first correction used nFPM's explicit `tree` type; nFPM 2.44 then produced directory-heavy APKs rejected by Alpine 3.21 as `package file format error`. Ordinary directory mappings with the normalized destination pass actual `apk add` in `tests/apk-license-tree.php --native`, including duplicate basenames and symlinks.
+
+The original compiled payload was not cached because export occurred after packaging. Export now runs before packaging; only a successfully completed sealed export becomes eligible for release-cache saving, including after a packaging/test failure. This preserved the later run's compiled PHP outputs despite its installation failures. Package tests and publication guards remain required.
+
+### Interrupted cache replacement erased an existing SDK
+
+EL8 job `128752715161` missed a genuinely compatible x86_64 cache and started a cold build. Its requested compiler compatibility exactly matched the existing receipt. The original archive had been deleted by a superseded run's save, which was canceled during replacement upload, leaving only an unusable `starter` asset. The verified local archive still matched the old receipt's full checksum and was recovered without compilation.
+
+Cache writes must preserve the current SDK until the replacement is fully uploaded and its receipt is committed. The replacement implementation stages uploads, restores by committed asset ID, keeps a receipt backup during the switch, and finishes with the same readable canonical filenames. It removes obsolete staging assets after success. Tests interrupt each transaction boundary and partial uploads. A matching receipt with a missing archive must fail visibly instead of silently triggering a cold rebuild.
 
 ## What must remain
 
