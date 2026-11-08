@@ -56,6 +56,10 @@ Cache writes must preserve the current SDK until the replacement is fully upload
 
 Both PHP 8.6 Alpine builds compiled successfully but could not export their payloads: the cache's expected profile required Swoole even though `craft.yml.twig` deliberately excludes it for PHP 8.6. Those two outputs were not saved; the eight PHP 8.2–8.5 payloads were saved. The expected profile now applies the exclusion, and a test compares it with the real rendered configurations for RPM, DEB and APK. That check runs during fingerprint preparation, before library or PHP compilation. Preserve the rule that deliberately filtered builds cannot overwrite a complete cache; remove duplicated profile interpretation where possible.
 
+### Cached PHP packaging depended on the old source tree
+
+Run `42493776131` restored PHP 8.3/8.5 payloads with `changed_components: []`, then packaging failed to detect AMQP's version. The version probe loaded unsuffixed module names, while the actual files are named `amqp-zts-85.so`, etc. Fresh builds had hidden this through a source-header fallback. The probe now uses actual module paths and the correct `zend_extension` directive where required. `tests/extension-version-probe.php --payload=PATH --stream=8.5 --type=apk` passed all 81 available shared extensions from the real cached Alpine payload in an offline native container without a PHP source tree. A restored payload must support packaging independently of compilation's workspace.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.

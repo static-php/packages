@@ -870,11 +870,13 @@ class CreatePackages
             $depExt = new extension($dependency);
             if ($depExt->isSharedExtension() && !ExtMeta::isAddon($dependency)) {
                 $args[] = '-d';
-                $args[] = "extension={$dependency}";
+                $directive = ExtMeta::isZendExtension($dependency) ? 'zend_extension' : 'extension';
+                $args[] = $directive . '=' . BUILD_MODULES_PATH . '/' . $dependency . getSharedLibrarySuffix() . '.so';
             }
         }
         $args[] = '-d';
-        $args[] = "extension={$extension}";
+        $directive = ExtMeta::isZendExtension($extension) ? 'zend_extension' : 'extension';
+        $args[] = $directive . '=' . BUILD_MODULES_PATH . '/' . $extension . getSharedLibrarySuffix() . '.so';
         // No try/catch: an extension that dies on a signal here is a broken package, and
         // Process::wait()'s ProcessSignaledException is the only thing that surfaces it.
         $probe = static function (?array $env) use ($phpBinary, $args, $extension): string {
