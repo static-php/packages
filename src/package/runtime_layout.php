@@ -17,7 +17,7 @@ final class runtime_layout implements package
 
     public function getVersion(): string
     {
-        return '1';
+        return '2';
     }
 
     public function sourceHash(string $type): string
@@ -82,8 +82,9 @@ final class runtime_layout implements package
         if (file_put_contents($script, $contents) === false || !chmod($script, 0755)) {
             throw new RuntimeException('Cannot stage the runtime layout ownership check');
         }
+        // FPM rejects epoch zero; the common DEB archive must be identical on both builders.
         return $type === 'deb'
-            ? ['--before-install', $script, ...$args]
+            ? ['--before-install', $script, '--source-date-epoch-default', '1', ...$args]
             : ['--before-install', $script, '--before-upgrade', $script, ...$args];
     }
 

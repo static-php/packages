@@ -118,6 +118,10 @@ All ten Alpine targets in run `42509033185` passed native validation, including 
 
 Both RPM publishers in run `42510703820` passed signing, then preflight failed with `Host key verification failed` before any RPM upload. GitHub container jobs set `HOME=/github/home`, but OpenSSH resolves its user configuration through the account home (`/root` in the EL8 image). The trust step wrote pinned keys to the former. It now resolves the current UID through `getent passwd` and writes the same pinned keys to the account home. The real step executed successfully in the EL8 test container, and `ssh-keygen` found all three keys there. Keep strict host verification; do not replace pinned keys with unchecked `ssh-keyscan` or disable verification. Retry publication from the retained validated cohort after the source run finishes.
 
+### Independent DEB layout builds collided at one shared architecture/version
+
+DEB ARM64 publisher `128839538487` rejected `php-zts-runtime-layout_1-1_all.deb` after x86_64 published its own copy. The archives had different bytes. Comparing the published archive with a real locally built layout found different tar timestamps and generated `changelog.gz` bytes/checksums, rather than different runtime code. The byte-identity guard correctly refused the second copy. The layout now uses FPM's supported deterministic timestamp option for DEB, and its internal version advances to 2 so corrected archives do not replace already published version 1. `tests/runtime-layout-reproducibility.php` invokes the real production DEB packaging method twice in independent workspaces, at different times, and requires identical SHA-256 values. It passed with the actual EL8 FPM. Runtime-layout ownership guards still pass. Source planning confirms this file is a packaging input, not a compilation input. Generate and validate the corrected packages using existing SDK/PHP caches; do not mutate retained validation receipts, overwrite version 1, or weaken equal-version byte checks to publish the old conflicting cohort.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
