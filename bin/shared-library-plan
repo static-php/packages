@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import gzip
 import hashlib
@@ -16,6 +17,7 @@ import sys
 import shlex
 import tarfile
 import tempfile
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -26,6 +28,10 @@ STREAMS = ['8.2', '8.3', '8.4', '8.5', '8.6']
 METADATA = 'usr/share/php-zts/libraries'
 ROOT = Path(__file__).resolve().parent
 ABI_DUMP_FLAGS = ('--no-corpus-path', '--no-show-locs')
+
+
+def progress(message):
+    print('shared-library-plan: ' + message, file=sys.stderr, flush=True)
 
 
 def read_json(path):
@@ -359,6 +365,8 @@ def dump_abi(root, identifier, library, context=None):
     dumps = {}
     empty = []
     for name, path in sorted(soname_files(library).items()):
+        started = time.monotonic()
+        progress('Checking ABI dump for {} ({})'.format(identifier, name))
         relative = '{}/abi/{}/{}.xml'.format(METADATA, identifier, name)
         output = rooted(root, relative)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -379,12 +387,14 @@ def dump_abi(root, identifier, library, context=None):
             dumps[name] = relative
             if is_empty:
                 empty.append(name)
+            progress('Reused ABI dump for {} ({}) in {:.1f}s'.format(identifier, name, time.monotonic() - started))
             continue
         receipt.unlink(missing_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix='.' + output.name + '-', dir=output.parent)
         os.close(descriptor)
         temporary = Path(temporary)
         try:
+            progress('Generating ABI dump for {} ({})'.format(identifier, name))
             result = run(['abidw', *ABI_DUMP_FLAGS,
                       '--debug-info-dir', str(Path(root) / 'usr/lib/debug'),
                       '--debug-info-dir', str(Path(root) / 'debug'),
@@ -397,6 +407,7 @@ def dump_abi(root, identifier, library, context=None):
             os.replace(temporary, output)
             if inputs is not None:
                 write_abi_dump_receipt(output, inputs)
+            progress('Generated ABI dump for {} ({}) in {:.1f}s'.format(identifier, name, time.monotonic() - started))
         finally:
             temporary.unlink(missing_ok=True)
         if is_empty:
@@ -1032,25 +1043,38 @@ def normalized_arch(arch, kind):
     return arch
 
 
-def published_consumers(helper, host, owner, password, kind, architecture, migration=None, dependencies=None, components=None, native_metadata=None):
+def published_consumers(helper, host, owner, password, kind, architecture, migration=None, dependencies=None, components=None, native_metadata=None, packages=None):
     package_type = 'debian' if kind == 'deb' else 'alpine'
-    packages = helper['get_remote_packages'](host, owner, password, package_type)
+    if packages is None:
+        packages = helper['get_remote_packages'](host, owner, password, package_type)
     result = {}
     names = {package['name'] for package in packages if not package['name'].endswith('-debuginfo')
              and not package['name'].startswith('php-zts-lib-') and package['name'] != 'php-zts-runtime-layout'}
-    selected = {}
+    candidates_by_name = {}
     for name in sorted(names, key=lambda name: (not name.endswith('-cli'), name)):
         candidates = [package for package in packages if package['name'] == name]
         candidates.sort(key=functools.cmp_to_key(lambda a, b: native_compare(kind, a['version'], b['version'])), reverse=True)
-        for candidate in candidates:
+        candidates_by_name[name] = candidates
+
+    def select_consumer(name):
+        progress('Reading {} consumer {}/{} from {}'.format(kind, owner, name, host))
+        for candidate in candidates_by_name[name]:
             archives = helper['remote_package_archives'](host, owner, password, package_type, name, candidate['version'])
             archs = {archive['arch'] for archive in archives}
             if not archs:
                 raise RuntimeError('Cannot determine published consumer architectures: ' + name)
             if architecture in archs or archs.intersection({'all', 'noarch'}):
-                result[name] = candidate['version']
-                selected[name] = [archive for archive in archives if archive['arch'] == architecture or archive['arch'] in ('all', 'noarch')]
-                break
+                return name, candidate['version'], [archive for archive in archives if archive['arch'] == architecture or archive['arch'] in ('all', 'noarch')]
+        return name, None, []
+
+    selected = {}
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for name, version, records in pool.map(select_consumer, candidates_by_name):
+            if version is not None:
+                result[name] = version
+                selected[name] = records
+    progress('Read {} {} consumers for {}/{} in {:.1f}s'.format(len(selected), kind, host, owner, time.monotonic() - started))
     stream = owner[0] + '.' + owner[1:]
     for name, records in selected.items():
         if dependencies is not None:
@@ -1220,7 +1244,8 @@ def baseline_single(args):
                 consumer_streams = [args.owner[0] + '.' + args.owner[1:]]
             for stream in consumer_streams:
                 owner = stream.replace('.', '')
-                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, native_metadata)
+                versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, native_metadata,
+                                               packages=packages if owner == args.owner and consumer_password == password else None)
                 consumers[stream].update(versions)
                 consumer_versions[stream].update(versions)
             names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
@@ -1349,13 +1374,18 @@ def baseline(args):
             source_args = copy.copy(args)
             source_args.__dict__.update(source)
             source_args.output = str(Path(temporary) / str(index))
+            location = source.get('base_url') or source.get('remote_directory') or args.host.rstrip('/') + '/' + source['owner']
+            started = time.monotonic()
+            progress('Reading {} baseline from {}'.format(args.type, location))
             try:
                 baseline_single(source_args)
             except Exception as error:
                 if not missing_forgejo_owner(source_args, error):
                     raise
                 skipped.append(dict(source, reason='owner-not-found'))
+                progress('Skipped missing baseline owner: ' + location)
                 continue
+            progress('Read {} baseline from {} in {:.1f}s'.format(args.type, location, time.monotonic() - started))
             baselines.append((manifest(Path(source_args.output) / 'shared-libraries.json', False), source_args.output))
             captured.append(source)
         merged, divergent = merge_baselines(baselines, args.type, destination)
