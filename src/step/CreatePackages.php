@@ -2345,21 +2345,18 @@ class CreatePackages
     {
         $maxIteration = $packageType === 'apk' ? -1 : 0;
         if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')) {
-            foreach (array_unique([self::getForgejoOwner($name), '82', '83', '84', '85', '86']) as $streamOwner) {
+            foreach (['82', '83', '84', '85', '86'] as $streamOwner) {
                 $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $host, $streamOwner) - 1);
             }
             return $maxIteration + 1;
         }
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
-        $owner ??= self::getForgejoOwner($name);
+        $owner ??= self::getForgejoOwner();
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {
             $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}&limit=1000&page={$page}";
             [$code, $body] = self::httpGet($url);
-            if ($code === 404 && $page === 1 && $owner === 'libs') {
-                return $maxIteration + 1;
-            }
             if ($code !== 200 || $body === null) {
                 throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
             }
@@ -2408,11 +2405,8 @@ class CreatePackages
      * Forgejo owner is the PHP major.minor with the dot stripped (e.g. 8.4 -> "84").
      * Overridable via SPP_FORGEJO_OWNER.
      */
-    private static function getForgejoOwner(?string $name = null): string
+    private static function getForgejoOwner(): string
     {
-        if ($name !== null && (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')) {
-            return getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs';
-        }
         $override = getenv('SPP_FORGEJO_OWNER');
         if ($override !== false && $override !== '') {
             return $override;
@@ -2442,9 +2436,7 @@ class CreatePackages
         $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
         if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
             $owner = rawurldecode($m[1]);
-            $password = $owner === (getenv('SPP_FORGEJO_LIBS_OWNER') ?: 'libs')
-                ? (getenv('FORGEJO_LIBS_PASSWORD') ?: getenv('FORGEJO_PASSWORD') ?: '')
-                : (getenv('FORGEJO_PASSWORD') ?: '');
+            $password = getenv('FORGEJO_PASSWORD') ?: '';
             if ($password !== '') {
                 $arguments = [...$arguments, '--user', $owner . ':' . $password];
             }

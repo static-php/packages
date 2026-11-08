@@ -17,7 +17,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP \
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
-        -e FORGEJO_PASSWORD -e FORGEJO_LIBS_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
+        -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
 

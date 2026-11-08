@@ -32,11 +32,9 @@ foreach (['deb' => 'debian', 'apk' => 'alpine/main/php-zts'] as $type => $suffix
 
 $previousHost = getenv('SPP_FORGEJO_HOST');
 $previousOwner = getenv('SPP_FORGEJO_OWNER');
-$previousLibraries = getenv('SPP_FORGEJO_LIBS_OWNER');
 try {
     putenv('SPP_FORGEJO_HOST=https://example.invalid');
     putenv('SPP_FORGEJO_OWNER=85');
-    putenv('SPP_FORGEJO_LIBS_OWNER=unavailable-library-owner');
     $arguments = (new ReflectionMethod(TestCommand::class, 'baseRepoArgs'))->invoke($command, 'apk', new BufferedOutput());
     if ($arguments !== ['--repository', 'https://example.invalid/api/packages/85/alpine/main/php-zts']) {
         throw new RuntimeException('Partial APK validation still requires an additional library repository');
@@ -44,7 +42,6 @@ try {
 } finally {
     $previousHost === false ? putenv('SPP_FORGEJO_HOST') : putenv('SPP_FORGEJO_HOST=' . $previousHost);
     $previousOwner === false ? putenv('SPP_FORGEJO_OWNER') : putenv('SPP_FORGEJO_OWNER=' . $previousOwner);
-    $previousLibraries === false ? putenv('SPP_FORGEJO_LIBS_OWNER') : putenv('SPP_FORGEJO_LIBS_OWNER=' . $previousLibraries);
 }
 
 echo "Passed independent layout/library classification and existing-owner dependency repository checks.\n";

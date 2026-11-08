@@ -194,7 +194,6 @@ jobs:
             BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
             IMAGE: ${{ matrix.image }}
         steps:
             -   name: Checkout code
@@ -378,7 +377,6 @@ jobs:
             BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
             IMAGE: ${{ matrix.image }}
         steps:
             -   name: Checkout code

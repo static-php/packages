@@ -239,7 +239,6 @@ jobs:
             BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
             RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
         steps:
@@ -452,7 +451,6 @@ jobs:
             BUMP: ${{ inputs.bump || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            FORGEJO_LIBS_PASSWORD: ${{ secrets.FORGEJO_LIBS_PASSWORD }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
             RPM_HOST: github@${{ secrets.DEB_SERVER_IP }}
         steps:

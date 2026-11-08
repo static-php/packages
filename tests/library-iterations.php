@@ -5,13 +5,11 @@ use staticphp\step\CreatePackages;
 require dirname(__DIR__) . '/vendor/autoload.php';
 
 putenv('SPP_FORGEJO_HOSTS=https://first.invalid,https://second.invalid');
-putenv('SPP_FORGEJO_LIBS_OWNER=common');
-putenv('SPP_FORGEJO_OWNER=86');
 $cache = new ReflectionProperty(CreatePackages::class, 'httpCache');
 foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
     $pages = [];
     foreach (['first' => 2, 'second' => 7] as $host => $revision) {
-        foreach (['common', '82', '83', '84', '85', '86'] as $owner) {
+        foreach (['82', '83', '84', '85', '86'] as $owner) {
             $url = "https://{$host}.invalid/api/v1/packages/{$owner}?type={$registryType}&limit=1000&page=";
             $ownerRevision = $host === 'second' && $owner === '85' ? 11 : $revision;
             $suffix = $type === 'deb' ? '-' . $ownerRevision : '-r' . $ownerRevision;
