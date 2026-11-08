@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -169,6 +170,27 @@ class ReleaseCache:
         return True
 
     def restore(self, required=False):
+        for attempt in range(3):
+            try:
+                return self._restore(required)
+            except (CacheError, urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                cause = error.__cause__ or error
+                if isinstance(cause, urllib.error.HTTPError):
+                    retryable = cause.code in [408, 429] or 500 <= cause.code < 600
+                else:
+                    retryable = isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError))
+                if not retryable:
+                    raise
+                if attempt < 2:
+                    print("::warning::Cache service unavailable; retrying restore")
+                    time.sleep(2 ** attempt)
+                elif required:
+                    raise
+                else:
+                    print("::warning::Cache service unavailable; continuing without a compiled cache")
+        return {"cache-hit": "false", "seed-hit": "false", "cache-current": "false", "restored-key": ""}
+
+    def _restore(self, required=False):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tags = [self.tag] + [tag for tag in self.backend.tags() if tag < self.tag]
         with tempfile.TemporaryDirectory(prefix="buildroot-cache-", dir=self.path.parent) as directory:

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -156,6 +157,59 @@ class ReleaseCacheTests(unittest.TestCase):
         for key in ["../escape-2026-43", "no-week", "sdk-2026-54", "sdk-2026-00", "s" * 200 + "-2026-43"]:
             with self.subTest(key=key), self.assertRaises(cache.CacheError):
                 cache.ReleaseCache(self.backend, key, self.path, self.seed)
+
+    def unavailable(self, code=504):
+        error = cache.CacheError("Cache download failed: HTTP " + str(code))
+        error.__cause__ = cache.urllib.error.HTTPError("https://github.com/cache", code, "unavailable", {}, None)
+        error.__cause__.close()
+        return error
+
+    def test_transient_cache_failure_retries_and_restores_verified_payload(self):
+        self.store()
+        self.path.unlink()
+        download = self.backend.download
+        attempts = 0
+
+        def flaky(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise self.unavailable()
+            return download(*args)
+
+        with mock.patch.object(self.backend, "download", side_effect=flaky), mock.patch.object(cache.time, "sleep") as sleep:
+            self.assertEqual(self.restore()["cache-hit"], "true")
+            sleep.assert_called_once_with(1)
+        self.assertEqual(self.path.read_bytes(), b"compiled library payload")
+
+    def test_optional_cache_outage_is_bounded_and_preserves_local_data(self):
+        self.path.write_bytes(b"local user file")
+        with mock.patch.object(self.backend, "download", side_effect=self.unavailable()) as download, mock.patch.object(cache.time, "sleep") as sleep:
+            result = self.restore()
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+        self.assertEqual(result, {"cache-hit": "false", "seed-hit": "false", "cache-current": "false", "restored-key": ""})
+        self.assertEqual(self.path.read_bytes(), b"local user file")
+        self.assertEqual([p.name for p in self.root.iterdir()], [self.path.name])
+
+    def test_required_cache_outage_remains_fatal_after_bounded_retries(self):
+        with mock.patch.object(self.backend, "download", side_effect=self.unavailable()) as download, mock.patch.object(cache.time, "sleep"):
+            with self.assertRaises(cache.CacheError):
+                self.restore(required=True)
+        self.assertEqual(download.call_count, 3)
+        self.assertFalse(self.path.exists())
+
+    def test_authentication_errors_remain_fatal_without_retry(self):
+        with mock.patch.object(self.backend, "download", side_effect=self.unavailable(403)) as download, mock.patch.object(cache.time, "sleep") as sleep:
+            with self.assertRaises(cache.CacheError):
+                self.restore()
+        self.assertEqual(download.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_cache_listing_timeout_can_fall_back_to_a_fresh_build(self):
+        with mock.patch.object(self.backend, "tags", side_effect=TimeoutError("timed out")) as tags, mock.patch.object(cache.time, "sleep"):
+            self.assertEqual(self.restore()["cache-hit"], "false")
+        self.assertEqual(tags.call_count, 3)
 
 
 class RacingGitHub(cache.GitHub):
