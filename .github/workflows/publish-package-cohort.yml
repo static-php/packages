@@ -86,13 +86,14 @@ jobs:
                 if: env.TYPE == 'rpm'
                 run: |
                     host=${RPM_HOST#*@}
-                    mkdir -p ~/.ssh
-                    cat >> ~/.ssh/known_hosts <<EOF
+                    ssh_dir="$(getent passwd "$(id -u)" | cut -d: -f6)/.ssh"
+                    mkdir -p "$ssh_dir"
+                    cat >> "$ssh_dir/known_hosts" <<EOF
                     $host ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPQq0y77dDEtxECVMhCxjcqiV369goMcbInsY/d+F1yXGwqOXQ6RqIEzgaVhgq0joMJT5BiGXNXQ+OI10/KtzGI=
                     $host ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2laCc5jifgjL/2zLzgP1E/X3kouXdaZv00KtAV1DOO5umThoWzb16cswnVtjtLUEMIuo9rPLB79xX2Asa+nN3uMgJDANnr/xnhRoI++yOGLga40/O69U88j5x+5FXODscH/k4n85mfcjzm/fZLXcHlb17ibCmU20I3v46sydn95Pp4/ShDvqsHVB4gWEKJ+jStkooUz2H1UZ8ZquNtaPTlmkOeClNj6gxag74P5b9VB6M5YNac2Emi3Nm0dYkc+BL0Qv+NEtFR1lR63DLa3O/NGTALGJYGmTUkjwiv8KygegaKhd2zxESmWhV7eYIPax8zL+GE9sX1Xwwh1huS0vsuwr2dXPP1/q5slz1AQV/lx85fGdiHc0F8RUXwqXbvGxZJheTuC/Mgu0cFzp5gqO4kTP28X+9fokzScBKBCIfObDXrl7rZgTXAA8IQ5gHk1tGchaEOIcDsjdISW5HVOiwocYSwUNMHzuZ08qAulatIywtOGcWVRdvOs7TcvSgfZ0=
                     $host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
                     EOF
-                    chmod 600 ~/.ssh/known_hosts
+                    chmod 600 "$ssh_dir/known_hosts"
             -   name: Set canonical RPM repository paths
                 if: env.TYPE == 'rpm'
                 run: |
