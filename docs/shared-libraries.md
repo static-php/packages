@@ -12,6 +12,10 @@ payload is compiled once per stream and architecture, then packaged as RPM and
 DEB without changing its common ELF bytes. EL9, EL10 and Debian do not compile
 separate production payloads. Alpine retains its separate native-musl producer.
 
+The Debian 12 image `ghcr.io/static-php/packages-packager-debian` packages the
+sealed EL8 payload. Installation, upgrade and TLS tests use separate
+`debian:11` containers.
+
 The logical runtime directory is `/usr/lib/php-zts/lib`; modules use
 `/usr/lib/php-zts/modules`. RPM retains its real `/usr/lib64/php-zts` tree and a
 package-owned canonical alias. DEB uses the real canonical tree and a compatibility
@@ -147,8 +151,8 @@ Changed sources or recipes rebuild the selected libraries and required dependent
 
 The full matrix covers unique sets: RPM10 + DEB10 + APK10, across five PHP streams
 and two native architectures. PHP-independent library/ABI checks are reused.
-Additional EL9/EL10 and newer-client checks focus on compatibility and unchanged
-legacy URLs instead of repeating the complete extension/profile matrix.
+RPM runtime validation runs on EL8 only. Debian uses Debian 11 and APK uses
+Alpine 3.21.
 
 `bin/freeze-migration-baseline.py` freezes real published archives and their
 checksums. `tests/migration-upgrade-containers.py` installs those packages through
@@ -159,9 +163,11 @@ production signing/download verification remains a separate publication gate.
 `--profile all` and independent extension profiles require a complete frozen
 baseline. `--library-only` checks that PHP versions remain unchanged.
 
-`tests/runtime-service-containers.py` defaults to Docker; `--container-engine`
-selects an alternative engine to exercise real systemd/OpenRC service state. Privileged init-system containers
-use private namespaces without host cgroup, systemd/D-Bus or engine socket mounts.
+Systemd-dependent service tests are not required and are excluded from CI.
+Alpine retains unprivileged OpenRC service checks through
+`tests/runtime-service-containers.py`, which defaults to Docker; `--container-engine`
+selects an alternative engine. The harness rejects privileged containers and uses
+private namespaces without host cgroup, systemd/D-Bus or engine socket mounts.
 Service commands run only through the selected engine's exec command in tracked test containers;
 host shutdown and service-manager commands are rejected by the harness.
 The checks cover requests and mapped executable/library identities across core

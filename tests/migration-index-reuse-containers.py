@@ -75,7 +75,7 @@ def main():
         raise KeyboardInterrupt('Interrupted by signal ' + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
     report = {'schema': 1, 'ok': False, 'scope': __doc__, 'cells': [], 'shared_migration_pass': False}
-    for kind, image in [('apk', 'alpine:3.21'), ('deb', 'debian:bookworm')]:
+    for kind, image in [('apk', 'alpine:3.21'), ('deb', 'debian:11')]:
         if args.type not in ('all', kind):
             continue
         cell = {'type': kind, 'ok': False}
@@ -93,9 +93,7 @@ def main():
                     shutil.copy2(HERE / name, root / name)
                 cell['helper_sha256'] = {path.name: migration['sha256'](path) for path in root.glob('*.py')}
                 container = resources.start(image, 'repo')
-                bootstrap = ('apk add --no-cache python3 openssl abuild' if kind == 'apk' else
-                             'apt-get update -qq && apt-get install -y --no-install-recommends python3 gnupg dpkg-dev apt-utils')
-                resources.exec(container, ['sh', '-ec', bootstrap])
+                migration['prepare'](resources, container, kind, helper=True)
                 checked = resources.exec(container, ['python3', '/spp/' + Path(__file__).name, '--inside', kind])
                 cell.update(json.loads(checked.stdout.split('SPP_INDEX_REUSE=')[-1]),
                             execution=resources.execution, runtime_evidence=resources.runtime_evidence)

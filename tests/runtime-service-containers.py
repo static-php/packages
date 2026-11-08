@@ -124,6 +124,8 @@ class Harness:
         namespace_options = {'--pid', '--ipc', '--cgroupns', '--network', '--net', '--uts', '--userns'}
         for index, value in enumerate(arguments):
             option, _, inline = value.partition('=')
+            if option == '--privileged':
+                raise RuntimeError('Privileged containers are forbidden')
             if option in namespace_options:
                 mode = inline or (arguments[index + 1] if index + 1 < len(arguments) else '')
                 if mode == 'host' or mode.startswith('container:'):
@@ -149,6 +151,8 @@ class Harness:
         evidence = ARCHITECTURE['container_identity'](self.command, result.stdout.strip(), identity, limits)
         inspected = json.loads(self.command(['docker', 'inspect', result.stdout.strip()]).stdout)[0]
         security = inspected['HostConfig']
+        if security.get('Privileged'):
+            raise RuntimeError('Privileged containers are forbidden')
         if any(security.get(key, '') == 'host' or str(security.get(key, '')).startswith('container:')
                for key in ('PidMode', 'IpcMode', 'CgroupnsMode', 'NetworkMode', 'UTSMode', 'UsernsMode')):
             raise RuntimeError('Runtime container shares a host or another container namespace')
@@ -197,16 +201,16 @@ class Harness:
     def boot(self, image, scenario):
         name = 'spp-services-' + self.token + '-' + scenario
         self.containers.append(name)
-        options = ['run', '-d', '--name', name, '--pid=private', '--ipc=private', '--cgroupns=private',
+        options = ['run', '-d', '--name', name, '--ipc=private', '--cgroupns=private',
                    '--tmpfs', '/run', '--tmpfs', '/run/lock', '--tmpfs', '/tmp']
         if self.network:
             options += ['--network', self.network]
         if Path(self.engine).name == 'podman':
-            options += ['--systemd=always', '--security-opt', 'no-new-privileges']
+            options += ['--pid=private', '--systemd=always', '--security-opt', 'no-new-privileges']
         elif self.args.type == 'apk':
             options += ['--cap-add', 'SYS_PTRACE']
         else:
-            options += ['--privileged', '--stop-signal', 'SIGRTMIN+3']
+            options += ['--stop-signal', 'SIGRTMIN+3']
         self.docker(*options, image, '/sbin/init')
         for _ in range(40):
             if self.args.type == 'apk':

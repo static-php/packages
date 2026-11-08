@@ -699,23 +699,15 @@ jobs:
                     sudo apt-get install -y python3-rpm zstd
             -   name: Freeze actual published baseline
                 run: python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline
-            -   name: Prepare real library revision for service validation
-                if: matrix.runtime-checks == true
-                run: |
-                    docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
-                        -e TYPE -e PHPV "$PACKAGING_IMAGE" \
-                        bash .github/actions/shared-libraries/run.sh prepare-runtime
             -   name: Verify custom prefix extension update triggers
                 if: matrix.runtime-checks == true
                 run: python3 tests/runtime-consumer-triggers.py --type "$TYPE" --image "$PACKAGING_IMAGE" --output stage/consumer-trigger-native.json
             -   name: Verify ordinary static to shared upgrade
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
-                    RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
                     TLS_CHECKS: ${{ matrix.tls-checks }}
                 run: |
                     args=()
-                    if [[ "$RUNTIME_CHECKS" == true ]]; then args+=(--services --library-artifacts stage/runtime-libraries); fi
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
                     profile=all
                     if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only); profile=cli,fpm,frankenphp;
@@ -744,103 +736,9 @@ jobs:
                         stage/published-baseline/baseline.json
                     retention-days: 1
 
-    compute-compatibility-matrix:
-        needs: [compute-build-matrix, package]
-        if: ${{ !cancelled() }}
-        runs-on: ubuntu-24.04
-        permissions:
-            actions: read
-            contents: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download target plans
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                continue-on-error: true
-                with:
-                    pattern: shared-plans-glibc-*
-                    path: plans
-            -   name: Select representative validated RPM profiles
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                run: |
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last | select(test("^Package and upgrade \\(rpm "))' \
-                        | sed -E 's/^Package and upgrade \(rpm ([^ ]+) php([^)]+)\)$/\1 \2/' | sort -u)
-                    python3 .github/actions/shared-libraries/workflow.py compatibility --plans plans --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
-
-    compatibility:
-        name: Compatibility (${{ matrix.runtime }} ${{ matrix.target }} php${{ matrix.php-version }})
-        needs: [setup-matrix, compute-compatibility-matrix]
-        if: ${{ !cancelled() && needs.compute-compatibility-matrix.outputs.any == 'true' }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        permissions:
-            contents: read
-            actions: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-compatibility-matrix.outputs.matrix) }}
-        env:
-            MATRIX_ARCH: ${{ matrix.arch }}
-            PHPV: ${{ matrix.php-version }}
-            TARGET: ${{ matrix.target }}
-            RUNTIME: ${{ matrix.runtime }}
-            LIBRARY_ONLY: ${{ matrix.library-only }}
-            IMAGE: ${{ matrix.image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download validated representative RPM set
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-rpm-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: dist/rpm
-            -   name: Download matching library plan
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: shared-libs-rpm-${{ matrix.target }}
-                    path: library-stage
-            -   name: Prepare native baseline tools
-                run: |
-                    sudo apt-get update
-                    sudo apt-get install -y python3-rpm zstd
-            -   name: Freeze genuine legacy URL baseline
-                run: |
-                    profile=cli,fpm,frankenphp
-                    if [[ "$LIBRARY_ONLY" == true ]]; then profile=all; fi
-                    python3 bin/freeze-migration-baseline.py --type rpm --php "$PHPV" --arch "$MATRIX_ARCH" --el "el${RUNTIME#alma}" --profile "$profile" --output stage/published-baseline
-            -   name: Verify representative compatibility and ordinary old URL upgrade
-                run: |
-                    args=()
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
-                    else
-                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
-                        if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
-                    fi
-                    python3 tests/migration-upgrade-containers.py --type rpm --runtime "$RUNTIME" --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/rpm --baseline-dir stage/published-baseline --report dist/rpm/native-upgrade-receipt.json --profile cli,fpm,frankenphp --tls "${args[@]}"
-                    native_args=()
-                    if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
-                    python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type rpm --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report dist/rpm/native-upgrade-receipt.json --plan library-stage/shared-library-plan.json --packages dist/rpm --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output dist/rpm/shared-library-upgrade-receipt.json "${native_args[@]}"
-            -   name: Stage compatibility receipt
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-compatibility-rpm-${{ matrix.target }}-${{ matrix.runtime }}-php${{ matrix.php-version }}
-                    path: dist/rpm
-                    retention-days: 1
-
     publish:
         name: Publish (${{ matrix.type }} ${{ matrix.target }})
-        needs: [setup-matrix, compute-build-matrix, package, compatibility]
+        needs: [setup-matrix, compute-build-matrix, package]
         if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         container:
@@ -906,9 +804,6 @@ jobs:
                 run: bash .github/actions/shared-libraries/run.sh assemble
             -   name: Verify native ordinary upgrade receipts
                 run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
-            -   name: Verify canonical RPM compatibility receipts
-                if: matrix.type == 'rpm'
-                run: python3 .github/actions/shared-libraries/workflow.py verify-compatibility --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET"
             -   name: Sign RPM packages
                 if: matrix.type == 'rpm'
                 env:

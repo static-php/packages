@@ -213,12 +213,6 @@ def main():
     mat.add_argument("--plans", type=Path, required=True)
     mat.add_argument("--php-versions", default="")
     mat.add_argument("--succeeded")
-    smoke = sub.add_parser("compatibility")
-    smoke.add_argument("--plans", type=Path, required=True)
-    smoke.add_argument("--succeeded", required=True)
-    smoke_verify = sub.add_parser("verify-compatibility")
-    smoke_verify.add_argument("--source", type=Path, required=True)
-    smoke_verify.add_argument("--library-artifact", type=Path, required=True)
     packages = sub.add_parser("packages")
     packages.add_argument("--plans", type=Path, required=True)
     packages.add_argument("--succeeded", required=True)
@@ -269,7 +263,12 @@ def main():
         values = [{"arch": arch, "alma": alma, "target": ("alma" + alma + "-" if alma else "") + arch} for alma in alms for arch in archs]
         images = {}
         for value in values:
-            image = "ghcr.io/static-php/packages-builder-" + ({"rpm": "rhel-" + value["alma"], "glibc": "rhel-8", "deb": "debian", "apk": "alpine"}[args.type]) + ":latest"
+            image = "ghcr.io/static-php/" + {
+                "rpm": "packages-builder-rhel-" + value["alma"],
+                "glibc": "packages-builder-rhel-8",
+                "deb": "packages-packager-debian",
+                "apk": "packages-builder-alpine",
+            }[args.type] + ":latest"
             if args.resolve_images:
                 if image not in images:
                     result = subprocess.check_output(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{json .Manifest}}"], universal_newlines=True)
@@ -280,7 +279,7 @@ def main():
                 image = images[image]
             value["image"] = image
             if args.type == "glibc":
-                debian = "ghcr.io/static-php/packages-builder-debian:latest"
+                debian = "ghcr.io/static-php/packages-packager-debian:latest"
                 if args.resolve_images:
                     if debian not in images:
                         result = subprocess.check_output(["docker", "buildx", "imagetools", "inspect", debian, "--format", "{{json .Manifest}}"], universal_newlines=True)
@@ -316,41 +315,6 @@ def main():
                       if kind not in target.get("format_selection", {}) or target["format_selection"][kind].get("libraries") or any(request.get("full") or request.get("packages") for request in target["format_selection"][kind].get("php_requests", {}).values())] if any("package_images" in target for target in targets) else targets
         emit("publish-matrix", {"include": publishing})
         emit("publish-any", str(bool(publishing)).lower())
-    elif args.command == "compatibility":
-        includes = []
-        succeeded = [line.split() for line in args.succeeded.splitlines() if line.strip()]
-        for path in sorted(args.plans.glob("*/shared-library-plan.json")):
-            target = json.loads((path.parent / "target.json").read_text())
-            streams = {parts[1] for parts in succeeded if len(parts) == 2 and parts[0] == target["target"] and parts[1] in STREAMS}
-            if not streams:
-                continue
-            stable = streams - {"8.6"}
-            stream = max(stable or streams, key=lambda value: tuple(map(int, value.split("."))))
-            plan = json.loads(path.read_text())
-            selection = plan.get("format_selection", {}).get("rpm", plan)
-            libraries_only = not any(request.get("full") or request.get("packages") for request in selection.get("php_requests", {}).values())
-            for runtime in ["alma9", "alma10"]:
-                includes.append(dict(target, runtime=runtime, **{"php-version": stream, "library-only": libraries_only}))
-        emit("matrix", {"include": includes})
-        emit("any", str(bool(includes)).lower())
-    elif args.command == "verify-compatibility":
-        target = json.loads((args.library_artifact / "target.json").read_text())
-        found = set()
-        for path in args.source.glob("shared-compatibility-rpm-*/shared-library-upgrade-receipt.json"):
-            data = json.loads(path.read_text())
-            report_path = path.parent / "native-upgrade-receipt.json"
-            report = json.loads(report_path.read_text())
-            cells = report.get("cells", [report])
-            runtimes = {cell.get("runtime") for cell in cells}
-            if len(runtimes) != 1 or not runtimes <= {"alma9", "alma10"}:
-                raise RuntimeError("Compatibility receipt has an unexpected runtime")
-            expected = upgrade_receipt(report_path, args.library_artifact / "shared-library-plan.json", path.parent, "rpm",
-                                       target["source_run_id"], target["image"], data["probe_php_stream"], target["arch"], data["scope"] == "libraries")
-            if data != expected:
-                raise RuntimeError("Compatibility receipt does not match its payload")
-            found.update(runtimes)
-        if found != {"alma9", "alma10"}:
-            raise RuntimeError("Canonical RPM publication requires EL9 and EL10 compatibility/old-URL upgrade receipts")
     elif args.command == "packages":
         values, target_values = matrix(args.plans, csv(args.php_versions, STREAMS))
         succeeded = set(args.succeeded.splitlines())

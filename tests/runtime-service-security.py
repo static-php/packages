@@ -86,18 +86,27 @@ class ServiceContainerSecurity(unittest.TestCase):
                     harness.boot(harness.args.image, 'running')
                     arguments = harness.docker.call_args.args
                     self.assertEqual(arguments[-1], '/sbin/init')
-                    for option in ('--pid=private', '--ipc=private', '--cgroupns=private'):
+                    self.assertFalse(any(option.startswith('--pid') for option in arguments))
+                    for option in ('--ipc=private', '--cgroupns=private'):
                         self.assertIn(option, arguments)
+                    self.assertNotIn('--privileged', arguments)
                     if kind == 'apk':
                         self.assertIn('SYS_PTRACE', arguments)
-                        self.assertNotIn('--privileged', arguments)
                     else:
-                        self.assertIn('--privileged', arguments)
                         self.assertIn('SIGRTMIN+3', arguments)
 
-    def test_privileged_init_is_allowed_but_actual_host_sharing_is_rejected(self):
+    def test_privileged_launch_is_rejected_before_execution(self):
+        for engine in ('docker', 'podman', '/tmp/engine-wrapper'):
+            harness = self.harness(engine)
+            harness.command = Mock()
+            for flag in ('--privileged', '--privileged=true'):
+                with self.subTest(engine=engine, flag=flag), self.assertRaisesRegex(RuntimeError, 'Privileged containers are forbidden'):
+                    harness.docker('run', flag, harness.args.image)
+            harness.command.assert_not_called()
+
+    def test_actual_privilege_or_host_sharing_is_rejected(self):
         for actual in ({'Privileged': True, 'CgroupnsMode': 'private'},
-                       {'Privileged': True, 'PidMode': 'host'}):
+                       {'Privileged': False, 'PidMode': 'host'}):
             with self.subTest(actual=actual):
                 harness = self.harness('docker')
                 harness.command = Mock(side_effect=[subprocess.CompletedProcess([], 0, 'fixture\n', ''),
@@ -105,20 +114,16 @@ class ServiceContainerSecurity(unittest.TestCase):
                 identity = {'native': True, 'emulated': False, 'target_architecture': 'x86_64'}
                 with patch.dict(scope['ARCHITECTURE'], {'engine_identity': Mock(return_value=identity),
                                                        'container_identity': Mock(return_value={})}):
-                    if actual.get('PidMode') == 'host':
-                        with self.assertRaisesRegex(RuntimeError, 'shares a host'):
-                            harness.docker('run', '--privileged', harness.args.image)
-                    else:
-                        harness.docker('run', '--privileged', harness.args.image)
-                        self.assertTrue(harness.runtime_evidence[0]['privileged'])
-                        self.assertFalse(harness.runtime_evidence[0]['host_namespaces'])
+                    with self.assertRaisesRegex(RuntimeError, 'Privileged containers are forbidden|shares a host'):
+                        harness.docker('run', harness.args.image)
 
     def test_optional_podman_boot_retains_its_init_options(self):
         harness = self.harness()
         harness.docker = Mock()
         harness.execute = Mock(return_value=subprocess.CompletedProcess([], 0, 'running\n', ''))
-        harness.boot('debian:11', 'running')
+        harness.boot(harness.args.image, 'running')
         arguments = harness.docker.call_args.args
+        self.assertIn('--pid=private', arguments)
         self.assertIn('--systemd=always', arguments)
         self.assertIn('--cgroupns=private', arguments)
         self.assertIn('no-new-privileges', arguments)

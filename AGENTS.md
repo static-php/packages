@@ -10,22 +10,24 @@ Builds RPM/DEB/APK packages (PHP toolchain, gcc) via GitHub Actions, using repro
 - `craft.yml` — top-level static-php-cli config: extensions list, build options, SPC_* env (CFLAGS, LDFLAGS, etc.). When toolchain/optimization questions come up, look here before guessing.
 - `Dockerfile.{rhel,debian,alpine}` — builders. Built by `.github/workflows/build-images.yml`.
 - `.github/workflows/`:
-  - `build-rpm-modular-packages.yml` — one EL8 glibc producer × x86_64/arm64 × PHP 8.2–8.6; packages the same common binaries as RPM and DEB. RPM publication stages and atomically promotes one canonical repository per architecture, with legacy EL9/EL10 URL aliases.
+  - `build-rpm-modular-packages.yml` — one EL8 glibc producer × x86_64/arm64 × PHP 8.2–8.6; packages the same common binaries as RPM and DEB. RPM runtime tests run only on EL8. RPM publication stages and atomically promotes one canonical repository per architecture, with legacy EL9/EL10 URL aliases.
   - `build-deb-forgejo.yml` — delegates to the shared EL8 workflow; it does not compile a separate Debian payload.
   - `build-apk-forgejo.yml` — separate native Alpine/musl producer. DEB/APK publish each PHP stream to its existing Forgejo owner (`82`…`86`, from `getForgejoOwner()`), including its private libraries, so clients keep their existing version-specific repository URLs.
-  - `build-images.yml` — builds the EL8 and Alpine producer images and Debian packaging/test image.
+  - `build-images.yml` — builds the EL8 and Alpine producer images and Debian packaging image.
   - `spc-download.yml` — produces the `downloads-tarball` artifact that the build workflows pull via `dawidd6/action-download-artifact`.
   - `zizmor.yml` — workflow security audit.
 
 ## Builder containers
 
-On this PC, use Docker and do not install or require Podman. Keep container tooling configurable; do not enforce an engine identity. Privileged test containers are allowed with private PID, IPC and cgroup namespaces. Never share host namespaces or mount the host root, host cgroups, systemd/D-Bus sockets or container-engine sockets into an init-system test container.
+On this PC, use Docker and do not install or require Podman. Keep container tooling configurable; do not enforce an engine identity. Never launch privileged containers, locally or in CI. Do not run systemd-dependent tests; they are not required. Keep PID, IPC and cgroup namespaces private. If a test cannot run unprivileged, report the limitation instead of escalating container privileges. Never share host namespaces or mount the host root, host cgroups, systemd/D-Bus sockets or container-engine sockets into an init-system test container.
+
+Use Buildx's `docker` driver; its `docker-container` driver creates a privileged worker. Image CI pushes native architecture tags with inline cache, then resolves registry digests for the multi-architecture manifest.
 
 Never shut down, reboot, suspend or power off the host, or stop its service manager. Init-system test commands must target a verified test container through the configured engine's exec command; never run its service or shutdown commands on the host. Other host-service changes require explicit user authorization.
 
 `Dockerfile.rhel` is built with `ALMA_VERSION=8` into `ghcr.io/static-php/packages-builder-rhel-8`, the only production glibc compiler image. It provides GCC 16.2.0 and binutils in `/opt/gcc`, `tar`, `zstd`, `cmake` 3.31, `re2c`, `bison`, `autoconf`/`automake`/`libtool`, `fpm`, and a prebuilt `php` from `files.henderkes.com`. GCC runtime assets are checked or repaired by `bin/build-gcc-runtime` for shared linkage, DWARF type information and licenses. The autotools trio matters for pre-release PHP: a `php-8.6.0*` tag archive ships no generated `configure`, so spc runs `./buildconf --force`.
 
-`Dockerfile.debian` is a Debian 11 packaging and native installation-test image. It consumes the sealed EL8 payload. OpenSSL alone has two EL8-built path profiles: RPM `/etc/pki/tls` and DEB `/etc/ssl`; common PHP, extension and other library ELF bytes remain identical.
+`Dockerfile.debian` builds `ghcr.io/static-php/packages-packager-debian`, a Debian 12 packaging image. It consumes the sealed EL8 payload; installation, upgrade and TLS tests use separate `debian:11` containers. OpenSSL alone has two EL8-built path profiles: RPM `/etc/pki/tls` and DEB `/etc/ssl`; common PHP, extension and other library ELF bytes remain identical.
 
 When editing retained per-Alma branches in `Dockerfile.rhel`, remember that 9/10 are not production build targets:
 

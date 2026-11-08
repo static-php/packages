@@ -109,22 +109,25 @@ printf '%s|%s|%s\\n' "$1" "$(cat MODULES/one.so)" "$(cat MODULES/two.so)" >> /wo
                    if args.type == 'rpm' else
                    'dpkg -i /work/layout.deb /work/1/*.deb\n: > /work/calls\ndpkg -i /work/2/*.deb')
         owner = '{}:{}'.format(os.getuid(), os.getgid())
-        script = 'set -eu\ntrap \'chown -R "$SPP_FIXTURE_OWNER" /work\' EXIT\nphp /work/generate.php ' + args.type
-        script += (' omit' if args.omit_consumer_interest else ' normal') + ' ' + native + '\n' + install + '\n'
+        setup = 'set -eu\ntrap \'chown -R "$SPP_FIXTURE_OWNER" /work\' EXIT\n'
+        generate = setup + 'php /work/generate.php ' + args.type
+        generate += (' omit' if args.omit_consumer_interest else ' normal') + ' ' + native + '\n'
         expected_refresh = not args.omit_consumer_interest or args.type == 'rpm'
-        script += '[ "$(cat /work/calls)" = "' + ('finish|2|2' if expected_refresh else '') + '" ]\n'
-        container = 'spp-consumer-triggers-' + directory.name.rsplit('-', 1)[-1]
-        try:
-            result = subprocess.run(['docker', 'run', '--rm', '--name', container, '--network', 'none',
-                '-e', 'SPP_FIXTURE_OWNER=' + owner,
-                '-v', str(ROOT) + ':/project:ro', '-v', str(directory) + ':/work',
-                args.image, 'bash', '-c', script], capture_output=True, text=True, timeout=240)
-        finally:
-            subprocess.run(['docker', 'exec', container, 'chown', '-R', owner, '/work'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode:
-            raise RuntimeError(result.stdout + result.stderr)
-        proof = {'schema': 1, 'type': args.type, 'image': args.image, 'architecture': native,
+        verify = setup + install + '\n[ "$(cat /work/calls)" = "' + ('finish|2|2' if expected_refresh else '') + '" ]\n'
+        runtime_image = 'debian:11' if args.type == 'deb' else args.image
+        for phase, image, script in [('package', args.image, generate), ('runtime', runtime_image, verify)]:
+            container = 'spp-consumer-triggers-' + directory.name.rsplit('-', 1)[-1] + '-' + phase
+            project = ['-v', str(ROOT) + ':/project:ro'] if phase == 'package' else []
+            try:
+                result = subprocess.run(['docker', 'run', '--rm', '--name', container, '--network', 'none',
+                    '-e', 'SPP_FIXTURE_OWNER=' + owner, *project, '-v', str(directory) + ':/work',
+                    image, 'bash', '-c', script], capture_output=True, text=True, timeout=240)
+            finally:
+                subprocess.run(['docker', 'exec', container, 'chown', '-R', owner, '/work'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode:
+                raise RuntimeError(result.stdout + result.stderr)
+        proof = {'schema': 1, 'type': args.type, 'image': runtime_image, 'packaging_image': args.image, 'architecture': native,
             'custom_prefix': 'php-zts85', 'module_only_upgrade': True,
             'metadata_content_unchanged': True, 'updated_modules': 2,
             'native_transaction_refreshes': int(expected_refresh),
