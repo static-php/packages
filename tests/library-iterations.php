@@ -7,6 +7,7 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 putenv('SPP_FORGEJO_HOST=https://first.invalid');
 putenv('SPP_FORGEJO_HOSTS=https://first.invalid,https://second.invalid');
 $cache = new ReflectionProperty(CreatePackages::class, 'httpCache');
+$names = ['php-zts-lib-openssl', 'php-zts-lib-openssl-debuginfo', 'php-zts-runtime-layout', 'php-zts-runtime-layout-debuginfo'];
 foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
     $pages = [];
     foreach (['first' => 2, 'second' => 7] as $host => $revision) {
@@ -15,13 +16,15 @@ foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
             $ownerRevision = $owner === '85' ? $revision + 4 : $revision;
             $suffix = $type === 'deb' ? '-' . $ownerRevision : '-r' . $ownerRevision;
             $pages[$url . '1'] = [200, json_encode([['name' => 'unrelated', 'version' => '1.0-999']])];
-            $pages[$url . '2'] = [200, json_encode([['name' => 'php-zts-lib-openssl', 'version' => '3.6.0' . $suffix]])];
+            $pages[$url . '2'] = [200, json_encode(array_map(static fn (string $name): array => ['name' => $name, 'version' => '3.6.0' . $suffix], $names))];
             $pages[$url . '3'] = [200, '[]'];
         }
     }
     $cache->setValue(null, $pages);
-    if (CreatePackages::getRemoteNextIteration('php-zts-lib-openssl', '3.6.0', 'x86_64', $type) !== 7) {
-        throw new RuntimeException("Missed {$type} library revisions across primary stream owners");
+    foreach ($names as $name) {
+        if (CreatePackages::getRemoteNextIteration($name, '3.6.0', 'x86_64', $type) !== 7) {
+            throw new RuntimeException("Missed {$type} {$name} revisions across primary stream owners");
+        }
     }
 }
 echo "Passed shared library revision lookup using only the primary registry across stream owners.\n";

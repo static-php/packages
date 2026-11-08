@@ -2338,7 +2338,7 @@ class CreatePackages
     private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
     {
         $maxIteration = $packageType === 'apk' ? -1 : 0;
-        if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout')) {
+        if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || preg_replace('/-debuginfo$/', '', $name) === 'php-zts-runtime-layout')) {
             foreach (['82', '83', '84', '85', '86'] as $streamOwner) {
                 $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $host, $streamOwner) - 1);
             }
