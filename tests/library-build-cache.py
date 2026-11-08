@@ -144,6 +144,50 @@ class LibraryBuildIdentityTests(unittest.TestCase):
 
 
 class WorkflowCacheOrderTests(unittest.TestCase):
+    def test_apk_saves_only_completed_exports_even_after_packaging_failure(self):
+        document = yaml.safe_load((ROOT / '.github/workflows/build-apk-forgejo.yml').read_text())
+        save = next(step for step in document['jobs']['build']['steps'] if step.get('name') == 'Save sealed PHP payload cache')
+        self.assertIn('!cancelled()', save['if'])
+        self.assertIn('hashFiles', save['if'])
+        self.assertEqual(save['with']['path'], 'php-payload-cache-ready.tar.zst')
+        for failed_export in [False, True]:
+            with self.subTest(failed_export=failed_export), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for directory in ['shims', 'stage', 'buildroot', 'bin']:
+                    (root / directory).mkdir()
+                (root / 'stage/shared-libraries.json').write_text('{}')
+                (root / 'stage/payload-cache-key').write_text('current-key')
+                (root / 'stage/payload-cache-seed-key').write_text('current-seed')
+                (root / 'stage/library-compatibility').write_text('compiler')
+                (root / 'stage/payload-provenance.json').write_text('{"compiled_source_run_id":"42"}')
+                (root / 'php-payload-cache.tar.zst').write_text('old restored archive')
+                for name, body in {
+                    'git': 'exit 0', 'composer': 'exit 0',
+                    'php': 'if [[ "$1 $2" == "bin/spp package" ]]; then exit 9; fi',
+                    'python3': f'''exec {sys.executable} - "$@" <<'PY'
+import pathlib,subprocess,sys
+args=sys.argv[1:]
+if args[0]=='-c': sys.exit(subprocess.run([sys.executable,*args]).returncode)
+if 'export' in args:
+ pathlib.Path(args[args.index('--output')+1]).write_text('fresh exported archive')
+ sys.exit({5 if failed_export else 0})
+PY''',
+                }.items():
+                    shim = root / 'shims' / name
+                    shim.write_text('#!/usr/bin/env bash\n' + body + '\n')
+                    shim.chmod(0o755)
+                environment = dict(os.environ, PATH=str(root / 'shims') + ':' + os.environ['PATH'],
+                    TYPE='apk', IN_BUILDER='true', MODE='full', LIBRARIES='', LIBRARY_ONLY='false',
+                    PHPV='8.4', PACKAGES='', ITERATION='', BUMP='false')
+                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'php'],
+                                        cwd=root, env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 5 if failed_export else 9, result.stdout + result.stderr)
+                ready = root / save['with']['path']
+                self.assertEqual(ready.exists(), not failed_export)
+                if ready.exists():
+                    self.assertEqual(ready.read_text(), 'fresh exported archive')
+                self.assertEqual((root / 'php-payload-cache.tar.zst').read_text(), 'old restored archive')
+
     def test_all_formats_restore_before_compile_and_publish_final_sdk(self):
         for filename in ['build-rpm-modular-packages.yml', 'build-apk-forgejo.yml']:
             document = yaml.safe_load((ROOT / '.github/workflows' / filename).read_text())

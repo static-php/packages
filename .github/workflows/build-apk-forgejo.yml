@@ -446,13 +446,13 @@ jobs:
             -   name: Build and test PHP packages
                 run: bash .github/actions/shared-libraries/run.sh php
             -   name: Save sealed PHP payload cache
-                if: inputs.publish == true && matrix.library-only != true && steps.payload-cache.outputs.cache-current != 'true'
+                if: ${{ !cancelled() && inputs.publish == true && matrix.library-only != true && steps.payload-cache.outputs.cache-current != 'true' && hashFiles('php-payload-cache-ready.tar.zst') != '' }}
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: save
                     key: ${{ steps.payload-cache-key.outputs.cache-key }}
                     seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
-                    path: php-payload-cache.tar.zst
+                    path: php-payload-cache-ready.tar.zst
             -   name: Freeze actual published baseline
                 run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Prepare real library revision for service validation

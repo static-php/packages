@@ -1849,9 +1849,13 @@ class CreatePackages
                     $contentItem = is_link($source)
                         ? ['src' => readlink($source), 'dst' => $dest, 'type' => 'symlink']
                         : ['src' => $source, 'dst' => $dest];
+                    if (!is_link($source) && is_dir($source)) {
+                        $contentItem['dst'] = rtrim($dest, '/');
+                        $contentItem['type'] = 'tree';
+                    }
                     // Mark config files
                     if (!is_link($source) && isset($config['config-files']) && in_array($dest, $config['config-files'])) {
-                        $contentItem['type'] = 'config';
+                        $contentItem['type'] = is_dir($source) ? 'config|tree' : 'config';
                     }
                     $contents[] = $contentItem;
                 } else {

@@ -27,7 +27,6 @@ if ($_seed && is_readable($_seed)) {
             if (str_starts_with($_installed, $_pkg_root . '/') && is_dir($_installed)) {
                 $_binary['cache_type'] = 'local';
                 $_binary['dirname'] = $_installed;
-                $_binary['hash'] = null;
                 $_merged[$_artifact]['binary'][$_platform] = $_binary;
             }
         }

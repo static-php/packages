@@ -34,6 +34,10 @@ The reason the runtime build does not recognize the preinstalled tool is **not y
 
 The downloaded job log is currently `/tmp/packages-apk-failure.log`; it is temporary evidence, not a repository dependency.
 
+### Alpine: successful PHP compilation followed by a license collision
+
+The older run's x86_64 PHP 8.4 job (`128741721952`) completed compilation, then nFPM failed because the CLI license directory mapping flattened multiple libraries' `0.txt` files onto `/usr/share/licenses/php-zts/0.txt`. Directory mappings need nFPM's tree semantics. The compiled payload was not cached because export occurred after packaging. A subsequent correction uses explicit tree mappings and exports a verified sealed payload before packaging; only a successfully completed export becomes eligible for release-cache saving, including after a packaging failure. Package tests and publication guards remain required.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
@@ -75,6 +79,8 @@ The implementation changes present at that handoff were:
 These changes are **not a completed simplification**. Review, simplify or replace them. In particular, the unchanged-library path fails fast if the published ABI baseline differs and no matching cached comparison is available; make sure its recovery behavior is usable and does not create another unexpected failure for existing caches.
 
 On resuming the active goal, the go-xcaddy detection problem was traced to shallow metadata merging and SPC requiring a downloaded binary archive before checking the installed directory. `bin/spp` now merges image binary records by platform and registers tools physically installed under the image's package root as local binaries. It preserves pinned source records. `tests/builder-tool-cache.php` passed against the real EL8 image with networking disabled, for both foreign-platform and stale-native snapshot metadata; the installed xcaddy executable also ran successfully. This fix still requires real Alpine ARM64 CI verification.
+
+Installed-tool metadata is initialized before SDK/PHP cache identities are selected, remains idempotent, and retains the image's original archive hash. This prevents the build's later tool setup from changing the inputs used to select its payload cache key.
 
 The four required workflow suites passed locally: `glibc-workflow-entrypoints.py`, `workflow-shared-libraries.py`, `glibc-pipeline.py` and `package-publication.py`. ABI, library-plan, OpenSSL-profile and publication-baseline suites, including the empty-SONAME regression, also passed with the EL8 tools in an unprivileged local container. This is supporting evidence, not proof that either CI pipeline works.
 

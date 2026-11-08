@@ -84,6 +84,7 @@ case "$command" in
     fingerprint)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress >&2
+        php bin/spp --version >/dev/null
         mkdir -p stage
         php .github/actions/shared-libraries/build-inputs.php "$PWD" "$TYPE" "$TARGET" > stage/library-build-environment.json
         toolchain=$(python3 .github/actions/shared-libraries/toolchain.py --build-environment stage/library-build-environment.json)
@@ -168,6 +169,7 @@ case "$command" in
         ;;
     payload-key)
         composer install --no-interaction --prefer-dist --no-progress >&2
+        php bin/spp --version >/dev/null
         python3 .github/actions/shared-libraries/payload-cache.py key --root . --stream "$PHPV"             --manifest buildroot/shared-libraries.json --compatibility stage/library-compatibility
         ;;
     prepare-runtime)
@@ -207,14 +209,15 @@ case "$command" in
         php tests/package-iterations.php
         python3 tests/upgrade-guards.py
         python3 .github/actions/shared-libraries/glibc.py payload
+        if [[ -f stage/payload-cache-key ]]; then
+            source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
+            python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV"                 --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)"                 --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache-export.tar.zst
+            mv php-payload-cache-export.tar.zst php-payload-cache-ready.tar.zst
+        fi
         export SPP_BASELINE_MANIFESTS
         SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline/shared-libraries.json")]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         php bin/spp package "${flags[@]}"
-        if [[ -f stage/payload-cache-key ]]; then
-            source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
-            python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV"                 --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)"                 --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache.tar.zst
-        fi
         test_flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE")
         [[ -n "$PACKAGES" ]] && test_flags+=(--packages="$PACKAGES")
         php bin/spp test "${test_flags[@]}"

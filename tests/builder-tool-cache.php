@@ -38,6 +38,13 @@ try {
             if (($merged['go-xcaddy']['binary'][$platform]['cache_type'] ?? null) !== 'local') {
                 throw new RuntimeException('Installed image tool still depends on its download archive');
             }
+            if ($merged['go-xcaddy']['binary'][$platform]['hash'] !== $entry['hash']) {
+                throw new RuntimeException('Installed tool lost its original build identity');
+            }
+        }
+        (new Process([PHP_BINARY, 'bin/spp', '--version'], $temporary))->mustRun();
+        if ($merged !== json_decode(file_get_contents($temporary . '/downloads/.cache.json'), true, flags: JSON_THROW_ON_ERROR)) {
+            throw new RuntimeException('Installed-tool setup changed inputs after cache identity selection');
         }
         $check = new Process([PHP_BINARY, 'vendor/bin/spc', 'dev:is-installed', 'go-xcaddy'], $temporary);
         $check->mustRun();
