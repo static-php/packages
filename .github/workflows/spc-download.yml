@@ -2,8 +2,7 @@ name: spc-download
 
 on:
     schedule:
-        -   cron: '0 0 * * 0,2-6'
-        -   cron: '0 0 * * 1'
+        -   cron: '0 0 * * *'
     workflow_dispatch:
         inputs:
             force_full:
@@ -178,7 +177,7 @@ jobs:
             -   name: Diff state and compute triggers
                 id: diff
                 env:
-                    FORCE_FULL: ${{ inputs.force_full || github.event.schedule == '0 0 * * 1' }}
+                    FORCE_FULL: ${{ inputs.force_full }}
                 run: |
                     set -euo pipefail
                     args=()

@@ -237,7 +237,7 @@ jobs:
                     FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
                     COMPATIBILITY: ${{ steps.fingerprint.outputs.compatibility }}
                 run: |
-                    echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+                    echo "key=buildroot-shared-$TYPE-$TARGET-$FINGERPRINT" >> "$GITHUB_OUTPUT"
                     echo "seed-key=buildroot-shared-seed-$TYPE-$TARGET-$COMPATIBILITY" >> "$GITHUB_OUTPUT"
             -   name: Restore buildroot cache
                 id: cache
@@ -433,7 +433,7 @@ jobs:
                     printf '%s\n' "$key" > stage/payload-cache-key
                     printf '%s\n' "$seed" > stage/payload-cache-seed-key
                     cat stage/payload-cache-inputs >> "$GITHUB_OUTPUT"
-                    echo "cache-key=$key-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+                    echo "cache-key=$key" >> "$GITHUB_OUTPUT"
             -   name: Restore sealed PHP payload
                 if: matrix.library-only != true
                 id: payload-cache

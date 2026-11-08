@@ -46,8 +46,8 @@ class ReleaseCacheTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="buildroot-cache-test-")
         self.root = Path(self.temporary.name)
         self.backend = MemoryBackend()
-        self.seed = "sdk-rpm-alma10-x86_64-compatible"
-        self.key = "sdk-rpm-alma10-x86_64-source-a-2026-43"
+        self.seed = "buildroot-shared-seed-glibc-alma8-x86_64-" + "c" * 32
+        self.key = "buildroot-shared-glibc-alma8-x86_64-" + "a" * 32
         self.path = self.root / "buildroot.tar.zst"
 
     def tearDown(self):
@@ -60,15 +60,73 @@ class ReleaseCacheTests(unittest.TestCase):
     def restore(self, key=None, seed=None, required=False):
         return cache.ReleaseCache(self.backend, key or self.key, self.path, self.seed if seed is None else seed).restore(required)
 
-    def test_save_uploads_content_addressed_payload_then_exact_receipt_then_seed(self):
+    def store_weekly(self, week='2026-43'):
+        value = self.store()
+        del self.backend.assets['cache', value['asset']]
+        del self.backend.assets['cache', cache.cache_names(self.key)[1]]
+        value['key'] = self.key + '-' + week
+        asset, tag = cache.split_key(value['key'])
+        legacy = asset.removesuffix('.tar.zst') + '-' + value['sha256'] + '.tar.zst'
+        value.update(schema=1, asset=legacy, tag=tag)
+        self.backend.assets.update({(tag, legacy): self.path.read_bytes(),
+                                    (tag, asset + '.json'): json.dumps(value).encode(),
+                                    (tag, self.seed + '.json'): json.dumps(value).encode()})
+        return value
+
+    def test_save_uses_one_readable_archive_and_one_receipt(self):
         value = self.store()
         events = [event for event in self.backend.events if event[0] == "upload"]
-        self.assertEqual(len(events), 3)
-        self.assertTrue(events[0][3])
-        self.assertIn(hashlib.sha256(self.path.read_bytes()).hexdigest(), events[0][2])
-        self.assertEqual(events[1][2], cache.split_key(self.key)[0] + ".json")
-        self.assertEqual(events[2][2], self.seed + ".json")
-        self.assertEqual(json.loads(self.backend.assets[value["tag"], events[2][2]]), value)
+        self.assertEqual(len(events), 2)
+        self.assertFalse(events[0][3])
+        self.assertEqual(events[0][2], 'buildroot-glibc-alma8-x86_64.tar.zst')
+        self.assertEqual(events[1][2], 'buildroot-glibc-alma8-x86_64.json')
+        self.assertEqual(json.loads(self.backend.assets[value["tag"], events[1][2]]), value)
+        self.assertEqual(value['sha256'], hashlib.sha256(self.path.read_bytes()).hexdigest())
+        self.assertEqual(value['compatibility'], self.seed)
+        self.assertEqual(value['tag'], 'cache')
+
+    def test_old_dated_input_never_creates_another_weekly_release(self):
+        value = self.store(self.key + '-2026-45')
+        self.assertEqual(value['tag'], 'cache')
+        self.assertEqual(value['key'], self.key)
+        self.assertEqual({tag for tag, _ in self.backend.assets}, {'cache'})
+
+    def test_asset_names_do_not_expose_fingerprints(self):
+        for prefix, expected in [('buildroot-shared-apk-arm64', 'buildroot-apk-arm64'),
+                                 ('buildroot-shared-glibc-alma8-arm64', 'buildroot-glibc-alma8-arm64'),
+                                 ('php-payload-musl-aarch64-84', 'php-payload-musl-aarch64-84')]:
+            key = prefix + '-' + 'a' * 32 + '-2026-45'
+            self.assertEqual(cache.cache_names(key), (expected + '.tar.zst', expected + '.json'))
+
+    def test_new_source_replaces_the_same_slot_and_remains_a_compatible_seed(self):
+        self.store()
+        newer = self.key.replace('a' * 32, 'b' * 32)
+        self.store(newer, body=b'updated library payload')
+        self.assertEqual(len(self.backend.assets), 2)
+        self.assertEqual(self.restore()['seed-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'updated library payload')
+        with self.assertRaisesRegex(cache.CacheError, 'No exact'):
+            self.restore(required=True)
+
+    def test_older_exact_cache_wins_over_newer_compatible_seed(self):
+        self.store_weekly()
+        newer = self.key.replace('a' * 32, 'b' * 32)
+        self.store(newer, body=b'newer source payload')
+        result = self.restore()
+        self.assertEqual(result['cache-hit'], 'true')
+        self.assertEqual(result['cache-current'], 'false')
+        self.assertEqual(self.path.read_bytes(), b'compiled library payload')
+
+    def test_replaced_toolchain_slot_is_a_miss_instead_of_an_invalid_exact_hit(self):
+        self.store(seed='other-toolchain')
+        result = self.restore(self.key.replace('a' * 32, 'b' * 32))
+        self.assertEqual(result['cache-hit'], 'false')
+        self.assertEqual(result['seed-hit'], 'false')
+
+    def test_existing_hashed_cache_and_seed_pointer_remain_readable(self):
+        self.store_weekly()
+        self.assertEqual(self.restore()['cache-hit'], 'true')
+        self.assertEqual(self.restore(self.key.replace('a' * 32, 'b' * 32))['seed-hit'], 'true')
 
     def test_exact_hit_is_verified_and_current(self):
         self.store()
@@ -77,22 +135,22 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(result, {"cache-hit": "true", "seed-hit": "false", "cache-current": "true", "restored-key": self.key})
         self.assertEqual(self.path.read_bytes(), b"compiled library payload")
 
-    def test_unchanged_sdk_crosses_week_without_recompilation_and_can_be_promoted(self):
-        value = self.store()
+    def test_weekly_sdk_restores_and_promotes_to_the_persistent_cache(self):
+        value = self.store_weekly()
         self.path.unlink()
-        newer = self.key.replace("2026-43", "2026-44")
-        result = self.restore(newer)
+        result = self.restore()
         self.assertEqual(result["cache-hit"], "true")
         self.assertEqual(result["cache-current"], "false")
-        self.assertEqual(result["restored-key"], self.key)
-        saved = cache.ReleaseCache(self.backend, newer, self.path, self.seed).save()
+        self.assertEqual(result["restored-key"], self.key + '-2026-43')
+        saved = cache.ReleaseCache(self.backend, self.key, self.path, self.seed).save()
         self.assertEqual(saved["sha256"], value["sha256"])
-        self.assertEqual(self.restore(newer)["cache-current"], "true")
+        self.assertEqual(saved['tag'], 'cache')
+        self.assertEqual(self.restore()["cache-current"], "true")
 
     def test_new_source_uses_previous_compatible_sdk_as_seed(self):
         self.store()
         self.path.unlink()
-        newer = self.key.replace("source-a", "source-b")
+        newer = self.key.replace("a" * 32, "b" * 32)
         result = self.restore(newer)
         self.assertEqual(result["cache-hit"], "false")
         self.assertEqual(result["seed-hit"], "true")
@@ -102,7 +160,7 @@ class ReleaseCacheTests(unittest.TestCase):
     def test_consumer_never_accepts_seed_for_different_source(self):
         self.store()
         self.backend.events.clear()
-        newer = self.key.replace("source-a", "source-b")
+        newer = self.key.replace("a" * 32, "b" * 32)
         with self.assertRaisesRegex(cache.CacheError, "No exact"):
             self.restore(newer, required=True)
         self.assertFalse(any(event[2] == self.seed + ".json" for event in self.backend.events))
@@ -110,10 +168,10 @@ class ReleaseCacheTests(unittest.TestCase):
     def test_wrong_compatibility_is_rejected_before_payload_download(self):
         value = self.store()
         value["compatibility"] = "different-toolchain"
-        self.backend.assets[value["tag"], self.seed + ".json"] = json.dumps(value).encode()
+        self.backend.assets[value["tag"], cache.cache_names(self.key)[1]] = json.dumps(value).encode()
         self.path.write_bytes(b"keep existing local data")
         with self.assertRaisesRegex(cache.CacheError, "compatibility"):
-            self.restore(self.key.replace("source-a", "source-b"))
+            self.restore()
         self.assertEqual(self.path.read_bytes(), b"keep existing local data")
 
     def test_corrupt_tarball_is_rejected_without_replacing_local_file(self):
@@ -128,9 +186,9 @@ class ReleaseCacheTests(unittest.TestCase):
     def test_pointer_cannot_redirect_to_an_unrelated_asset(self):
         value = self.store()
         value["asset"] = "other-platform.tar.zst"
-        self.backend.assets[value["tag"], self.seed + ".json"] = json.dumps(value).encode()
+        self.backend.assets[value["tag"], cache.cache_names(self.key)[1]] = json.dumps(value).encode()
         with self.assertRaisesRegex(cache.CacheError, "exact artifact"):
-            self.restore(self.key.replace("source-a", "source-b"))
+            self.restore(self.key.replace("a" * 32, "b" * 32))
 
     def test_miss_preserves_existing_path_and_returns_explicit_false_outputs(self):
         self.path.write_bytes(b"local user file")
@@ -145,11 +203,13 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), b"legacy exact SDK")
         self.assertEqual(self.restore()["cache-hit"], "false")
 
-    def test_exact_receipt_cannot_claim_a_different_source_key(self):
+    def test_legacy_exact_receipt_cannot_claim_a_different_source_key(self):
         value = self.store()
         asset, tag = cache.split_key(self.key)
-        value["key"] = self.key.replace("source-a", "source-z")
+        value["key"] = self.key.replace("a" * 32, "d" * 32)
         value["asset"] = cache.split_key(value["key"])[0]
+        value['schema'] = 1
+        del self.backend.assets[tag, cache.cache_names(self.key)[1]]
         self.backend.assets[tag, asset + ".json"] = json.dumps(value).encode()
         with self.assertRaisesRegex(cache.CacheError, "identity"):
             self.restore()

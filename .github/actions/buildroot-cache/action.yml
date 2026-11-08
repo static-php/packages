@@ -1,5 +1,5 @@
 name: Buildroot release cache
-description: Restore exact compiled SDKs or compatible seeds from weekly release assets.
+description: Restore exact compiled SDKs or compatible seeds from the persistent build cache.
 
 inputs:
     mode:
@@ -7,7 +7,7 @@ inputs:
         description: '"restore" or "save".'
     key:
         required: true
-        description: Exact source/configuration/toolchain key ending in -YYYY-WW.
+        description: Exact source/configuration/toolchain identity.
     seed-key:
         required: false
         default: ''
@@ -29,7 +29,7 @@ outputs:
         description: '"true" when a compatible previous SDK was restored.'
         value: ${{ steps.run.outputs.seed-hit }}
     cache-current:
-        description: '"true" when the exact SDK is already in this week release.'
+        description: '"true" when the exact SDK is already in the persistent cache.'
         value: ${{ steps.run.outputs.cache-current }}
     restored-key:
         description: Exact identity of the restored SDK.

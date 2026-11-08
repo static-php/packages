@@ -55,7 +55,7 @@ class SourcePlanTests(unittest.TestCase):
         self.assertEqual(result['requests']['8.4'], {'full': True, 'packages': []})
         self.assertEqual(result['requests']['8.3'], {'full': False, 'packages': ['imagick']})
 
-    def test_configuration_migration_and_weekly_retry_are_full(self):
+    def test_configuration_migration_and_explicit_full_request_are_full(self):
         for force, configuration in [(False, 'new'), (True, 'same')]:
             result = source.plan({}, {}, self.metadata, self.metadata, force=force, configuration=configuration)
             self.assertEqual(set(result['requests']), set(source.STREAMS))
@@ -717,6 +717,15 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(step['run'].count('gh workflow run'), 1)
         self.assertIn('-f mode=incremental', step['run'])
         self.assertNotIn('-f php_versions=', step['run'])
+
+    def test_daily_downloads_do_not_force_calendar_rebuilds(self):
+        data = yaml.safe_load((ROOT / '.github/workflows/spc-download.yml').read_text())
+        self.assertEqual(data[True]['schedule'], [{'cron': '0 0 * * *'}])
+        step = next(step for step in data['jobs']['download']['steps'] if step['name'] == 'Diff state and compute triggers')
+        self.assertEqual(step['env']['FORCE_FULL'], '${{ inputs.force_full }}')
+        for name in ['build-apk-forgejo.yml', 'build-rpm-modular-packages.yml']:
+            workflow = (ROOT / '.github/workflows' / name).read_text()
+            self.assertNotIn('date -u +%G-%V', workflow)
 
 
 if __name__ == '__main__':

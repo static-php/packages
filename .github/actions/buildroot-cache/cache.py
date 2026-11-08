@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore exact SDKs or compatible seeds from the weekly release cache."""
+"""Restore exact SDKs or compatible seeds from the persistent release cache."""
 
 import hashlib
 import json
@@ -29,13 +29,22 @@ class AssetRedirectHandler(urllib.request.HTTPRedirectHandler):
 def split_key(key):
     match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]{0,170})-([0-9]{4})-([0-9]{2})", key)
     if not match:
-        raise CacheError("Cache key must end in a valid ISO week: -YYYY-WW")
+        if re.fullmatch(r"(?:buildroot-|php-payload-)[A-Za-z0-9_.-]{1,160}", key):
+            return key + ".tar.zst", "cache"
+        raise CacheError("Invalid compiled cache identity")
     prefix, year, week = match.groups()
     try:
         date.fromisocalendar(int(year), int(week), 1)
     except ValueError as error:
         raise CacheError("Invalid cache ISO week") from error
     return prefix + ".tar.zst", "cache-" + year + "-" + week
+
+
+def cache_names(key):
+    asset, _ = split_key(key)
+    name = re.sub(r"-[a-f0-9]{32,64}$", "", asset.removesuffix(".tar.zst"))
+    name = re.sub(r"^buildroot-shared-", "buildroot-", name)
+    return name + ".tar.zst", name + ".json"
 
 
 def digest(path):
@@ -80,7 +89,7 @@ class GitHub:
         for page in range(1, 11):
             releases = self.api("/releases?per_page=100&page=" + str(page))
             self.release_ids.update({value["tag_name"]: value["id"] for value in releases})
-            tags.extend(value["tag_name"] for value in releases if re.fullmatch(r"cache-[0-9]{4}-[0-9]{2}", value.get("tag_name", "")) and not value.get("draft"))
+            tags.extend(value["tag_name"] for value in releases if re.fullmatch(r"cache(?:-[0-9]{4}-[0-9]{2})?", value.get("tag_name", "")) and not value.get("draft"))
             if len(releases) < 100:
                 break
         return sorted(set(tags), reverse=True)
@@ -120,7 +129,7 @@ class GitHub:
         release = self.api("/releases/tags/" + urllib.parse.quote(tag, safe=""), missing=True)
         if release is None:
             try:
-                release = self.api("/releases", method="POST", data={"tag_name": tag, "name": "[cache] " + tag, "body": "Compiled buildroot caches.", "prerelease": True})
+                release = self.api("/releases", method="POST", data={"tag_name": tag, "name": "Build cache", "body": "Compiled SDK and PHP payload caches.", "prerelease": True})
             except CacheError:
                 release = self.api("/releases/tags/" + urllib.parse.quote(tag, safe=""), missing=True)
                 if release is None:
@@ -159,10 +168,12 @@ class GitHub:
 
 class ReleaseCache:
     def __init__(self, backend, key, path, seed_key=""):
-        self.asset, self.tag = split_key(key)
+        self.legacy_asset, _ = split_key(key)
+        self.tag = "cache"
+        self.asset, self.receipt = cache_names(key)
         if seed_key and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,220}", seed_key):
             raise CacheError("Invalid compatibility cache key")
-        self.backend, self.key, self.path, self.seed_key = backend, key, Path(path), seed_key
+        self.backend, self.key, self.path, self.seed_key = backend, self.legacy_asset.removesuffix(".tar.zst"), Path(path), seed_key
 
     def metadata(self, tag, name, temporary):
         destination = temporary / "metadata.json"
@@ -176,16 +187,18 @@ class ReleaseCache:
             raise CacheError("Invalid cache metadata")
         return value
 
-    def validate(self, value, expected_key=None):
-        if value.get("schema") != 1 or not isinstance(value.get("key"), str):
+    def validate(self, value, expected_key=None, compatibility=True):
+        if value.get("schema") not in (1, 2) or not isinstance(value.get("key"), str):
             raise CacheError("Unsupported cache metadata")
         asset, tag = split_key(value["key"])
         hashed_asset = asset.removesuffix(".tar.zst") + "-" + str(value.get("sha256")) + ".tar.zst"
-        if value.get("asset") not in [asset, hashed_asset] or value.get("tag") != tag:
+        simple_asset, _ = cache_names(value["key"])
+        allowed = [asset, hashed_asset] if value["schema"] == 1 else [simple_asset]
+        if simple_asset != self.asset or value.get("asset") not in allowed or value.get("tag") != tag:
             raise CacheError("Cache metadata does not identify its exact artifact")
         if expected_key is not None and value["key"] != expected_key:
             raise CacheError("Exact cache identity mismatch")
-        if self.seed_key and value.get("compatibility") != self.seed_key:
+        if compatibility and self.seed_key and value.get("compatibility") != self.seed_key:
             raise CacheError("Cache compatibility identity mismatch")
         if not re.fullmatch(r"[a-f0-9]{64}", value.get("sha256", "")) or not isinstance(value.get("size"), int) or value["size"] < 1:
             raise CacheError("Cache metadata has no valid digest/size")
@@ -222,20 +235,34 @@ class ReleaseCache:
 
     def _restore(self, required=False):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tags = [self.tag] + [tag for tag in self.backend.tags() if tag < self.tag]
+        tags = [self.tag] + [tag for tag in self.backend.tags() if tag != self.tag]
         with tempfile.TemporaryDirectory(prefix="buildroot-cache-", dir=self.path.parent) as directory:
             temporary = Path(directory)
+            candidates = {}
             for tag in tags:
-                exact_key = self.key.rsplit("-", 2)[0] + "-" + tag.removeprefix("cache-")
-                value = self.metadata(tag, self.asset + ".json", temporary)
+                exact_key = self.key if tag == self.tag else self.key + "-" + tag.removeprefix("cache-")
+                value = self.metadata(tag, self.receipt, temporary)
+                if value is not None:
+                    self.validate(value, compatibility=False)
+                    candidates[tag] = value
+                    if value["key"] == exact_key:
+                        self.validate(value, exact_key)
+                        if self.install(tag, value["asset"], value, temporary):
+                            return {"cache-hit": "true", "seed-hit": "false", "cache-current": str(tag == self.tag).lower(), "restored-key": exact_key}
+                value = self.metadata(tag, self.legacy_asset + ".json", temporary)
                 if value is not None:
                     self.validate(value, exact_key)
                 elif self.seed_key:
                     continue
-                if self.install(tag, value["asset"] if value is not None else self.asset, value, temporary):
+                if self.install(tag, value["asset"] if value is not None else self.legacy_asset, value, temporary):
                     return {"cache-hit": "true", "seed-hit": "false", "cache-current": str(tag == self.tag).lower(), "restored-key": exact_key}
             if not required and self.seed_key:
                 for tag in tags:
+                    value = candidates.get(tag)
+                    if value is not None and value.get("compatibility") == self.seed_key:
+                        self.validate(value)
+                        if self.install(tag, value["asset"], value, temporary):
+                            return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
                     value = self.metadata(tag, self.seed_key + ".json", temporary)
                     if value is None:
                         continue
@@ -250,16 +277,13 @@ class ReleaseCache:
         if not self.path.is_file() or self.path.stat().st_size < 1:
             raise CacheError("No compiled buildroot to save")
         checksum = digest(self.path)
-        asset = self.asset.removesuffix(".tar.zst") + "-" + checksum + ".tar.zst"
-        value = {"schema": 1, "key": self.key, "tag": self.tag, "asset": asset, "compatibility": self.seed_key or None, "sha256": checksum, "size": self.path.stat().st_size, "created_at": datetime.now(timezone.utc).isoformat()}
+        value = {"schema": 2, "key": self.key, "tag": self.tag, "asset": self.asset, "compatibility": self.seed_key or None, "sha256": checksum, "size": self.path.stat().st_size, "created_at": datetime.now(timezone.utc).isoformat()}
         release = self.backend.release(self.tag)
         with tempfile.TemporaryDirectory(prefix="buildroot-cache-", dir=self.path.parent) as directory:
             metadata = Path(directory) / "metadata.json"
             metadata.write_text(json.dumps(value, sort_keys=True) + "\n")
-            self.backend.upload(release, asset, self.path, immutable=True)
-            self.backend.upload(release, self.asset + ".json", metadata)
-            if self.seed_key:
-                self.backend.upload(release, self.seed_key + ".json", metadata)
+            self.backend.upload(release, self.asset, self.path)
+            self.backend.upload(release, self.receipt, metadata)
         return value
 
 
