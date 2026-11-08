@@ -30,6 +30,36 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_host_extraction_preserves_recorded_payload_asset_modes(self):
+        import yaml
+        data = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
+        step = next(step for job in data['jobs'].values() for step in job.get('steps', [])
+                    if step.get('name') == 'Extract sealed common payload')
+        with tempfile.TemporaryDirectory(prefix='spp-sealed-extraction-') as temporary:
+            root = Path(temporary)
+            payload = root / 'source/build/8.5'
+            for relative, mode in [('include/fixture.h', 0o664), ('packaging/frankenphp/postinstall.sh', 0o775)]:
+                path = payload / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('Frozen package asset\n')
+                path.chmod(mode)
+            script = '''require $argv[1] . '/vendor/autoload.php';
+                staticphp\\util\\BuildPayload::record($argv[2], [], '8.5.0', 'x86_64');
+                staticphp\\util\\BuildPayload::seal($argv[2]);'''
+            subprocess.run(['php', '-r', script, str(ROOT), str(payload)], check=True, capture_output=True)
+            subprocess.run(['tar', '-cf', str(root / 'payload.tar'), '-C', str(root / 'source'), 'build'], check=True)
+            subprocess.run(['zstd', '-q', str(root / 'payload.tar'), '-o', str(root / 'php-payload.tar.zst')], check=True)
+            subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', 'umask 022\n' + step['run']], cwd=root, check=True)
+            restored = root / 'build/8.5'
+            verify = ['php', str(ROOT / 'bin/build-payload'), 'verify', '--root', str(restored)]
+            subprocess.run(verify, check=True, capture_output=True)
+            self.assertEqual((restored / 'include/fixture.h').stat().st_mode & 0o777, 0o664)
+            self.assertEqual((restored / 'packaging/frankenphp/postinstall.sh').stat().st_mode & 0o777, 0o775)
+            (restored / 'include/fixture.h').chmod(0o644)
+            rejected = subprocess.run(verify, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('Recorded package assets changed', rejected.stdout + rejected.stderr)
+
     def test_real_alpine_target_record_selects_services_and_tls_once_per_architecture(self):
         with tempfile.TemporaryDirectory(prefix='spp-apk-target-record-') as temporary:
             root = Path(temporary)

@@ -103,6 +103,10 @@ Run `42505024995` then passed x86_64 PHP 8.2's 84 native upgrade profiles and PH
 
 The corrected run `42506881502` executed service preparation on both PHP 8.6 targets. Its x86_64 TLS report passed, but the service report found another plain `apk update` in its separate upgrade helper and retained the installed CLI. That helper now explicitly refreshes the index too. Its exact upgrade method passed the signed r0-to-r1 native reproduction with the world file unchanged; no init system was needed for that focused check. The full service lifecycle test still needs to pass in CI. This duplicated refresh behavior is another responsibility to consolidate during simplification.
 
+### Host tar extraction changed sealed asset permissions
+
+Run `42504576160` successfully restored both SDKs with zero library rebuilds, zero ABI analyses for RPM/DEB and no consumer reads. All ten PHP payload jobs then passed using exact caches with `consumer_cache_reused: true`, `changed_components: []` and no compiler output. Format packaging failed immediately at `Recorded package assets changed`: the non-root host extracted the common tarball with its default umask. The real PHP 8.5 cache contains 15 FrankenPHP assets recorded with modes 0664 or 0775, which ordinary extraction masks to 0644 or 0755. The common-payload extraction now uses `tar -xpf -`. A regression executes the workflow's actual extraction body against a sealed asset fixture and verifies both preserved modes and rejection of later mode tampering. Keep the original integrity checks and compiled caches; do not re-record extracted changes or rebuild PHP to repair this transport error.
+
 ## What must remain
 
 These are behavior requirements. Their present implementations are replaceable.
