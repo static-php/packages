@@ -19,6 +19,15 @@ with tempfile.TemporaryDirectory(prefix="createrepo-versions-") as temporary:
 
 
 class PackageVersions(unittest.TestCase):
+    def test_extension_upstream_versions_need_not_have_three_components(self):
+        for name in ('php-zts-memcache', 'php-zts-memcache-debuginfo'):
+            for version in ('8.2_82', '8.2_82.35', '8.2_82.35+ext', '8.2~rc1_82', '1_82'):
+                with self.subTest(name=name, version=version):
+                    filename = f'{name}-{version}-1.el8.x86_64.rpm'
+                    self.assertEqual(repo['parse_rpm_info'](filename), (name, version, '1.el8', 'x86_64', '8.2'))
+                    module = repo['build_module_structure']({'8.2': [filename]}, 'el8', 'x86_64')[0]
+                    self.assertEqual(module['data']['artifacts']['rpms'], [f'{name}-0:{version}-1.el8.x86_64'])
+
     def test_libraries_are_non_modular(self):
         for name, version in [('php-zts-lib-openssl', '3.5.1'), ('php-zts-lib-gcc-runtime', '16.1.0'), ('php-zts-lib-libxml2-debuginfo', '2.14.0~rc1')]:
             filename = f'{name}-{version}-1.el10.x86_64.rpm'

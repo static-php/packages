@@ -187,6 +187,8 @@ class BaselineCapture(unittest.TestCase):
         parse = helper['rpm_parser']()
         self.assertEqual(parse('php-zts-cli-8.6.0~rc4-42.x86_64.rpm'),
                          ('php-zts-cli', '8.6.0~rc4', '42', 'x86_64', '8.6'))
+        self.assertEqual(parse('php-zts-memcache-8.2_82.35+ext-1.el8.x86_64.rpm'),
+                         ('php-zts-memcache', '8.2_82.35+ext', '1.el8', 'x86_64', '8.2'))
 
 
 if __name__ == '__main__':

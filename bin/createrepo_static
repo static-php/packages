@@ -64,7 +64,7 @@ def parse_rpm_info(filename):
     # Match extension packages (including debuginfo)
     # Format: php-zts-apcu-5.1.28_85-1.el10.x86_64.rpm or php-zts-apcu-debuginfo-5.1.28_85-1.el10.x86_64.rpm
     # Built against a pre-release PHP the tag carries its marker: php-zts-apcu-5.1.28_86~beta1-1.el10.x86_64.rpm
-    match_ext = re.match(r'(?P<name>php-zts-[^-]+(?:-debuginfo)?)-(?P<version>\d+\.\d+\.\d+(?:~{1,2}[a-z0-9]+)*_\d+(?:\.\d+)?(?:~{1,2}[a-z0-9]+)*(?:\+ext(?:~{1,2}[a-z0-9]+)*)?)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
+    match_ext = re.match(r'(?P<name>php-zts-[^-]+(?:-debuginfo)?)-(?P<version>\d+(?:\.\d+)*(?:~{1,2}[a-z0-9]+)*_\d+(?:\.\d+)?(?:~{1,2}[a-z0-9]+)*(?:\+ext(?:~{1,2}[a-z0-9]+)*)?)-(?P<release>[^.]+(?:\.[^.]+)?)\.(?P<arch>x86_64|aarch64|noarch)\.rpm', basename)
     if match_ext:
         name = match_ext.group("name")
         version = match_ext.group("version")
