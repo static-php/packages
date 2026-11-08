@@ -12,16 +12,19 @@ Success means working Alpine and EL8 builds, reusable caches, reliable publicati
 
 ## Current handoff status
 
-Verified on 2026-11-08 at commit `d32002f`:
+Checked against GitHub Actions at repository HEAD `1b005d2` on 2026-11-09 (local time). These are observations, not a completed simplification:
 
-- [EL8 run `42499442120`](https://github.com/static-php/packages/actions/runs/42499442120): both shared SDK jobs succeeded and saved their caches. PHP payload jobs for 8.2–8.6 on both architectures are still running.
-- [Alpine run `42500878781`](https://github.com/static-php/packages/actions/runs/42500878781): both shared SDK jobs succeeded and saved their caches. PHP jobs for 8.2–8.6 on both architectures are still running.
-- The targeted ngtcp2 repair rebuilt only ngtcp2. Both architectures of both producers confirm 67 cached ABI classifications reused and one library analyzed. The four canonical SDK archives and JSON receipts are present on the `cache` release. This verifies the narrow repair, not the overall design or successful publication.
-- Full package installation, load, upgrade and publication results remain unverified for these runs. Preserve their in-flight work and saved caches; inspect their eventual results before launching replacements.
+- [EL8 run `42510703820`](https://github.com/static-php/packages/actions/runs/42510703820), built from `b7c31ee`: both shared SDK jobs and all ten PHP payload jobs succeeded. Format packaging/native upgrade jobs are still running or queued. The previous run demonstrated exact cache reuse for all ten PHP payloads with no compilation; this retry changes host extraction to preserve sealed asset permissions. Full RPM/DEB validation and publication remain unverified.
+- [Alpine run `42509033185`](https://github.com/static-php/packages/actions/runs/42509033185), built from `a551781`: all ten build/test targets passed using cached PHP payloads without compilation. Both PHP 8.6 targets passed TLS and running/stopped service validation. The x86_64 publisher failed at an optional Forgejo Git-repository association; ARM64 publication is still running. Do not call the run successful or restart compilation to repair publication.
+- HEAD `1b005d2` removes that optional association from uploads. Once the Alpine source run completes, the existing `publish-packages.yml` can retry its retained validated cohort with `format=apk` and `build_run_id=42509033185`, without compilation or repackaging. Check the live result before doing so; these jobs may finish after this handoff.
+- All four canonical SDK archives and their JSON metadata are present on the persistent `cache` release. The targeted ngtcp2 repair previously rebuilt only ngtcp2 on both architectures of both producers: 67 cached ABI classifications reused and one library analyzed. Subsequent unchanged SDK runs reused all 68 classifications, analyzed zero libraries and read no consumer archives. Keep those proven properties while simplifying their implementation.
+- Preserve in-flight work, retained validated artifacts and saved compilation. The next agent must inspect actual current results before dispatching replacements. Green local tests or a green upload step with `continue-on-error` do not establish successful publication.
 
 The immediate assignment is to simplify the design, not accumulate another sequence of symptom fixes. The detailed failure history below explains why the current contracts are fragile; it is evidence for deleting duplication, not a specification to retain every workaround. Prioritize the unchanged update path and the one-library update path. Both must be understandable without tracing repeated planning, grafting, classification and metadata rewrites across numerous helpers.
 
 ## Confirmed failures
+
+The original reports below explain the failure modes. Several have targeted fixes now; they are not all still failing. The accumulated repairs have not fulfilled the simplification request. Treat this history as evidence of excessive coupling between compilation, workspace state, cache metadata, packaging and publication, rather than a mandate to retain every helper or workaround.
 
 ### EL8: an unchanged SDK fails after restoring successfully
 
@@ -139,6 +142,8 @@ These are behavior requirements. Their present implementations are replaceable.
 9. **Avoid unnecessary SDK transfers.** If an unchanged request needs neither library compilation nor SDK contents, use its metadata and existing published outputs. Extract the SDK when a PHP build or actual library update needs it. A cache hit is not itself a reason to download, unpack, reclassify, repack and upload the same multi-gigabyte tree.
 
 ## How to approach the replacement
+
+- Start by proposing the smallest concrete replacement flow and identifying which existing files, steps and contracts it deletes. The delivery must reduce total control flow and independently maintained state, rather than rename or relocate the same framework. Keep the handoff focused on this assignment; another round of isolated symptom fixes is not completion.
 
 - Trace one unchanged update and one changed-library update from source selection through publication. List each expensive operation and the concrete requirement it serves. Delete operations without one; consolidate repeated operations that serve the same requirement.
 - Define the decision once: no change, changed PHP/extensions, changed libraries with compatible ABI, or changed libraries requiring dependent rebuilds. Downstream stages should consume that decision rather than rediscover it through another plan, baseline fetch or metadata rewrite.
