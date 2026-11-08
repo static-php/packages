@@ -21,6 +21,14 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
 
+if [[ "$TYPE" == apk ]]; then
+    # The host extracts source repositories before the root-run Alpine builder mounts them.
+    for repository in "$PWD"/downloads/*/.git; do
+        [[ -e "$repository" ]] || continue
+        git config --global --add safe.directory "${repository%/.git}"
+    done
+fi
+
 if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
     python=$(command -v python3.9)
     python_tools=$(mktemp -d "${TMPDIR:-/tmp}/spp-python-XXXXXXXX")

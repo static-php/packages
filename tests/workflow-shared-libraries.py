@@ -304,6 +304,23 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CacheAndCohortTests(unittest.TestCase):
+    def test_alpine_builder_trusts_only_downloaded_source_repositories(self):
+        with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
+            root = Path(temporary)
+            for name in ['libargon2', 'source with spaces']:
+                subprocess.run(['git', 'init', '-q', str(root / 'downloads' / name)], check=True)
+            (root / 'downloads/archive').mkdir()
+            home = root / 'home'
+            home.mkdir()
+            env = dict(os.environ, HOME=str(home), GIT_CONFIG_NOSYSTEM='1',
+                       GIT_CONFIG_GLOBAL=str(home / '.gitconfig'), TYPE='apk', IN_BUILDER='true', MODE='full')
+            result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'unknown'],
+                                    cwd=root, env=env, capture_output=True, text=True)
+            self.assertIn('Unknown shared-library workflow command', result.stderr)
+            trusted = subprocess.check_output(['git', 'config', '--global', '--get-all', 'safe.directory'],
+                                              env=env, text=True).splitlines()
+            self.assertEqual(trusted, [str(root / 'downloads/libargon2'), str(root / 'downloads/source with spaces')])
+
     def test_classification_hands_off_resolved_library_package_revisions(self):
         for selected in ['zlib', '']:
             with self.subTest(selected=selected), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
