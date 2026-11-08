@@ -2,15 +2,50 @@
 
 import sys
 import gzip
+import hashlib
+import json
 import requests
 import re
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 from fnmatch import fnmatch
+from urllib.parse import quote
+
+MIGRATION_CUTOFF_PATH = 'usr/share/php-zts/migration/cutoffs.json'
+MAX_MIGRATION_CUTOFF_BYTES = 256 * 1024
+CONSUMER_METADATA_DIRECTORY = 'usr/share/php-zts/consumers'
+MAX_CONSUMER_METADATA_BYTES = 256 * 1024
+CONSUMER_SIDECAR_PACKAGE = 'php-zts-consumer-metadata'
 
 host1 = "https://git.henderkes.com"
 host2 = "https://git.static-php.dev"
+
+STREAM_OWNERS = ('82', '83', '84', '85', '86')
+
+def registry_auth(owner, password):
+    return (owner, password) if password else None
+
+
+def apk_native_metadata(path):
+    with gzip.GzipFile(filename=str(path)) as stream, tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
+        for member in archive:
+            if member.name.removeprefix('./').lstrip('/') != '.PKGINFO':
+                continue
+            if not member.isfile() or member.size > 1024 * 1024:
+                raise RuntimeError('Invalid APK control metadata')
+            fields = {}
+            for line in archive.extractfile(member).read().decode().splitlines():
+                if ' = ' in line:
+                    key, value = line.split(' = ', 1)
+                    fields.setdefault(key, []).append(value)
+            return {'name': fields.get('pkgname', [None])[0], 'version': fields.get('pkgver', [None])[0],
+                    'arch': fields.get('arch', [None])[0], 'depends': fields.get('depend', []),
+                    'provides': fields.get('provides', []), 'replaces': fields.get('replaces', []),
+                    'provider_priority': fields.get('provider_priority', [])}
+    raise RuntimeError('APK archive has no control metadata')
+
 
 def get_remote_packages(host, owner, password, pkg_type):
     url = f"{host}/api/v1/packages/{owner}"
@@ -19,7 +54,7 @@ def get_remote_packages(host, owner, password, pkg_type):
     previous = None
     while True:
         params = {"type": pkg_type, "limit": 1000, "page": page}
-        response = requests.get(url, params=params, auth=(owner, password), timeout=30)
+        response = requests.get(url, params=params, auth=registry_auth(owner, password), timeout=30)
         response.raise_for_status()
         batch = response.json()
         if not isinstance(batch, list):
@@ -32,33 +67,248 @@ def get_remote_packages(host, owner, password, pkg_type):
         previous = batch
         page += 1
 
+def get_remote_packages_for_owners(host, owners, password, pkg_type):
+    return [dict(package, owner=owner) for owner in owners
+            for package in get_remote_packages(host, owner, password, pkg_type)]
+
+def get_remote_package_files(host, owner, password, pkg_type, name, version):
+    url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
+    response = requests.get(url, auth=registry_auth(owner, password), timeout=30)
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    files = response.json()
+    if not isinstance(files, list) or any(not isinstance(file, dict) or not isinstance(file.get('id'), int) or file['id'] <= 0 for file in files):
+        raise RuntimeError(f"Invalid package file list for {owner}/{name}/{version}")
+    return files
+
+def archive_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as archive:
+        for block in iter(lambda: archive.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+def metadata_from_tar(stream, pkg_type, name=None):
+    result = {'migration_cutoffs': None, 'consumer_metadata': None}
+    members = {MIGRATION_CUTOFF_PATH: ('migration_cutoffs', MAX_MIGRATION_CUTOFF_BYTES, 'migration cutoff')}
+    if name is not None:
+        if not re.fullmatch(r'[a-z0-9][a-z0-9+_.-]*', name):
+            raise RuntimeError('Invalid consumer package name')
+        members[f'{CONSUMER_METADATA_DIRECTORY}/{name}.json'] = ('consumer_metadata', MAX_CONSUMER_METADATA_BYTES, 'consumer metadata')
+    with tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
+        for member in archive:
+            selected = members.get(member.name.removeprefix('./').lstrip('/'))
+            if selected is None:
+                continue
+            key, limit, label = selected
+            if result[key] is not None or not member.isfile() or not 0 < member.size <= limit:
+                raise RuntimeError('Invalid ' + label + ' archive member')
+            content = archive.extractfile(member).read(limit + 1)
+            try:
+                value = json.loads(content)
+            except (UnicodeDecodeError, ValueError) as error:
+                raise RuntimeError('Invalid ' + label + ' JSON') from error
+            if key == 'migration_cutoffs':
+                kind = {'debian': 'deb', 'alpine': 'apk'}[pkg_type]
+                formats = value.get('formats') if isinstance(value, dict) else None
+                versions = formats.get(kind) if isinstance(formats, dict) else None
+                if (not isinstance(value, dict) or value.get('schema') != 1 or not isinstance(versions, dict)
+                        or any(not isinstance(package, str) or not isinstance(version, str) or not package or not version for package, version in versions.items())
+                        or any(value.get(field) is not None and not isinstance(value[field], str) for field in ('architecture', 'php_stream'))):
+                    raise RuntimeError('Invalid migration cutoff manifest')
+            elif not isinstance(value, dict):
+                raise RuntimeError('Invalid consumer metadata manifest')
+            result[key] = value
+    return result
+
+def migration_cutoffs_from_tar(stream, pkg_type):
+    return metadata_from_tar(stream, pkg_type)['migration_cutoffs']
+
+def archive_embedded_metadata(path, pkg_type, name=None):
+    if pkg_type == 'alpine':
+        with gzip.GzipFile(filename=str(path)) as stream:
+            return metadata_from_tar(stream, pkg_type, name)
+    if pkg_type != 'debian':
+        raise RuntimeError('Embedded package metadata is supported for DEB and APK')
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(['dpkg-deb', '--fsys-tarfile', str(path)], stdout=subprocess.PIPE, stderr=errors)
+        try:
+            result = metadata_from_tar(process.stdout, pkg_type, name)
+            for _ in iter(lambda: process.stdout.read(1024 * 1024), b''):
+                pass
+            if process.wait(timeout=60) != 0:
+                errors.seek(0)
+                raise RuntimeError('Cannot read Debian package metadata archive: ' + errors.read(4096).decode(errors='replace'))
+            return result
+        finally:
+            process.stdout.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+def archive_migration_cutoffs(path, pkg_type):
+    return archive_embedded_metadata(path, pkg_type)['migration_cutoffs']
+
+def consumer_metadata_identity(value, name, architecture, owner):
+    if value is None:
+        return None
+    normalize_arch = lambda arch: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(arch, arch) if isinstance(arch, str) else None
+    libraries = value.get('libraries')
+    stream = owner[0] + '.' + owner[1:] if owner in STREAM_OWNERS else None
+    if (type(value.get('schema')) is not int or value['schema'] != 1 or value.get('name') != name
+            or stream is None or value.get('php_stream') != stream
+            or normalize_arch(value.get('architecture')) not in ('x86_64', 'aarch64')
+            or normalize_arch(value.get('architecture')) != normalize_arch(architecture)
+            or not isinstance(libraries, list)
+            or any(not isinstance(library, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', library) for library in libraries)
+            or len(libraries) != len(set(libraries))):
+        raise RuntimeError(f'Consumer metadata identity differs from archive header or stream owner: {owner}/{name}')
+    if value.get('logical_name', name) != name:
+        raise RuntimeError('Consumer package renames are not supported')
+    return dict(value, architecture=normalize_arch(value['architecture']))
+
+def consumer_sidecar_url(host, owner, digest):
+    return f"{host.rstrip('/')}/api/packages/{quote(owner, safe='')}/generic/{CONSUMER_SIDECAR_PACKAGE}/{digest}/metadata.json"
+
+def validate_consumer_sidecar(value, owner, pkg_type, name, version, digest):
+    if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('package_type') != pkg_type
+            or value.get('name') != name or value.get('version') != version or value.get('sha256') != digest
+            or value.get('arch') not in ('amd64', 'arm64', 'x86_64', 'aarch64', 'all', 'noarch')):
+        raise RuntimeError('Consumer sidecar differs from its archive digest or identity')
+    consumer = consumer_metadata_identity(value.get('consumer_metadata'), name, value['arch'], owner)
+    cutoffs = value.get('migration_cutoffs')
+    if cutoffs is not None:
+        normalize = lambda arch: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(arch, arch)
+        stream = re.match(r'(?:\d+:)?(\d+\.\d+)', version)
+        if (not isinstance(cutoffs, dict) or cutoffs.get('schema') != 1 or not isinstance(cutoffs.get('formats'), dict)
+                or not name.endswith('-cli') or stream is None or cutoffs.get('php_stream') != stream.group(1)
+                or cutoffs.get('architecture') is not None and normalize(cutoffs['architecture']) != normalize(value['arch'])):
+            raise RuntimeError('Consumer sidecar has invalid migration cutoff identity')
+    if consumer is None and cutoffs is None:
+        raise RuntimeError('Consumer sidecar contains no dependency metadata')
+    native = value.get('native_metadata')
+    if native is not None and any(native.get(field) != value.get(field) for field in ('name', 'version', 'arch')):
+        raise RuntimeError('Consumer sidecar native headers differ from its archive identity')
+    return dict(value, consumer_metadata=consumer)
+
+def read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest):
+    if not isinstance(digest, str) or not re.fullmatch(r'[a-fA-F0-9]{64}', digest):
+        return None
+    digest = digest.lower()
+    with requests.get(consumer_sidecar_url(host, owner, digest), auth=registry_auth(owner, password), timeout=30, stream=True) as response:
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        content = bytearray()
+        for block in response.iter_content(65536):
+            content.extend(block)
+            if len(content) > MAX_CONSUMER_METADATA_BYTES + MAX_MIGRATION_CUTOFF_BYTES:
+                raise RuntimeError('Oversized consumer sidecar')
+    try:
+        value = json.loads(content)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise RuntimeError('Invalid consumer sidecar JSON') from error
+    return validate_consumer_sidecar(value, owner, pkg_type, name, version, digest)
+
+def publish_consumer_sidecar(host, owner, password, pkg_type, path):
+    name, version, arch = package_metadata(path, pkg_type)
+    embedded = archive_embedded_metadata(path, pkg_type, name)
+    if embedded['consumer_metadata'] is None and embedded['migration_cutoffs'] is None:
+        return
+    digest = archive_sha256(path)
+    native = apk_native_metadata(path) if pkg_type == 'alpine' else None
+    value = validate_consumer_sidecar(dict(schema=1, package_type=pkg_type, name=name, version=version,
+                                          arch=arch, sha256=digest, native_metadata=native, **embedded), owner, pkg_type, name, version, digest)
+    existing = read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest)
+    if existing is not None:
+        if existing != value:
+            raise RuntimeError('Conflicting immutable consumer sidecar')
+        return
+    content = (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()
+    response = requests.put(consumer_sidecar_url(host, owner, digest), data=content,
+                            headers={'Content-Type': 'application/json'}, auth=(owner, password), timeout=30)
+    if response.status_code not in (201, 409):
+        raise RuntimeError('Consumer metadata upload failed: HTTP ' + str(response.status_code))
+    if read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest) != value:
+        raise RuntimeError('Served consumer sidecar differs after upload')
+
+def remote_package_archives(host, owner, password, pkg_type, name, version):
+    if pkg_type not in ('debian', 'alpine'):
+        raise RuntimeError('Archive identity is supported for DEB and APK')
+    records = []
+    extension = '.deb' if pkg_type == 'debian' else '.apk'
+    with tempfile.TemporaryDirectory(prefix='forgejo-archive-') as temporary:
+        for file in get_remote_package_files(host, owner, password, pkg_type, name, version):
+            if not file.get('name', '').endswith(extension):
+                continue
+            url = f"{host}/{quote(owner, safe='')}/-/packages/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files/{file['id']}"
+            sidecar = read_consumer_sidecar(host, owner, password, pkg_type, name, version, file.get('sha256'))
+            if sidecar is not None and not (pkg_type == 'alpine' and name.endswith('-cli') and not sidecar.get('native_metadata')):
+                records.append({key: sidecar.get(key) for key in ('name', 'version', 'arch', 'sha256', 'migration_cutoffs', 'consumer_metadata', 'native_metadata')} |
+                               {'file_id': file['id'], 'filename': file['name'], 'owner': owner, 'url': url})
+                continue
+            path = Path(temporary) / ('archive' + extension)
+            digest = hashlib.sha256()
+            with requests.get(url, auth=registry_auth(owner, password), timeout=60, stream=True) as response:
+                response.raise_for_status()
+                with path.open('wb') as archive:
+                    for block in response.iter_content(1024 * 1024):
+                        if block:
+                            digest.update(block)
+                            archive.write(block)
+            actual_name, actual_version, arch = package_metadata(path, pkg_type)
+            if isinstance(file.get('sha256'), str) and re.fullmatch(r'[a-fA-F0-9]{64}', file['sha256']) and digest.hexdigest() != file['sha256'].lower():
+                raise RuntimeError('Served package differs from registry file digest')
+            if (actual_name, actual_version) != (name, version):
+                raise RuntimeError(f"Published archive header differs from its registry entry: {owner}/{name}/{version}")
+            embedded = archive_embedded_metadata(path, pkg_type, name)
+            cutoffs = embedded['migration_cutoffs'] if name.endswith('-cli') else None
+            consumer = consumer_metadata_identity(embedded['consumer_metadata'], name, arch, owner)
+            native = apk_native_metadata(path) if pkg_type == 'alpine' else None
+            if cutoffs is not None:
+                normalize_arch = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
+                stream = re.match(r'(?:\d+:)?(\d+\.\d+)', version)
+                if (cutoffs.get('architecture') is not None and normalize_arch(cutoffs['architecture']) != normalize_arch(arch)
+                        or cutoffs.get('php_stream') is not None and (stream is None or cutoffs['php_stream'] != stream.group(1))):
+                    raise RuntimeError(f'Migration cutoff identity differs from CLI header: {owner}/{name}/{version}')
+            records.append({'name': name, 'version': version, 'arch': arch, 'sha256': digest.hexdigest(),
+                            'file_id': file['id'], 'filename': file['name'], 'owner': owner, 'url': url,
+                            'migration_cutoffs': cutoffs, 'consumer_metadata': consumer, 'native_metadata': native})
+    identities = {}
+    for record in records:
+        previous = identities.setdefault(record['arch'], record['sha256'])
+        if previous != record['sha256']:
+            raise RuntimeError(f"Conflicting published archives for {owner}/{name}/{version}/{record['arch']}")
+    return records
+
 def get_remote_package_archs(host, owner, password, pkg_type, name, version, strict=False):
+    if pkg_type in ('debian', 'alpine'):
+        return {record['arch'] for record in remote_package_archives(host, owner, password, pkg_type, name, version)}
     url = f"{host}/api/v1/packages/{owner}/{pkg_type}/{name}/{version}/files"
-    resp = requests.get(url, auth=(owner, password), timeout=30)
+    resp = requests.get(url, auth=registry_auth(owner, password), timeout=30)
     if strict:
         resp.raise_for_status()
     archs = set()
     if resp.status_code == 200:
         for f in resp.json():
-            if pkg_type == 'alpine':
-                # Forgejo stores APK filenames without their architecture suffix.
-                file_url = f"{host}/{owner}/-/packages/{pkg_type}/{name}/{version}/files/{f['id']}"
-                with requests.get(file_url, auth=(owner, password), timeout=30, stream=True) as download:
-                    download.raise_for_status()
-                    download.raw.decode_content = True
-                    _, _, arch = apk_metadata(download.raw)
-                    archs.add(arch)
-                continue
             fname = f.get('name', '')
             for arch in ['x86_64', 'aarch64', 'amd64', 'arm64']:
                 if arch in fname:
                     archs.add(arch)
+            common = re.search(r'(?:_|\.)(all|noarch)\.(?:deb|rpm)$', fname)
+            if common:
+                archs.add(common.group(1))
     return archs
 
 def apk_metadata(fileobj):
     with gzip.GzipFile(fileobj=fileobj) as uncompressed, tarfile.open(fileobj=uncompressed, mode='r|', ignore_zeros=True) as archive:
         for member in archive:
-            if member.name == '.PKGINFO':
+            if member.name in ('.PKGINFO', './.PKGINFO'):
                 metadata = archive.extractfile(member).read().decode()
                 fields = dict(re.findall(r'^(pkgname|pkgver|arch)\s*=\s*(\S+)', metadata, re.M))
                 return fields['pkgname'], fields['pkgver'], fields['arch']
@@ -104,6 +354,13 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
                 continue
             try:
                 if not version_is_newer(pkg_type, published['version'], version):
+                    if not version_is_newer(pkg_type, version, published['version']):
+                        archives = remote_package_archives(host, owner, password, pkg_type, name, published['version'])
+                        if not archives:
+                            raise RuntimeError(f"Cannot verify published archive headers for {name} {published['version']}")
+                        for archive in archives:
+                            if archive['arch'] == arch and archive['sha256'] != archive_sha256(pkg_file):
+                                raise RuntimeError(f"Equal version has different archive bytes: {name} {version} for {arch}")
                     continue
                 archs = get_remote_package_archs(host, owner, password, pkg_type, name, published['version'], strict=True)
                 if not archs:
@@ -124,11 +381,11 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
 
 def get_package_info(pkg_file, pkg_type):
     if pkg_type == 'rpm':
-        match = re.match(r'(.+)-([0-9][^-]*)-(\d+)\.(el\d+)\.(x86_64|aarch64)\.rpm', pkg_file.name)
+        match = re.fullmatch(r'(.+)-([0-9][^-]*)-(\d+(?:\.(?:el|fc)\d+)?)\.(x86_64|aarch64|noarch)\.rpm', pkg_file.name)
         if not match:
             return None
-        name, ver, rel, el_version, arch = match.groups()
-        version = f"{ver}-{rel}.{el_version}"
+        name, ver, rel, arch = match.groups()
+        version = f"{ver}-{rel}"
     elif pkg_type == 'debian':
         match = re.match(r'(.+?)_(\d+[^_]+)_(amd64|arm64)\.deb', pkg_file.name)
         if not match:
@@ -211,6 +468,38 @@ def delete_packages(host, owner, password, pkg_type, pattern):
                 if resp.status_code not in [200, 204]:
                     print(f"Error: {resp.text}")
 
+def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php-zts', branch='main'):
+    path = Path(pkg_file)
+    name, version, arch = package_metadata(path, pkg_type)
+    digest = archive_sha256(path)
+    packages = get_remote_packages(host, owner, password, pkg_type)
+    allowed = verify_upload_versions(host, owner, password, pkg_type, [path], packages)
+    if allowed != [path]:
+        raise RuntimeError(f"Publication ordering changed for {owner}/{name}/{version}")
+    before = remote_package_archives(host, owner, password, pkg_type, name, version)
+    existing = [record for record in before if record['arch'] == arch]
+    if existing and any(record['sha256'] != digest for record in existing):
+        raise RuntimeError(f"Equal version has different archive bytes: {owner}/{name}/{version}/{arch}")
+    if not existing:
+        url = f"{host}/api/packages/{owner}/debian/pool/php-zts/main/upload" if pkg_type == 'debian' else f"{host}/api/packages/{owner}/alpine/{branch}/{repo}"
+        with path.open('rb') as archive:
+            response = requests.put(url, files={'file': archive}, auth=(owner, password), timeout=120)
+        if response.status_code not in (201, 409):
+            raise RuntimeError(f"Upload failed for {owner}/{path.name}: HTTP {response.status_code}")
+    link = f"{host}/api/v1/packages/{owner}/{pkg_type}/{quote(name, safe='')}/-/link/{repo}"
+    response = requests.post(link, auth=(owner, password), timeout=30)
+    if response.status_code not in (200, 201, 204, 409):
+        raise RuntimeError(f"Package linking failed for {owner}/{name}: HTTP {response.status_code}")
+    after = remote_package_archives(host, owner, password, pkg_type, name, version)
+    identities = {(record['arch'], record['sha256']) for record in after}
+    if (arch, digest) not in identities:
+        raise RuntimeError(f"Served archive differs or is missing after upload: {owner}/{name}/{version}/{arch}")
+    if any((record['arch'], record['sha256']) not in identities for record in before):
+        raise RuntimeError(f"Upload changed an existing architecture: {owner}/{name}/{version}")
+    publish_consumer_sidecar(host, owner, password, pkg_type, path)
+    print(f"Verified: {owner}/{name} {version} {arch} sha256={digest}")
+    return 0
+
 def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", branch="main"):
     # Build set of name-version strings that exist remotely
     remote_names = set()
@@ -235,7 +524,7 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
         name, version, arch, full_name = info
 
         # Extract el_version for RPM if needed
-        el_version = None
+        el_version = 'el8'
         if pkg_type == 'rpm':
             match = re.match(r'.+\.el(\d+)\.(x86_64|aarch64)\.rpm', pkg_file.name)
             if match:
@@ -266,6 +555,7 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
             else:
                 print(f"Upload response: {resp.status_code}")
                 print(f"Error: {resp.text}")
+                skipped += 1
                 continue
 
             link_name = name.replace('_', '-') if pkg_type == 'debian' else name
@@ -275,11 +565,23 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
             print(f"Link response: {resp.status_code}")
             if resp.status_code != 201:
                 print(f"Error: {resp.text}")
+                skipped += 1
 
     if skipped:
         print(f"::error::Skipped {skipped} package files after upgrade checks; remaining uploads completed.")
         return 3
     return 0
+
+def check_packages(host, owner, password, pkg_type, pattern):
+    if pkg_type not in ['debian', 'alpine']:
+        raise RuntimeError('Upload checks are supported for DEB and APK; use check-rpm-upgrades for RPM.')
+    packages = get_remote_packages(host, owner, password, pkg_type)
+    files = [path for path in Path('.').glob(pattern) if path.is_file()]
+    if not files:
+        raise RuntimeError('No packages to verify: ' + pattern)
+    allowed = verify_upload_versions(host, owner, password, pkg_type, files, packages)
+    print(f'Verified upgrade ordering for {len(allowed)} package files; skipped {len(files) - len(allowed)}.')
+    return 0 if len(allowed) == len(files) else 3
 
 if __name__ == "__main__":
     args = sys.argv[1:]
@@ -289,7 +591,7 @@ if __name__ == "__main__":
         args.remove("--host=2")
 
     if len(args) < 4:
-        print("Usage: script.py [--host=2] <upload|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
+        print("Usage: script.py [--host=2] <upload|check|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
         print("Examples:")
         print("  script.py upload alpine 85 pass '*.apk'")
         print("  script.py --host=2 upload rpm 85 pass '*.rpm'")
@@ -308,6 +610,9 @@ if __name__ == "__main__":
     if action == "upload":
         pattern = args[4] if len(args) > 4 else "*.apk"
         sys.exit(upload_packages(host, owner, password, pkg_type, pattern))
+    elif action == "check":
+        pattern = args[4] if len(args) > 4 else "*.apk"
+        sys.exit(check_packages(host, owner, password, pkg_type, pattern))
     elif action == "list":
         pattern = args[4] if len(args) > 4 else None
         list_packages(host, owner, password, pkg_type, pattern)

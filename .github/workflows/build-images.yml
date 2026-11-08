@@ -7,6 +7,7 @@ on:
             - Dockerfile.debian
             - Dockerfile.alpine
             - Dockerfile.rhel
+            - bin/build-gcc-runtime
             - .github/workflows/build-images.yml
     workflow_dispatch:
 
@@ -35,12 +36,6 @@ jobs:
                     -   dockerfile: Dockerfile.rhel
                         name: packages-builder-rhel-8
                         build-args: "ALMA_VERSION=8"
-                    -   dockerfile: Dockerfile.rhel
-                        name: packages-builder-rhel-9
-                        build-args: "ALMA_VERSION=9"
-                    -   dockerfile: Dockerfile.rhel
-                        name: packages-builder-rhel-10
-                        build-args: "ALMA_VERSION=10"
                 platform:
                     -   arch: amd64
                         runs-on: ubuntu-24.04
@@ -104,8 +99,6 @@ jobs:
                     - packages-builder-debian
                     - packages-builder-alpine
                     - packages-builder-rhel-8
-                    - packages-builder-rhel-9
-                    - packages-builder-rhel-10
         steps:
             -   name: Download digests
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

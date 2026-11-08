@@ -20,12 +20,36 @@ rpm_globals = rpm['published_packages'].__globals__
 
 
 class UpgradeGuards(unittest.TestCase):
+    def test_rpm_library_ordering_is_php_independent(self):
+        local = {'name': 'php-zts-lib-openssl', 'arch': 'x86_64', 'version': '3.0.1', 'evr': '0:3.0.1-1.el10'}
+        remote = dict(local, version='3.1.0', evr='0:3.1.0-1.el10')
+        commands = Mock(run=lambda *args, **kwargs: Mock(returncode=12, stderr=''))
+        with patch.dict(rpm_globals, {'subprocess': commands}), self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
+            rpm['verify_package'](local, [remote], '8.6')
+
+    def test_forgejo_preflight_does_not_upload(self):
+        with patch.dict(forgejo_globals, {'get_remote_packages': Mock(return_value=[]), 'verify_upload_versions': Mock(return_value=[])}), patch.object(Path, 'glob', return_value=[root / 'library.deb']), patch.object(Path, 'is_file', return_value=True), patch.object(requests, 'put') as upload, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(forgejo['check_packages']('https://example.com', 'libs', 'test', 'debian', '*.deb'), 3)
+            upload.assert_not_called()
+
     def test_forgejo_pagination(self):
         responses = [Mock(json=lambda: [{'name': 'x', 'version': '1'}]), Mock(json=lambda: [{'name': 'x', 'version': '2'}]), Mock(json=lambda: [])]
         with patch.object(requests, 'get', side_effect=responses) as get:
             result = forgejo['get_remote_packages']('https://example.com', '86', 'test', 'debian')
             self.assertEqual(len(result), 2)
             self.assertEqual([call[1]['params']['page'] for call in get.call_args_list], [1, 2, 3])
+            self.assertTrue(all(call[1]['auth'] == ('86', 'test') for call in get.call_args_list))
+
+    def test_public_forgejo_reads_omit_empty_credentials(self):
+        for password in ('', None):
+            with self.subTest(password=password):
+                package = {'name': 'php-zts-cli', 'version': '82.35'}
+                responses = [Mock(json=lambda: [package]), Mock(json=lambda: []), Mock(status_code=200, json=lambda: [])]
+                with patch.object(requests, 'get', side_effect=responses) as get:
+                    self.assertEqual(forgejo['get_remote_packages']('https://example.com', '82', password, 'debian'), [package])
+                    self.assertEqual(forgejo['get_remote_package_files']('https://example.com', '82', password, 'debian', 'php-zts-cli', '82.35'), [])
+                    self.assertEqual(get.call_count, 3)
+                    self.assertTrue(all(call[1]['auth'] is None for call in get.call_args_list))
 
     def test_forgejo_skips_lower_package(self):
         files = [root / 'safe.deb', root / 'older.deb', root / 'older-debuginfo.deb']

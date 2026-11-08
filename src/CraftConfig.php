@@ -6,6 +6,9 @@ use Exception;
 use RuntimeException;
 use Symfony\Component\Yaml\Yaml;
 use staticphp\util\TwigRenderer;
+use staticphp\util\BuildPayload;
+
+require_once __DIR__ . '/util/BuildPayload.php';
 
 class CraftConfig
 {
@@ -33,9 +36,10 @@ class CraftConfig
         $phpVersion = defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : '8.4';
 
         try {
-            $craftYml = TwigRenderer::renderCraftTemplate($phpVersion);
-
-            $this->craftConfig = Yaml::parse($craftYml);
+            $payload = defined('BUILD_ROOT_PATH') ? BuildPayload::load(BUILD_ROOT_PATH) : null;
+            $this->craftConfig = $payload !== null
+                ? $payload->configuration()
+                : Yaml::parse(TwigRenderer::renderCraftTemplate($phpVersion));
         } catch (Exception $e) {
             throw new RuntimeException("Error rendering or parsing craft.yml template: " . $e->getMessage());
         }

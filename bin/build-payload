@@ -1,0 +1,109 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+define('BASE_PATH', dirname(__DIR__));
+define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');
+require BASE_PATH . '/vendor/autoload.php';
+require_once BASE_PATH . '/src/util/BuildPayload.php';
+require_once BASE_PATH . '/src/util/SharedLibraries.php';
+require_once BASE_PATH . '/src/util/ModuleOnlyBuild.php';
+
+use staticphp\util\BuildPayload;
+use staticphp\util\SharedLibraries;
+use Symfony\Component\Yaml\Yaml;
+
+$command = $argv[1] ?? '';
+$options = [];
+for ($i = 2; $i < count($argv); ++$i) {
+    if (!preg_match('/^--([a-z-]+)(?:=(.*))?$/D', $argv[$i], $match)) {
+        throw new RuntimeException('Unexpected payload argument: ' . $argv[$i]);
+    }
+    if (!in_array($match[1], ['root', 'type', 'config', 'php-version', 'arch', 'source-version', 'kind', 'metadata', 'reuse-proof', 'output', 'downloads'], true)) {
+        throw new RuntimeException('Unknown payload option: ' . $match[1]);
+    }
+    $options[$match[1]] = $match[2] ?? ($argv[++$i] ?? throw new RuntimeException('Missing option value'));
+}
+if (isset($options['kind']) && !in_array($options['kind'], ['sdk', 'consumer'], true)) {
+    throw new RuntimeException('Unsupported payload kind');
+}
+$root = $options['root'] ?? throw new RuntimeException('Specify --root');
+if (isset($options['type'])) {
+    if (!in_array($options['type'], ['rpm', 'deb', 'apk'], true)) {
+        throw new RuntimeException('Unsupported package type');
+    }
+    define('SPP_TYPE', $options['type']);
+}
+if ($command === 'record' || $command === 'checkpoint') {
+    $configuration = Yaml::parseFile($options['config'] ?? BASE_PATH . '/craft.yml');
+    $manifest = is_file($root . '/shared-libraries.json') ? json_decode((string) file_get_contents($root . '/shared-libraries.json'), true, 512, JSON_THROW_ON_ERROR) : [];
+    $context = ($options['kind'] ?? null) === 'sdk' ? ['kind' => 'libraries-only', 'trigger_php_version' => $options['php-version'] ?? $configuration['php-version']] : null;
+    if ($command === 'checkpoint') {
+        $downloads = $options['downloads'] ?? BASE_PATH . '/downloads';
+        $cachePath = $downloads . '/.cache.json';
+        $cache = json_decode((string) file_get_contents($cachePath), true, 512, JSON_THROW_ON_ERROR);
+        $probe = new \Symfony\Component\Process\Process([$root . '/bin/php', '-n', '-r', 'echo PHP_VERSION;'], env: ['LD_LIBRARY_PATH' => $root . '/lib']);
+        $probe->mustRun();
+        $actual = trim($probe->getOutput());
+        if (strcasecmp($actual, $options['php-version'] ?? $configuration['php-version']) !== 0) {
+            throw new RuntimeException('Checkpoint PHP release does not match its actual core');
+        }
+        foreach (['bin/phpize', 'bin/php-config', 'lib/libphp.so', 'include/php/Zend/zend_modules.h'] as $required) {
+            if (!is_file($root . '/' . $required)) {
+                throw new RuntimeException('Checkpoint core is incomplete: ' . $required);
+            }
+        }
+        $records = [];
+        foreach ($cache as $name => $entry) {
+            if (isset($entry['source'])) {
+                $records[$name] = $entry['source'];
+                unset($records[$name]['time']);
+            }
+        }
+        $context = ['kind' => 'intermediate-consumer-build', 'coverage' => 'incomplete',
+            'source_snapshot' => ['records' => $records, 'download_cache_sha256' => hash_file('sha256', $cachePath)],
+            'producer_configuration_sha256' => hash_file('sha256', $options['config'] ?? BASE_PATH . '/craft.yml')];
+        $previous = BuildPayload::load($root, false, false)?->metadata();
+        if (($previous['kind'] ?? null) === 'consumer') {
+            $context['prior_consumer_build_context'] = $previous['build_context'] ?? null;
+            $context['consumer_build_provenance'] = $previous['consumer_build_provenance'] ?? array_intersect_key($previous,
+                array_flip(['php_version', 'source_version', 'architecture', 'libc', 'build_platform', 'configuration', 'module_api', 'library_build_provenance']));
+        }
+        $source = dirname(realpath($root)) . '/source/php-src';
+        if (is_file($source . '/Makefile')) {
+            \staticphp\util\ModuleOnlyBuild::capture($source, $root, $configuration);
+        }
+    }
+    $payload = BuildPayload::record($root, $configuration,
+        $options['php-version'] ?? $configuration['php-version'],
+        $options['arch'] ?? $manifest['architecture'] ?? throw new RuntimeException('Specify recorded --arch'),
+        $options['source-version'] ?? $configuration['php-version'],
+        $context);
+    if ($command === 'checkpoint') {
+        $payload = BuildPayload::seal($root);
+    }
+    echo json_encode(['state' => $command === 'checkpoint' ? 'sealed' : 'recorded',
+        'coverage' => $command === 'checkpoint' ? 'incomplete' : null, 'architecture' => $payload->architecture()]), "\n";
+} elseif ($command === 'seal') {
+    $payload = BuildPayload::seal($root);
+    echo json_encode(['state' => 'sealed', 'architecture' => $payload->architecture(), 'elf_files' => count($payload->metadata()['files'])]), "\n";
+} elseif ($command === 'graft') {
+    $metadata = $options['metadata'] ?? throw new RuntimeException('Specify --metadata');
+    $proof = isset($options['reuse-proof']) ? json_decode((string) file_get_contents($options['reuse-proof']), true, 512, JSON_THROW_ON_ERROR) : [];
+    $payload = BuildPayload::graft($root, json_decode((string) file_get_contents($metadata), true, 512, JSON_THROW_ON_ERROR), $proof);
+    echo json_encode(['state' => 'sealed', 'architecture' => $payload->architecture(), 'consumer_cache_reused' => true]), "\n";
+} elseif ($command === 'verify') {
+    $payload = BuildPayload::load($root, true);
+    if (!$payload->isSealed()) {
+        throw new RuntimeException('Payload has not been sealed');
+    }
+    echo "Sealed payload verified.\n";
+} elseif ($command === 'refresh-assets') {
+    $payload = BuildPayload::refreshAssets($root, $options['downloads'] ?? BASE_PATH . '/downloads');
+    echo json_encode(['state' => 'sealed', 'asset_updates' => $payload->metadata()['asset_updates']]), "\n";
+} elseif ($command === 'manifest') {
+    SharedLibraries::load($root, true)->exportManifest($options['output'] ?? throw new RuntimeException('Specify --output'));
+} else {
+    throw new RuntimeException('Usage: build-payload record|checkpoint|seal|verify|graft|refresh-assets|manifest --root PATH [--metadata FILE --config FILE --php-version VERSION --arch ARCH --type rpm|deb|apk --output FILE]');
+}

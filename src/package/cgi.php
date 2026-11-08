@@ -19,6 +19,7 @@ class cgi implements package
             'depends' => [
                 CreatePackages::getPrefix() . '-cli',
             ],
+            'recommends' => CreatePackages::getSapiRecommendations(),
             'provides' => [],
             'replaces' => $versionedConflicts,
             'conflicts' => $versionedConflicts,

@@ -1,0 +1,65 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+require_once dirname(__DIR__) . '/src/util/ModuleOnlyBuild.php';
+require_once dirname(__DIR__) . '/src/util/BuildPayload.php';
+
+use staticphp\util\ModuleOnlyBuild;
+use staticphp\util\BuildPayload;
+use Symfony\Component\Process\Process;
+
+$arguments = getopt('', ['source:', 'root:', 'metadata:', 'payload:']);
+try {
+    if (count($arguments) !== (isset($arguments['payload']) ? 4 : 3) || !isset($arguments['source'], $arguments['root'], $arguments['metadata'])) {
+        throw new RuntimeException('Usage: php bin/php-module-build --source CONFIGURED_PHP --root BUILDROOT --metadata BUILD_PAYLOAD_JSON [--payload SEALED_PAYLOAD]');
+    }
+    $metadata = json_decode((string) file_get_contents($arguments['metadata']), true, 512, JSON_THROW_ON_ERROR);
+    if (isset($arguments['payload'])) {
+        $sealed = BuildPayload::load($arguments['payload'], true)->metadata();
+        if (($sealed['state'] ?? null) !== 'sealed' || $sealed !== $metadata) {
+            throw new RuntimeException('Module recipe adoption requires its exact original sealed payload metadata');
+        }
+        foreach ($metadata['files'] as $relative => $identity) {
+            if (!str_starts_with($relative, 'modules/') && !preg_match('#^bin/(?:php(?:$|[-.]|dbg)|frankenphp)#', $relative)
+                && !preg_match('#^lib/libphp[^/]*\.so#', $relative)) {
+                continue;
+            }
+            $file = $arguments['root'] . '/' . $relative;
+            if (!is_file($file) || is_link($file) || hash_file('sha256', $file) !== $identity['sha256']
+                || (fileperms($file) & 0777) !== $identity['mode']) {
+                throw new RuntimeException('Configured producer differs from its sealed consumer: ' . $relative);
+            }
+        }
+    }
+    ModuleOnlyBuild::capture($arguments['source'], $arguments['root'], $metadata['configuration']);
+    if (isset($arguments['payload'])) {
+        $relative = '/packaging/php-module-build';
+        $assets = $arguments['root'] . $relative;
+        if (!is_file($assets . '/manifest.json')) {
+            throw new RuntimeException('Configured producer has no module-only recipes to adopt');
+        }
+        $destination = $arguments['payload'] . $relative;
+        if (!is_dir($destination) && !mkdir($destination, 0755, true) && !is_dir($destination)) {
+            throw new RuntimeException('Cannot stage retained module-only recipe assets');
+        }
+        (new Process(['cp', '-a', $assets . '/.', $destination . '/']))->mustRun();
+        $context = $metadata['build_context'] ?? ['kind' => 'asset-adoption'];
+        $context['module_recipe_adoption'] = ['previous_payload_metadata_sha256' => hash_file('sha256', $arguments['metadata']),
+            'configured_recipe_manifest_sha256' => hash_file('sha256', $assets . '/manifest.json')];
+        $context['consumer_build_provenance'] = $metadata['consumer_build_provenance'] ?? array_intersect_key($metadata,
+            array_flip(['php_version', 'source_version', 'architecture', 'libc', 'build_platform', 'configuration', 'module_api', 'library_build_provenance']));
+        BuildPayload::record($arguments['payload'], $metadata['configuration'], $metadata['php_version'], $metadata['architecture'],
+            $metadata['source_version'] ?? $metadata['php_version'], $context);
+        $adopted = BuildPayload::seal($arguments['payload'])->metadata();
+        if ($adopted['files'] !== $metadata['files'] || ($adopted['prepared'] ?? []) !== ($metadata['prepared'] ?? [])) {
+            throw new RuntimeException('Module recipe adoption changed a raw or prepared ELF input');
+        }
+    }
+    echo "Retained configured module-only recipes without changing PHP or library binaries.\n";
+} catch (Throwable $error) {
+    fwrite(STDERR, $error->getMessage() . "\n");
+    exit(1);
+}

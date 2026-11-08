@@ -1,7 +1,8 @@
 {%- set php_version_parts = php_version|split('.') -%}
+{%- set os = type == 'apk' ? os : '8' -%}
+{%- set type = type == 'apk' ? 'apk' : 'rpm' -%}
 {%- set use_php_lto = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 6) -%}
 {%- set use_tailcall_vm = use_php_lto -%}
-{%- set drop_memcache = php_version_parts[0] > 8 or (php_version_parts[0] == 8 and php_version_parts[1] >= 5) -%}
 {# compile flags #}
 {%- set arch_flags = arch == 'x86_64' ? ' -mtls-dialect=gnu2 -m64 -fcf-protection' : '' -%}
 {%- if arch == 'x86_64' and os == '10' %} {% set arch_flags = arch_flags ~ ' -march=x86-64-v3' -%} {%- endif -%}
@@ -13,7 +14,7 @@
 {%- set specs_cflags = '-specs=/usr/lib/rpm/redhat/redhat-hardened-cc1' -%}
 {%- set specs_ldflags = '-specs=/usr/lib/rpm/redhat/redhat-hardened-ld' ~ (os == '10' ? ' -Wl,-z,pack-relative-relocs' : '') -%}
 {%- set cflags =
-  '-fPIC -O3 -pipe -fno-plt -fno-semantic-interposition -fstack-clash-protection -fno-omit-frame-pointer -momit-leaf-frame-pointer -ffunction-sections -fdata-sections' ~ arch_flags
+  '-g -fPIC -O3 -pipe -fno-plt -fno-semantic-interposition -fstack-clash-protection -fno-omit-frame-pointer -momit-leaf-frame-pointer -ffunction-sections -fdata-sections' ~ arch_flags
 -%}
 {%- set cflags = (using_gcc ? '' : '-flto=thin ') ~ cflags -%}
 {%- set php_optimization_flags = not using_gcc or use_php_lto ? ' -flto' : '' -%}
@@ -57,12 +58,13 @@
 
 {# extensions #}
 {%- set base_sapi_str = 'cli,cgi,fpm,embed,frankenphp' -%}
-{%- set base_extensions_str = 'calendar,ctype,curl,dom,exif,fileinfo,filter,iconv,libxml,mbregex,mbstring,opcache,openssl,password-argon2,pcntl,phar,posix,readline,session,simplexml,sockets,sodium,tokenizer,xml,xmlreader,xmlwriter,zlib' -%}
-{%- set base_shared_str = 'amqp,apcu,ast,bcmath,brotli,bz2,clickhouse,dba,decimal,deepclone,dio,ds,ev,event,excimer,fastchart,fastjson,ffi,ftp,gd,gearman,gettext,gmp,gmssl,grpc,igbinary,imagick,inotify,intl,ldap,lz4,maxminddb,memcache,memcached,mongodb,msgpack,mysqli,mysqlnd,mysqlnd_ed25519,mysqlnd_parsec,odbc,opentelemetry,parallel,pcov,pdo,pdo_mysql,pdo_odbc,pdo_pgsql,pdo_sqlite,pdo_sqlsrv,pgsql,protobuf,rar,redis,rdkafka,shmop,simdjson,snappy,soap,spx,sqlite3,sqlsrv,ssh2,swoole,swoole-hook-mysql,swoole-hook-pgsql,swoole-hook-sqlite,swoole-hook-odbc,sysvmsg,sysvsem,sysvshm,tidy,trader,uuid,uv,xdebug,xhprof,xlswriter,xsl,xz,yac,yaml,zip,zstd' -%}
+{%- set base_extensions_str = 'calendar,ctype,dom,exif,filter,iconv,libxml,mbregex,mbstring,opcache,openssl,password-argon2,pcntl,phar,posix,readline,session,simplexml,sockets,sodium,tokenizer,xml,xmlreader,xmlwriter,zlib' -%}
+{%- set base_shared_str = 'amqp,apcu,ast,bcmath,brotli,bz2,clickhouse,curl,dba,decimal,deepclone,dio,ds,ev,event,excimer,fastchart,fastjson,ffi,fileinfo,ftp,gd,gearman,gettext,gmp,gmssl,grpc,igbinary,imagick,inotify,intl,ldap,lz4,maxminddb,memcache,memcached,mongodb,msgpack,mysqli,mysqlnd,mysqlnd_ed25519,mysqlnd_parsec,odbc,opentelemetry,parallel,pcov,pdo,pdo_mysql,pdo_odbc,pdo_pgsql,pdo_sqlite,pdo_sqlsrv,pgsql,protobuf,rar,redis,rdkafka,shmop,simdjson,snappy,soap,spx,sqlite3,sqlsrv,ssh2,swoole,swoole-hook-mysql,swoole-hook-pgsql,swoole-hook-sqlite,swoole-hook-odbc,sysvmsg,sysvsem,sysvshm,tidy,trader,uuid,uv,xdebug,xhprof,xlswriter,xsl,xz,yac,yaml,zip,zstd' -%}
 
 {%- set base_extensions = base_extensions_str|split(',')|map(v => v|trim) -%}
 {%- set base_shared = base_shared_str|split(',')|map(v => v|trim) -%}
-{%- set base_shared = drop_memcache ? base_shared|filter(v => v != 'memcache') : base_shared -%}
+{%- set base_shared = php_version >= '8.5' ? base_shared|filter(v => v != 'memcache' ) : base_shared -%}
+{%- set base_shared = php_version >= '8.6' ? base_shared|filter(v => v != 'swoole' ) : base_shared -%}
 {%- set base_sapi = base_sapi_str|split(',')|map(v => v|trim) -%}
 
 {# Apply optional filtering #}
@@ -85,15 +87,17 @@
 {%- endif -%}
 
 php-version: {{ php_source_version }}
-extensions: {{ extensions|join(',') }}
-shared-extensions: {{ shared_ext|join(',') }}
+extensions: {{ filter_libraries ? '[]' : extensions|join(',') }}
+shared-extensions: {{ filter_libraries ? '[]' : shared_ext|join(',') }}
 {# craft's libs-only stage only resolves extensions, not sapi targets — list frankenphp's suggests explicitly #}
-libs: {{ 'frankenphp' in sapi_list ? '[brotli, watcher]' : '[]' }}
-sapi: {{ sapi_list|join(',') }}
+libs: {{ filter_libraries ? '[' ~ filter_libraries|join(', ') ~ ']' : ('frankenphp' in sapi_list ? '[brotli, watcher]' : '[]') }}
+sapi: {{ filter_libraries ? '[]' : sapi_list|join(',') }}
 debug: false
 build-options:
     enable-zts: true
     with-suggests: true
+    with-shared-libs: true
+    with-shared-libdir: '{{ shared_libdir }}'
     no-strip: false
     with-added-patch: ['{{ patch_file }}']
     with-config-file-path: '/etc/{{ prefix }}'
@@ -122,8 +126,11 @@ download-options:
     custom-git:
         - 'ext-apcu:master:https://github.com/krakjoe/apcu.git'
         - 'ext-ast:master:https://github.com/nikic/php-ast.git'
+        - 'ext-igbinary:master:https://github.com/igbinary/igbinary.git'
         - 'ext-memcached:master:https://github.com/php-memcached-dev/php-memcached.git'
-        - 'ext-xdebug:3.6.0alpha1:https://github.com/xdebug/xdebug.git'
+        - 'ext-msgpack:master:https://github.com/msgpack/msgpack-php.git'
+        - 'ext-xdebug:master:https://github.com/xdebug/xdebug.git'
+        - 'ext-xlswriter:master:https://github.com/viest/php-ext-xlswriter.git'
 {% endif %}
 craft-options:
     doctor: true
@@ -131,6 +138,8 @@ craft-options:
     build: true
 
 extra-env:
+    GOAMD64: 'v1'
+    GOARM64: 'v8.0'
     {% if using_gcc -%}
     SPC_TOOLCHAIN: 'StaticPHP\Toolchain\GccNativeToolchain'
     SPC_LIBC: '{{ type == 'apk' ? 'musl' : 'glibc' }}'
@@ -150,6 +159,9 @@ extra-env:
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS: "{{ cflags }} -g -fno-math-errno -fPIE{{ php_optimization_flags }}"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS_LIBPHP: "-ftls-model=initial-exec"
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS: "-Wl,--build-id=sha1 -pie -release {{ release_suffix }}{{ php_link_optimization_flags }}"
+{% if type == 'apk' %}    # musl uses this ELF header to size default pthread stacks.
+    SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_PROGRAM: "-Wl,-z,stack-size=0x80000"
+{% endif %}
     # SPC appends LIBPHP to EXTRA_LDFLAGS; the optimization flags above already reach libphp.
     SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_LIBPHP: "-Wl,-Bsymbolic-functions -Wc,-ftls-model=initial-exec"
     SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-cgi --disable-phpdbg --disable-debug --with-pic --enable-rtld-now --enable-re2c-cgoto --disable-rpath{{ use_tailcall_vm ? ' --disable-gcc-global-regs' : '' }}"

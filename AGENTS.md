@@ -4,37 +4,43 @@ Builds RPM/DEB/APK packages (PHP toolchain, gcc) via GitHub Actions, using repro
 
 ## Layout
 
-- `bin/spp` — main PHP build CLI. Usage in workflows: `php bin/spp build --type=rpm --debuginfo --phpv=8.4 --libs-only` and `php bin/spp all --type=rpm --debuginfo --phpv=8.4 [--iteration=N] [--packages=…]`. `--libs-only` produces a `buildroot/` that gets passed to the next stage as a tarball; `all` consumes that buildroot and produces packages in `dist/<type>/`.
+- `bin/spp` — main PHP build CLI. `php bin/spp build --type=rpm --debuginfo --phpv=8.4 --libs-only [--libraries=…]` produces the reusable SDK in `buildroot/`. The glibc workflow builds and seals one PHP payload per stream and architecture, then uses `php bin/spp package --type=<rpm|deb> --phpv=… [--iteration=N] [--packages=…]` to produce archives in `dist/<type>/` without compilation.
 - `bin/createrepo_static`, `bin/forgejo-helper` — repo-side tools.
 - `src/` — PHP source (`src/Command`, `src/step`, `src/package`, `src/util`, `src/patches`, `src/ini`, `CraftConfig.php`, `extension.php`, `package.php`).
 - `craft.yml` — top-level static-php-cli config: extensions list, build options, SPC_* env (CFLAGS, LDFLAGS, etc.). When toolchain/optimization questions come up, look here before guessing.
 - `Dockerfile.{rhel,debian,alpine}` — builders. Built by `.github/workflows/build-images.yml`.
 - `.github/workflows/`:
-  - `build-rpm-modular-packages.yml` — Alma 8/9/10 × x86_64/arm64 × PHP 8.2/8.3/8.4/8.5/8.6. Uploads via rsync+SSH then runs `createrepo_c` on the remote.
-  - `build-deb-forgejo.yml`, `build-apk-forgejo.yml` — Debian/Alpine builds, push to Forgejo. PHP 8.2–8.6. Each PHP version publishes to its own Forgejo owner (`82`…`86`, from `getForgejoOwner()`), so there is no shared index and no default-version problem — users opt in by adding the repo for the version they want.
-  - `build-images.yml` — builds the builder containers (libs-only step exists to save build time).
+  - `build-rpm-modular-packages.yml` — one EL8 glibc producer × x86_64/arm64 × PHP 8.2–8.6; packages the same common binaries as RPM and DEB. RPM publication stages and atomically promotes one canonical repository per architecture, with legacy EL9/EL10 URL aliases.
+  - `build-deb-forgejo.yml` — delegates to the shared EL8 workflow; it does not compile a separate Debian payload.
+  - `build-apk-forgejo.yml` — separate native Alpine/musl producer. DEB/APK publish each PHP stream to its existing Forgejo owner (`82`…`86`, from `getForgejoOwner()`), including its private libraries, so clients keep their existing version-specific repository URLs.
+  - `build-images.yml` — builds the EL8 and Alpine producer images and Debian packaging/test image.
   - `spc-download.yml` — produces the `downloads-tarball` artifact that the build workflows pull via `dawidd6/action-download-artifact`.
   - `zizmor.yml` — workflow security audit.
 
 ## Builder containers
 
-`Dockerfile.rhel` is matrix-built per Alma version into `ghcr.io/static-php/packages-builder-rhel-{8,9,10}`. It installs `tar`, `zstd`, `gcc-toolset-15`, `cmake` 3.31, `re2c`, `bison`, `autoconf`/`automake`/`libtool`, `fpm`, and a prebuilt `php` from `files.henderkes.com`. The autotools trio matters for pre-release PHP: a `php-8.6.0*` tag archive ships no generated `configure`, so spc runs `./buildconf --force`.
+On this PC, use Docker and do not install or require Podman. Keep container tooling configurable; do not enforce an engine identity. Privileged test containers are allowed with private PID, IPC and cgroup namespaces. Never share host namespaces or mount the host root, host cgroups, systemd/D-Bus sockets or container-engine sockets into an init-system test container.
 
-When editing `Dockerfile.rhel`, remember the per-Alma branches:
+Never shut down, reboot, suspend or power off the host, or stop its service manager. Init-system test commands must target a verified test container through the configured engine's exec command; never run its service or shutdown commands on the host. Other host-service changes require explicit user authorization.
 
-- **Alma 8/9** use `@ruby:3.3` module + `source /opt/rh/gcc-toolset-15/enable`.
-- **Alma 10** uses plain `ruby` + `source /usr/lib/gcc-toolset/15-env.source`.
+`Dockerfile.rhel` is built with `ALMA_VERSION=8` into `ghcr.io/static-php/packages-builder-rhel-8`, the only production glibc compiler image. It provides GCC 16.2.0 and binutils in `/opt/gcc`, `tar`, `zstd`, `cmake` 3.31, `re2c`, `bison`, `autoconf`/`automake`/`libtool`, `fpm`, and a prebuilt `php` from `files.henderkes.com`. GCC runtime assets are checked or repaired by `bin/build-gcc-runtime` for shared linkage, DWARF type information and licenses. The autotools trio matters for pre-release PHP: a `php-8.6.0*` tag archive ships no generated `configure`, so spc runs `./buildconf --force`.
+
+`Dockerfile.debian` is a Debian 11 packaging and native installation-test image. It consumes the sealed EL8 payload. OpenSSL alone has two EL8-built path profiles: RPM `/etc/pki/tls` and DEB `/etc/ssl`; common PHP, extension and other library ELF bytes remain identical.
+
+When editing retained per-Alma branches in `Dockerfile.rhel`, remember that 9/10 are not production build targets:
+
+- **Alma 8/9** use `@ruby:3.3`; **Alma 10** uses plain `ruby`. The compiler comes from `/opt/gcc`, not gcc-toolset activation scripts.
 - **Alma 8** has no `re2c` package — built from source (4.3 tarball). 9/10 install from repo.
 
 ## PHP toolchain selection
 
-Toolchain is chosen by **package type**, not PHP version:
+Toolchain is chosen by **producer**, not PHP version:
 
-- **RPM (Alma), DEB (Debian), and APK (Alpine)** → `gcc` 16 for **all** PHP versions (8.2–8.6). No `--target` is passed, so `craft.yml.twig` sets `using_gcc = not target` → `GccNativeToolchain`. For apk the template additionally sets `SPC_LIBC: musl` + `SPC_MUSL_DYNAMIC` — `Dockerfile.alpine` is a real `alpine:3.21` image (native musl gcc, not zig cross), so `bin/spp test` (`apk add`) runs in real Alpine.
+- **EL8 glibc (RPM and DEB payloads) and native Alpine musl (APK)** → `gcc` 16 for **all** PHP versions (8.2–8.6). No `--target` is passed, so `craft.yml.twig` sets `using_gcc = not target` → `GccNativeToolchain`. For apk the template additionally sets `SPC_LIBC: musl` + `SPC_MUSL_DYNAMIC` — `Dockerfile.alpine` is a real `alpine:3.21` image (native musl gcc, not zig cross), so `bin/spp test` (`apk add`) runs in real Alpine.
 
-**Alpine jobs do NOT use `container:` — they run on the glibc host and invoke the image via `docker run`.** A musl `container:` breaks JavaScript actions (checkout/cache/download-artifact/tmate) on **arm64**: GitHub only ships a musl Node for x64, so an arm64 musl container errors with "JavaScript Actions in Alpine containers are only supported on x64 Linux runners." So `build-apk-forgejo.yml` keeps checkout/cache/artifact steps on the host and wraps only the build/test/forgejo steps in `docker run --rm -v "$GITHUB_WORKSPACE":/build … "$IMAGE" bash -lc '…'` (as root — `bin/spp`'s `maybeSudo` no-ops at euid 0, so `apk add` works). A GHCR `docker login` step is required since manual `docker run` isn't auto-authenticated the way `container:` is. The rpm/deb jobs still use `container:` — their images are glibc, so this doesn't apply; don't convert them.
+**Alpine jobs do NOT use `container:` — they run on the glibc host and invoke the image via `docker run`.** A musl `container:` breaks JavaScript actions (checkout/cache/download-artifact/tmate) on **arm64**: GitHub only ships a musl Node for x64, so an arm64 musl container errors with "JavaScript Actions in Alpine containers are only supported on x64 Linux runners." So `build-apk-forgejo.yml` keeps checkout/cache/artifact steps on the host and wraps native Alpine work in Docker (as root — `bin/spp`'s `maybeSudo` no-ops at euid 0, so `apk add` works). A GHCR `docker login` step is required since manual `docker run` isn't auto-authenticated the way `container:` is. Glibc producer jobs use `container:`; format packaging and native upgrade tests run from the host through Docker.
 
-The `build-libs-gcc` job builds one lib set per (alma, arch) with `phpv: "8.4"` as the canonical trigger (libs are PHP-version-independent). The downstream `build` step reuses that single buildroot (`buildroot-rpm-alma{V}-{arch}-gcc` / `buildroot-deb-{arch}-gcc` / `buildroot-apk-{arch}`) for every PHP version. Buildroots ship as `cache-YYYY-WW` GitHub **release** assets via the `.github/actions/buildroot-cache` composite action (pruned by `buildroot-cache-cleanup.yml`).
+The `build-libs` job builds one PHP-independent shared SDK per producer and architecture, using PHP 8.4 as the canonical library trigger. `shared-sdk-buildroot-glibc-alma8-{arch}` feeds every glibc PHP stream, whose `shared-payload-glibc-alma8-{arch}-php{stream}` artifact fans out to RPM/DEB packaging. Alpine uses `shared-sdk-buildroot-apk-{arch}`. Compatible seeds select only changed library inputs and genuine ABI dependents; unchanged manual selections compile nothing. SDKs and sealed PHP payloads are cached as `cache-YYYY-WW` GitHub **release** assets via `.github/actions/buildroot-cache` (pruned by `buildroot-cache-cleanup.yml`); `publish=false` does not write release caches.
 
 ## Pre-release PHP and `allow-shared-ext-failure`
 
@@ -43,9 +49,10 @@ PHP 8.6 is still a pre-release, so upstream resolves to whatever `php-8.6.0*` ta
 - **Skip PHP 8.6.0RC1** because of its upstream packaging issue. The upstream probe excludes that exact tag, and `src/artifact/PhpSource.php` falls back to beta3 if SPC selects RC1 (explicit RC1 requests fail). RC2 and later resolve normally.
 
 - **Version strings carry a tilde.** PHP and extension prereleases normalize to `~alphaN`, `~betaN`, and `~rcN`; development snapshots use `~~dev` so they sort below alpha instead of between beta and rc. APK translates these to `_alphaN`, `_betaN`, `_rcN`, and `_alpha0_alpha0` for dev. The old `_pre` mapping incorrectly placed dev above beta. Never hardcode a particular prerelease marker.
-- **Independently versioned packages keep their upstream prerelease before the PHP tag.** `CreatePackages::getTaggedPackageVersion()` builds stable versions as `1.13.1_82.35` (rpm), `1.13.1+php82.35` (deb), or `1.13.1p82.35` (apk), with no `+ext` / `_p0` boundary. Prerelease examples are `3.6.0~alpha1_86.0~rc3` (rpm), `3.6.0~alpha1+php86.0~rc3` (deb), or `3.6.0_alpha1_p86_p0_rc3` (apk). APK cannot put a dot in a suffix number, so after a package prerelease the PHP stream and patch use separate `_p` suffixes; `_p0` there means PHP patch 0. The package's own version and prerelease take precedence over PHP; alpha2 stays above alpha1 even when alpha1 uses newer PHP. For the same upstream version, PHP major/minor/patch and prerelease determine ordering. Both phase sequences are `dev < alpha < beta < rc < release`. Forgejo owner IDs stay unchanged (`86`, etc.). The format applies to extensions, PIE and FrankenPHP across all PHP streams. Removing the old boundary can lower same-version rebuilds; upload guards skip lower candidates, and a higher upstream version upgrades past the old format. Keep parsing old RPM versions for existing repository entries. Packages whose version equals PHP itself keep the full PHP version. Numeric upstream rollbacks still need a rollback version or epoch.
-- **Use native version comparators.** `TestCommand` selects packages with `dpkg`, `apk version`, and `rpmdev-vercmp` (available in all Alma builders), not PHP's `version_compare()`. All three workflows run `tests/package-versions.php` for their format before building. It checks all 25 PHP/extension phase combinations, migration past legacy builds, numbered prereleases and PHP version transitions. `tests/createrepo-versions.py` checks RPM parsing and module artifacts for the legacy and current formats.
-- **Never publish a lower candidate.** `bin/forgejo-helper upload` paginates the full authenticated package list and checks DEB/APK archive headers against published versions for the same name and architecture before uploading any file. Forgejo stores APK filenames without architecture suffixes, so read published APK `.PKGINFO` headers through the file-ID download links; signed APKs may contain multiple gzip/tar members. A failed per-package verification skips that package and its matching runtime/debuginfo files, while unrelated packages continue uploading. Failure to list the registry still aborts the batch. `bin/check-rpm-upgrades` reads published primary metadata over the existing SSH connection and compares RPM epochs/versions/releases for the same name, architecture and PHP stream. Both guards skip lower candidates and their matching runtime/debuginfo files, then report exit code 3 for skipped uploads. Forgejo workflows attempt both hosts before failing the job. RPM writes a NUL-delimited allowlist for rsync via `--files-from`, uploads it before failing the job, and selects repository updates by the successful upload step even when that job fails. Both guards use native package comparators and have regression coverage in `tests/upgrade-guards.py`.
+- **Independent versions identify the PHP stream and initial prerelease ABI.** `CreatePackages::getTaggedPackageVersion()` builds stable versions as `1.13.6_82` (RPM), `1.13.6+php82` (DEB), or `1.13.6p82` (APK). FrankenPHP and compiled extensions append PHP's phase only during the initial `x.y.0` prerelease cycle: `1.13.6_86~rc5`, `1.13.6+php86~rc5`, `1.13.6p86_rc5`. Their own prerelease stays before the PHP tag: `3.2.17~rc1_86~rc5`, `3.2.17~rc1+php86~rc5`, `3.2.17_rc1_p86_rc5`. After GA, even a patch RC such as `8.6.1RC1` uses only `86`. PIE always uses the stream-only tag and has no compiled PHP ABI dependency. PHP-versioned packages keep the full PHP version, including patch RCs. Forgejo owner IDs stay unchanged (`82`…`86`). For the same upstream release, retain the highest published structure (including old PHP patch tags and `+ext` / `_p0` boundaries), but update its PHP phase to the current ABI phase; remove that phase at GA and for PIE. Advance the revision when required, and adopt the shorter structure at the package's next upstream release without adding an epoch. Numeric upstream rollbacks remain forbidden. The shared-runtime capability distinguishes initial PHP prereleases even when the module API number is unchanged; GA and subsequent patch releases/RCs share the stable capability.
+- **Keep existing package names and real upstream versions.** AMQP and igbinary retain their original APK names; no `-shared` replacements, versioned name aliases or invented numeric prefixes. Malformed historical APK versions containing `~` block corrected spellings of the same numeric upstream version, even with higher revisions. A real higher numeric upstream release can upgrade normally (for example, AMQP 2.2.1 after 2.2.0 or igbinary 3.2.18 after 3.2.17). Until then, preflight rejects lower candidates. It also checks the actual upstream version and phase separately. `tests/apk-version-migration.php --native` validates this future upgrade path with hypothetical higher-upstream metadata fixtures on PHP 8.2–8.5.
+- **Use native version comparators.** `TestCommand` selects packages with `dpkg`, `apk version`, and `rpmdev-vercmp` (available in all Alma builders), not PHP's `version_compare()`. All three workflows run `tests/package-versions.php` for their format before building. It checks both prerelease phase sequences, stable-ABI patch/RC invariance, PIE's stream-only tags, PHP stream transitions and migration from historical spellings. `tests/php-prerelease-abi.php --type=<rpm|deb|apk>` checks generated native package versions and ABI relationships. `tests/createrepo-versions.py` checks RPM parsing and module artifacts for historical and current tags.
+- **Never publish a lower candidate.** `bin/forgejo-helper upload` paginates the full authenticated package list and checks DEB/APK archive headers against published versions for the same name and architecture before uploading any file. Forgejo stores APK filenames without architecture suffixes, so read published APK `.PKGINFO` headers through the file-ID download links; signed APKs may contain multiple gzip/tar members. A failed per-package verification skips that package and its matching runtime/debuginfo files, while unrelated packages continue uploading. Failure to list the registry still aborts the batch. `bin/check-rpm-upgrades` reads published primary metadata over the existing SSH connection and compares RPM epochs/versions/releases for the same name, architecture and PHP stream. Standalone guards skip lower candidates and their matching runtime/debuginfo files, then report exit code 3. Shared publication workflows require the complete cohort to pass preflight before any upload: RPM uses `--strict-cohort` and a NUL-delimited rsync allowlist, while DEB/APK preflight every existing stream owner on both Forgejo hosts. A rejected candidate blocks that cohort rather than publishing an incomplete ABI transition. Both guards use native package comparators and have regression coverage in `tests/upgrade-guards.py`.
 - **A pre-release must never become the default module stream.** RPM puts every PHP version in one repo and separates them with modularity, so the highest stream would otherwise be installed unasked. `PRERELEASE_STREAMS` at the top of `bin/createrepo_static` lists the streams excluded from `modulemd-defaults`; drop an entry once that stream goes GA. The stream is still published, so users opt in with `dnf module switch-to php-zts:static-8.6`. Deb and apk need no equivalent — each version is its own Forgejo repo.
 - **Not every shared extension compiles or loads yet.** `craft.yml`'s `build-options.allow-shared-ext-failure` tells static-php-cli to skip such an extension instead of aborting the whole build.
 
@@ -78,14 +85,14 @@ tar -cf - buildroot | zstd -o buildroot.tar.zst
 zstd -dc buildroot.tar.zst | tar -xf -
 ```
 
-The deb/apk forgejo workflows still use `tar --zstd` — that is **fine**; they don't run on Alma. Don't "fix" them.
+The Alpine workflow still uses `tar --zstd` — that is **fine**; those steps run on the host. The shared glibc workflow uses pipes for its EL8 stages, including the payload later packaged as DEB.
 
 ## Matrix isolation pattern
 
-Per-Alma failures must not cascade. Pattern used in `build-rpm-modular-packages.yml`:
+Per-target failures must not cascade. Pattern used in `build-rpm-modular-packages.yml`:
 
-1. **Fan-out job** uses `strategy.fail-fast: false` and an explicit, parseable `name:` like `Build libs gcc (alma{V} {arch})` or `Build (alma{V} {arch} php{V})`. The name format is the contract — downstream filters parse it.
-2. **Filter job** runs with `if: ${{ !cancelled() }}` and `permissions: actions: read`. It calls `gh api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs --paginate --jq …`, filters successful jobs by name regex, sed-extracts the tuple, then jq-builds an `{include: [...]}` matrix and an `any` boolean. Both go to `$GITHUB_OUTPUT`.
+1. **Fan-out job** uses `strategy.fail-fast: false` and an explicit, parseable `name:` such as `Resolve builder (alma8-{arch})`, `Build libs shared (alma8-{arch})` or `Build payload (alma8-{arch} php{stream})`. The name format is the contract — downstream filters parse it.
+2. **Filter job** runs with `if: ${{ !cancelled() }}` and `permissions: actions: read`. It calls `gh api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs --paginate --jq …`, selects successful terminal job names (including reusable-workflow prefixes), and sed-extracts target/stream identities. `.github/actions/shared-libraries/workflow.py` combines these with downloaded target plans to emit `{include: [...]}` matrices and `any` booleans. Its `targets`, `matrix` and `packages` commands cover builder, SDK and common-payload stages; one successful payload fans out only to the requested formats.
 3. **Downstream job** does `needs: [filter-job]`, gates with `if: ${{ !cancelled() && needs.filter-job.outputs.any == 'true' }}`, and uses `matrix: ${{ fromJson(needs.filter-job.outputs.matrix) }}`.
 
 Why `!cancelled()` not `success()`: upstream matrix entries are allowed to fail; without `!cancelled()` the filter job wouldn't run at all.
@@ -94,21 +101,15 @@ When adding a new downstream stage to any workflow, follow this pattern rather t
 
 ## Validating workflow changes locally
 
-Before pushing, validate YAML and simulate the jq filters:
+Before pushing, validate YAML and the actual workflow/filter contracts:
 
 ```bash
 # YAML syntax
 python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" .github/workflows/build-rpm-modular-packages.yml
 
-# Simulate the compute-build-gcc-matrix jq with a mocked "succeeded" (alma arch) string
-FULL_MATRIX='{"php-version":["8.2","8.3","8.4","8.5","8.6"],"alma":["8","9","10"],"arch":["x86_64","arm64"]}'
-succeeded=$'9 x86_64\n9 arm64\n10 x86_64\n10 arm64'
-jq -nc --argjson m "$FULL_MATRIX" --arg s "$succeeded" '
-  ($s | split("\n") | map(select(length > 0))) as $set |
-  [ $m["php-version"][] as $p | $m.alma[] as $a | $m.arch[] as $r |
-    select($set | index("\($a) \($r)")) |
-    {"php-version": $p, alma: $a, arch: $r}
-  ]'
+python3 tests/glibc-workflow-entrypoints.py
+python3 tests/workflow-shared-libraries.py
+python3 tests/glibc-pipeline.py
 ```
 
 The Plan/Explore agents can also read large workflow files, but for these targeted edits prefer Read + Edit directly.
@@ -119,33 +120,35 @@ The Plan/Explore agents can also read large workflow files, but for these target
 - Steps written as `-   name:` (3 spaces between dash and key). Match this when adding new steps.
 - All third-party `uses:` actions are pinned to commit SHAs with a `# vX` trailing comment. Keep that style; don't switch to floating tags.
 - `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` is set in container jobs because the GH-hosted Node in Alma containers is too old.
-- `runs-on` for arm64: `ubuntu-24.04-arm` (RPM) or `ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}` (DEB style).
-- Matrix arch is `arm64`/`x86_64` in inputs; the RPM tooling wants `aarch64` — the conversion happens in the "Set architecture variables" step (`MATRIX_ARCH` env → `RPM_ARCH`).
+- Producer/package jobs use `ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}`; image jobs use explicit `ubuntu-24.04-arm` for arm64.
+- Matrix arch is `arm64`/`x86_64`; the glibc entrypoint also accepts `amd64` as an x86_64 input alias. RPM tooling wants `aarch64`, while DEB archive headers use `arm64`/`amd64`; keep these conversions in the shared workflow helpers.
 
 ## Build inputs
 
-All build-* workflows accept comma-separated overrides via `workflow_dispatch`:
+The shared glibc workflow, its DEB wrapper and the Alpine workflow accept these `workflow_dispatch` inputs:
 
+- `mode` — `full` or `incremental`; a full PHP request still reuses a compatible library SDK.
+- `libraries` — comma-separated library IDs for a selective library-only update. Unchanged selected inputs reuse compiled outputs; add `bump=true` to raise only the selected package revisions. ABI changes include genuine dependent rebuilds.
 - `php_versions` (e.g., `8.2,8.5`) — empty = all.
 - `downloads_run_id` — pins the `spc-download` source snapshot; automatic dispatches pass their own run ID, and empty preserves the download action's latest-artifact lookup.
-- `alma_versions` (RPM only).
-- `architectures` (`x86_64,arm64` for RPM/APK; `amd64,arm64` for DEB).
+- `architectures` — `x86_64,arm64`; the glibc workflow and DEB wrapper also accept `amd64` for x86_64. EL8 is the fixed glibc producer; there is no `alma_versions` input.
 - `packages` — passed through to `bin/spp` as `--packages=…`.
-- `iteration` — passed through as `--iteration=…` and overrides automatic bumping. `bump` now defaults to true in the package workflows; scheduled runs also bump. Forgejo revision queries paginate the full authenticated registry and cache each page.
+- `iteration` — passed through as `--iteration=…` and overrides automatic bumping. `bump` defaults to false; scheduled `spc-download` dispatches pass `bump=true`. Forgejo revision queries paginate the full authenticated registry and cache each page.
+- `publish` — defaults to false: build/test only, without package publication or release-cache writes. Scheduled `spc-download` dispatches set it true.
 - `debug_tmate` — opens tmate on failure (only after build step; tmate binary is downloaded inline because Alma doesn't ship it).
 
 When the user asks to "rerun for X only", they mean these inputs.
 
 `RunSPC` resolves minor versions through the snapshot's `downloads/.spc-meta.json` and verifies the built binary before packaging. CI requires this metadata; explicit full-version requests remain explicit. Keep the PHP stream used for paths, package tags and Forgejo owners separate from the pinned source release.
 
-`spc-download` runs incremental builds Tuesday–Sunday and forces a full rebuild every Monday through the existing `force_full` path. This retries missed or failed publications weekly without polling package repositories. Upload downgrade guards still apply.
+`spc-download` runs incremental requests Tuesday–Sunday and forces a full PHP request every Monday through `force_full`. Compatible library SDKs still receive selective input/ABI checks rather than a forced full library rebuild. Automatic dispatch triggers the shared glibc workflow once plus Alpine, not a separate DEB compiler pipeline. This retries missed or failed publications weekly without polling package repositories. Upload downgrade guards still apply.
 
 ## Operational notes
 
-- Packages are uploaded via `rsync` over SSH to `${{ secrets.DEB_SERVER_IP }}:/mnt/data/{rpm|deb|apk}/${RPM_ARCH}/${TARGET_DIR}/`. RPM `update-repo` checks out the current code and pipes `bin/createrepo_static` into remote `python3 -`, followed by `createrepo_c --update . && modifyrepo_c …`; no separately installed server script needs updating.
+- RPM archives are staged via `rsync` over SSH beneath `/mnt/data/rpm/{x86_64|aarch64}/.php-zts/`. The checked-out `bin/canonical-rpm-repository` and `bin/createrepo_static` are copied with the validated cohort; `stage` and `promote --activate-aliases` publish one complete generation while retaining cached legacy URLs. DEB/APK upload to the two existing Forgejo registries after cohort and native upgrade guards pass.
 - RPM signing: GPG key from `secrets.DEB_GPG_PRIVATE_KEY` + passphrase `DEB_GPG_PASSWORD`, loaded into `~/.rpmmacros` and used by `rpmsign --addsign`.
-- Cache: composer cache is the only persistent cache (`actions/cache` keyed on `composer.lock`).
-- `buildroot-*` artifacts are uploaded with `retention-days: 1` — they're cheap intermediates.
+- `actions/cache` stores Composer downloads keyed on `composer.lock`; reusable compiled SDKs and PHP payloads use the release cache described above.
+- `shared-sdk-*`, `shared-payload-*` and package/plan artifacts use `retention-days: 1` as intermediates.
 
 ## Comments
 
@@ -157,7 +160,7 @@ Don't narrate. No comment restating the line below it, no explaining what a well
 
 - Don't wire an extension patch with `#[PatchBeforeBuild]` — spc emits that only from `PackageBuilder::buildPackage()`, which refuses anything that isn't a `LibraryPackage`, so it reaches libraries and targets but never `#[Extension]` packages. Extensions go `buildShared()` → `runStage()`, which emits stage hooks: use `#[BeforeStage('ext-<name>', 'phpizeForUnix')]` to land before phpize/configure/make. A hook wired the wrong way is silent — the extension just fails and `allow-shared-ext-failure` skips it.
 - SPC uses bundled `php-src/ext/zip` for PHP 8.5+ and archived PECL zip for older PHP versions. The former PHP 8.6 PECL zip hook and patch are no longer needed.
-- Don't switch `tar --zstd` to pipes in the deb/apk workflows — they don't run on Alma.
+- Don't switch the Alpine workflow's host-side `tar --zstd` to pipes solely for the EL8 tar quirk.
 - Don't skip pinning new actions to SHAs.
 - Don't add `container: <alpine image>` to the apk jobs — musl containers can't run JS actions on arm64. Keep the host + `docker run` pattern.
 - Don't replace the dynamic-matrix filter pattern with `if: needs.X.result == 'success'` — that fails closed for the whole matrix when any entry fails.

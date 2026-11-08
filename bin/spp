@@ -8,7 +8,7 @@ const DIST_PATH = BASE_PATH . '/dist';
 const DIST_RPM_PATH = DIST_PATH . '/rpm';
 const DIST_DEB_PATH = DIST_PATH . '/deb';
 const DIST_APK_PATH = DIST_PATH . '/apk';
-define('TEMP_DIR', sys_get_temp_dir() . '/spc-packages');
+define('TEMP_DIR', sys_get_temp_dir() . '/spc-packages-' . bin2hex(random_bytes(8)));
 
 // Seed SPC's download cache from the container's prebuilt PKG_ROOT_PATH (set in
 // Dockerfile.{rhel,debian,alpine}). The bootstrap step installs zig + go-xcaddy
@@ -30,7 +30,9 @@ if ($_seed && is_readable($_seed)) {
 unset($_seed, $_target, $_seed_data, $_target_data, $_merged, $_pkg_root);
 
 // Ensure autoloading is set up
-require_once BASE_PATH . '/vendor/autoload.php';
+$composerLoader = require BASE_PATH . '/vendor/autoload.php';
+require_once BASE_PATH . '/src/util/SpcAutoload.php';
+\staticphp\util\SpcAutoload::configure($composerLoader);
 
 use staticphp\step\CreatePackages;
 use Symfony\Component\Console\Application;
@@ -41,6 +43,7 @@ use staticphp\Command\TestCommand;
 
 // Create a new Symfony Console Application
 $application = new Application('SPC Packages', '1.0.0');
+$application->setAutoExit(false);
 
 // Register commands
 $application->add(new BuildCommand());
@@ -51,13 +54,20 @@ $application->add(new TestCommand());
 // Set default command to list commands when no command is specified
 $application->setDefaultCommand('list');
 
+$exitCode = 1;
 try {
     $exitCode = $application->run();
 }
-catch (Exception $e) {
+catch (Throwable $e) {
     echo "Error running application: " . $e->getMessage() . "\n";
     echo "Stack trace: " . $e->getTraceAsString() . "\n";
 }
+finally {
+    if (is_dir(TEMP_DIR)) {
+        exec('rm -rf ' . escapeshellarg(TEMP_DIR));
+    }
+}
+exit($exitCode);
 
 function setupGithubToken(string $method, string $url, array &$headers): void
 {
@@ -90,6 +100,16 @@ function getLibdir(): string
     // rpm uses /usr/lib64, deb and apk use /usr/lib
     $type = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
     return $type === 'rpm' ? '/usr/lib64' : '/usr/lib';
+}
+
+function getRuntimeLibdir(): string
+{
+    return '/usr/lib/php-zts/lib';
+}
+
+function getRuntimeModuledir(): string
+{
+    return '/usr/lib/' . CreatePackages::getPrefix() . '/modules';
 }
 
 function getConfdir(): string

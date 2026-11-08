@@ -1,11 +1,12 @@
-ARG ALMA_VERSION=10
+ARG ALMA_VERSION=8
 FROM almalinux:${ALMA_VERSION}
 
-ARG ALMA_VERSION=10
+ARG ALMA_VERSION=8
 ARG TARGETARCH
 ARG RPM_ARCH
 ARG UID=1000
 ARG GID=1000
+ARG BUILD_JOBS
 
 SHELL ["/bin/bash", "-c"]
 
@@ -30,7 +31,7 @@ RUN dnf -y install epel-release dnf-plugins-core && \
         git jq gzip which sudo xz tar zstd curl \
         python3 python3-requests \
         bison flex autoconf automake gettext-devel libtool pkgconfig \
-        gcc gcc-c++ glibc-devel zlib-devel nasm gperf
+        gcc gcc-c++ glibc-devel zlib-devel nasm gperf patchelf libabigail
 
 RUN if [[ "${ALMA_VERSION}" == "8" || "${ALMA_VERSION}" == "9" ]]; then \
         dnf -y install '@ruby:3.3' rubygems ruby-devel; \
@@ -42,9 +43,9 @@ RUN if [[ "${ALMA_VERSION}" == "8" || "${ALMA_VERSION}" == "9" ]]; then \
 RUN if [[ "${ALMA_VERSION}" == "9" || "${ALMA_VERSION}" == "10" ]]; then \
         dnf -y install re2c; \
     else \
-        dnf -y install python39 && \
+        dnf -y install python39 python39-pyyaml python39-requests dpkg && \
         curl -L https://github.com/skvadrik/re2c/releases/download/4.3/re2c-4.3.tar.xz | tar xJ && \
-        cd re2c-4.3 && ./configure && make -j"$(nproc)" && make install && cd .. && rm -rf re2c-4.3; \
+        cd re2c-4.3 && ./configure && make -j"${BUILD_JOBS:-$(nproc)}" && make install && cd .. && rm -rf re2c-4.3; \
     fi
 
 RUN curl -o cmake.tar.gz -fsSL "https://github.com/Kitware/CMake/releases/download/v3.31.4/cmake-3.31.4-linux-$(uname -m).tar.gz" && \
@@ -93,7 +94,7 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
         cd /tmp/binutils-${BINUTILS_VERSION} && mkdir build && cd build && \
         ../configure --prefix=/opt/gcc --disable-multilib --disable-nls --with-system-zlib \
             --enable-plugins --enable-ld=default --disable-gprofng && \
-        make -j"$(nproc)" && make install-strip && \
+        make -j"${BUILD_JOBS:-$(nproc)}" && make install-strip && \
         cd / && rm -rf /tmp/binutils-${BINUTILS_VERSION} && \
         curl -fsSL --retry 5 https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz | tar -xJ -C /tmp && \
         cd /tmp/gcc-${GCC_VERSION} && \
@@ -103,22 +104,18 @@ RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
             --enable-checking=release --enable-languages=c,c++ --with-system-zlib \
             --with-as=/opt/gcc/bin/as --with-ld=/opt/gcc/bin/ld \
             --enable-default-pie --with-pkgversion="static-php GCC" && \
-        make -j"$(nproc)" && \
+        make -j"${BUILD_JOBS:-$(nproc)}" CFLAGS_FOR_TARGET='-g -O2' CXXFLAGS_FOR_TARGET='-g -O2' LIBGCC2_DEBUG_CFLAGS='-g' && \
         make install-strip && \
+        make install-target && \
+        install -Dm644 ../COPYING3 /opt/gcc/share/licenses/gcc/COPYING3 && \
+        install -m644 ../COPYING.RUNTIME /opt/gcc/share/licenses/gcc/COPYING.RUNTIME && \
         cd / && rm -rf /tmp/gcc-${GCC_VERSION}; \
     fi
 
-# libstdc++.so dev-symlink becomes a linker script INPUT(libstdc++.a) so -lstdc++ links
-# gcc 16's C++ runtime statically: shipped artifacts then depend only on the system
-# glibc/libgcc_s (built on the oldest glibc, so no too-new symbol versions can leak in).
-# The assertions fail the image build if the toolchain regresses.
-RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.a" ]; then \
-            rm -f "$d/libstdc++.so" && \
-            printf 'INPUT(libstdc++.a)\n' > "$d/libstdc++.so"; \
-        fi; \
-    done && \
-    ln -sf gcc /opt/gcc/bin/cc && \
+COPY bin/build-gcc-runtime /usr/local/bin/build-gcc-runtime
+RUN GCC_VERSION="${GCC_VERSION}" SPP_GCC_BUILD_JOBS="${BUILD_JOBS:-$(nproc)}" /usr/local/bin/build-gcc-runtime
+
+RUN ln -sf gcc /opt/gcc/bin/cc && \
     echo 'export PATH=/opt/gcc/bin:$PATH' > /etc/profile.d/gcc16.sh && \
     command -v gcc | grep -q /opt/gcc && \
     gcc -dumpfullversion | tee /dev/stderr | grep -qx "${GCC_VERSION}" && \
@@ -127,8 +124,10 @@ RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
     gcc /tmp/cc-check.c -o /tmp/cc-check && /tmp/cc-check && \
     ! readelf -ld /tmp/cc-check | grep -qE 'linuxbrew|/opt/gcc' && \
     printf '#include <string>\nint main(){ return std::string("x").size() != 1; }\n' > /tmp/cxx-check.cpp && \
-    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && /tmp/cxx-check && \
-    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc|libstdc\+\+' && \
+    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && \
+    LD_LIBRARY_PATH="$(dirname "$(g++ -print-file-name=libstdc++.so.6)")" /tmp/cxx-check && \
+    readelf -d /tmp/cxx-check | grep -q 'libstdc++' && \
+    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc' && \
     rm -f /tmp/cc-check* /tmp/cxx-check*
 
 # Pre-install SPC's go-xcaddy package so workflows don't redownload it.

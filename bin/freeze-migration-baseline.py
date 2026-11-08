@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Freeze genuine published packages for native static-to-shared upgrade tests."""
+
+import argparse
+import ast
+import base64
+import gzip
+import hashlib
+import io
+import json
+import lzma
+import os
+from pathlib import Path
+import re
+import runpy
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+import zlib
+
+
+AGENT = 'APT-HTTP/1.3 (2.6.1)'
+DEFAULT_PROFILE = 'cli,cgi,fpm,embed,devel,curl,fileinfo,pdo,pdo_sqlite,sqlite3,pgsql,pdo_pgsql,imagick,intl,frankenphp'
+
+
+def fetch(url):
+    request = urllib.request.Request(url, headers={'User-Agent': AGENT})
+    with urllib.request.urlopen(request, timeout=90) as response:
+        return response.read()
+
+
+def decompress(data):
+    if data.startswith(b'\x1f\x8b'):
+        return gzip.decompress(data)
+    if data.startswith(b'\xfd7zXZ'):
+        return lzma.decompress(data)
+    if data.startswith(b'\x28\xb5\x2f\xfd'):
+        return subprocess.check_output(['zstd', '-dc'], input=data)
+    return data
+
+
+def paragraphs(text):
+    for block in re.split(r'\n\s*\n', text.strip()):
+        fields = {}
+        for line in block.splitlines():
+            if line[:1].isspace():
+                continue
+            key, separator, value = line.partition(':')
+            if separator:
+                fields[key] = value.strip()
+        if fields:
+            yield fields
+
+
+def rpm_parser():
+    path = Path(__file__).resolve().parents[1] / 'bin/createrepo_static'
+    tree = ast.parse(path.read_text())
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in ('parse_rpm_info', 'php_stream')]
+    scope = {'os': os, 're': re}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), 'exec'), scope)
+    return scope['parse_rpm_info']
+
+
+def rpm_index(base, architecture, php):
+    repomd = fetch(base + 'repodata/repomd.xml')
+    root = ET.fromstring(repomd)
+    ns = {'r': 'http://linux.duke.edu/metadata/repo'}
+    metadata = {'repomd.xml': repomd}
+    primary = None
+    for entry in root.findall('r:data', ns):
+        href = entry.find('r:location', ns).get('href')
+        content = fetch(urllib.parse.urljoin(base, href))
+        checksum = entry.find('r:checksum', ns)
+        if hashlib.new(checksum.get('type'), content).hexdigest() != checksum.text:
+            raise RuntimeError('Published RPM metadata checksum mismatch: ' + href)
+        metadata[Path(href).name] = content
+        if entry.get('type') == 'primary':
+            primary = ET.fromstring(decompress(content))
+    if primary is None:
+        raise RuntimeError('Published RPM repository has no primary metadata')
+    ns = {'c': 'http://linux.duke.edu/metadata/common'}
+    parse = rpm_parser()
+    packages = []
+    for entry in primary.findall('c:package', ns):
+        href = entry.find('c:location', ns).get('href')
+        parsed = parse(Path(href).name)
+        if not parsed or parsed[4] not in (php, 'common', 'libraries'):
+            continue
+        arch = entry.findtext('c:arch', namespaces=ns)
+        if arch not in (architecture, 'noarch'):
+            continue
+        version = entry.find('c:version', ns)
+        checksum = entry.find('c:checksum', ns)
+        rpm_ns = {'c': ns['c'], 'r': 'http://linux.duke.edu/metadata/rpm'}
+        requires = [item.get('name') for item in entry.findall('c:format/r:requires/r:entry', rpm_ns)]
+        provides = [item.get('name') for item in entry.findall('c:format/r:provides/r:entry', rpm_ns)]
+        packages.append({'name': entry.findtext('c:name', namespaces=ns),
+                         'version': version.get('ver') + '-' + version.get('rel'),
+                         'epoch': version.get('epoch', '0'), 'architecture': arch,
+                         'requires': requires, 'provides': provides,
+                         'publication_url': urllib.parse.urljoin(base, href),
+                         'published_checksum': {'algorithm': checksum.get('type'), 'value': checksum.text}})
+    return packages, metadata, []
+
+
+def deb_index(base, architecture):
+    relative = 'dists/php-zts/main/binary-' + architecture + '/Packages'
+    data = fetch(base + relative)
+    packages = []
+    for fields in paragraphs(data.decode()):
+        if fields.get('Architecture') not in (architecture, 'all'):
+            continue
+        names = lambda value: re.findall(r'\b(?:php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
+        packages.append({'name': fields['Package'], 'version': fields['Version'],
+                         'architecture': fields['Architecture'],
+                         'requires': names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
+                         'provides': names(fields.get('Provides', '')),
+                         'publication_url': urllib.parse.urljoin(base, fields['Filename']),
+                         'published_checksum': {'algorithm': 'sha256', 'value': fields['SHA256']}})
+    key = fetch(base + 'repository.key')
+    return packages, {'Packages': data}, [('repository.asc', key)]
+
+
+def apk_index(base, architecture):
+    data = fetch(base + architecture + '/APKINDEX.tar.gz')
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+        with tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
+            text = next(archive.extractfile(member).read().decode() for member in archive
+                        if member.name == 'APKINDEX')
+    packages = []
+    for fields in paragraphs(text):
+        if fields.get('A') not in (architecture, 'noarch'):
+            continue
+        filename = fields['P'] + '-' + fields['V'] + '.apk'
+        dependency_names = lambda value: [re.split(r'[<>=~]', item, 1)[0] for item in value.split() if not item.startswith('!')]
+        packages.append({'name': fields['P'], 'version': fields['V'], 'architecture': fields['A'],
+                         'requires': dependency_names(fields.get('D', '')),
+                         'provides': dependency_names(fields.get('p', '')),
+                         'publication_url': base + architecture + '/' + filename,
+                         'published_checksum': {'algorithm': 'apk-control-sha1', 'value': fields['C']}})
+    key_url = base.split('/alpine/')[0] + '/alpine/key'
+    return packages, {'APKINDEX.tar.gz': data}, [('repository.rsa.pub', fetch(key_url))]
+
+
+def apk_control_checksum(data):
+    remaining = data
+    while remaining:
+        member = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        uncompressed = member.decompress(remaining) + member.flush()
+        if not member.eof:
+            raise RuntimeError('Truncated APK gzip member')
+        consumed = len(remaining) - len(member.unused_data)
+        with tarfile.open(fileobj=io.BytesIO(uncompressed), mode='r:') as archive:
+            if any(item.name == '.PKGINFO' for item in archive):
+                return 'Q1' + base64.b64encode(hashlib.sha1(remaining[:consumed]).digest()).decode()
+        remaining = member.unused_data
+    raise RuntimeError('APK has no control member')
+
+
+def newer(kind, candidate, previous):
+    if kind == 'rpm':
+        import rpm
+        return rpm.labelCompare((candidate.get('epoch', '0'), *candidate['version'].rsplit('-', 1)),
+                                (previous.get('epoch', '0'), *previous['version'].rsplit('-', 1))) > 0
+    if kind == 'deb':
+        result = subprocess.run(['dpkg', '--compare-versions', candidate['version'], 'gt', previous['version']])
+        if result.returncode not in (0, 1):
+            raise RuntimeError('Native DEB version comparison failed')
+        return result.returncode == 0
+    compared = subprocess.check_output(['apk', 'version', '-t', candidate['version'], previous['version']], text=True).strip()
+    if compared not in ('<', '=', '>'):
+        raise RuntimeError('Native APK version comparison failed')
+    return compared == '>'
+
+
+def latest_packages(kind, inventory):
+    latest = {}
+    for package in inventory:
+        previous = latest.get(package['name'])
+        if previous is None or newer(kind, package, previous):
+            latest[package['name']] = package
+    return latest
+
+
+def select_packages(kind, inventory, profile, include_debug=False):
+    latest = latest_packages(kind, inventory)
+    def wanted(name):
+        if 'all' not in profile:
+            return name.removeprefix('php-zts-').replace('_', '-') in profile
+        managed = name.startswith('php-zts-') or name in ('php-zts', 'frankenphp', 'pie-zts')
+        return managed and (include_debug or not name.endswith(('-debuginfo', '-dbgsym')))
+    selected = {name: package for name, package in latest.items() if wanted(name)}
+    providers = {}
+    for package in latest.values():
+        for capability in [package['name'], *package.get('provides', [])]:
+            providers.setdefault(capability, {})[package['name']] = package
+    pending = list(selected.values())
+    while pending:
+        package = pending.pop()
+        for dependency in package.get('requires', []):
+            if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
+                continue
+            choices = list(providers.get(dependency, {}).values())
+            if len(choices) != 1:
+                raise RuntimeError('Missing or ambiguous published managed dependency: ' + dependency)
+            provider = choices[0]
+            if provider['name'] not in selected:
+                selected[provider['name']] = provider
+                pending.append(provider)
+    return selected
+
+
+def download_package(package, kind, output, stage):
+    filename = Path(urllib.parse.urlparse(package['publication_url']).path).name
+    destination = output / 'artifacts' / filename
+    destination.parent.mkdir(exist_ok=True)
+    data = destination.read_bytes() if destination.exists() else fetch(package['publication_url'])
+    expected = package['published_checksum']
+    checksum = apk_control_checksum(data) if kind == 'apk' else hashlib.new(expected['algorithm'], data).hexdigest()
+    if checksum != expected['value']:
+        raise RuntimeError('Published package checksum mismatch: ' + package['publication_url'])
+    if not destination.exists():
+        temporary_file = stage / filename
+        temporary_file.write_bytes(data)
+        shutil.copy2(temporary_file, destination)
+        temporary_file.unlink()
+    return dict(package, path=str(destination.relative_to(output)), sha256=hashlib.sha256(data).hexdigest())
+
+
+def freeze(args):
+    architecture = ('aarch64' if args.arch == 'arm64' else 'x86_64')
+    if args.type == 'deb':
+        architecture = 'arm64' if args.arch == 'arm64' else 'amd64'
+    owner = args.php.replace('.', '')
+    if args.type == 'rpm':
+        base = (args.base_url or f'https://rpm.henderkes.com/{architecture}/{args.el}/').rstrip('/') + '/'
+        inventory, metadata, keys = rpm_index(base, architecture, args.php)
+    else:
+        suffix = 'debian/' if args.type == 'deb' else 'alpine/main/php-zts/'
+        base = (args.base_url or f'https://pkg.henderkes.com/api/packages/{owner}/' + suffix).rstrip('/') + '/'
+        inventory, metadata, keys = (deb_index if args.type == 'deb' else apk_index)(base, architecture)
+    profile = {name.strip().removeprefix('php-zts-').replace('_', '-') for name in args.profile.split(',') if name.strip()}
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
+        stage = Path(temporary)
+        selected = select_packages(args.type, inventory, profile, args.include_debug)
+        if 'php-zts-cli' not in selected:
+            raise RuntimeError('Published baseline has no matching CLI package')
+        for name, content in metadata.items():
+            target = output / 'metadata' / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        key_paths = []
+        for name, content in keys:
+            target = output / 'keys' / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            key_paths.append(str(target.relative_to(output)))
+        packages = []
+        for package in selected.values():
+            packages.append(download_package(package, args.type, output, stage))
+        result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
+                  'origin': {'publication_url': base, 'real_published': True},
+                  'packages': packages, 'published_packages': inventory, 'keys': key_paths,
+                  'selection': {'profile': args.profile, 'complete': 'all' in profile,
+                                'include_debug': args.include_debug,
+                                'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},
+                  'repository': {'publication_url': base, 'metadata': ['metadata/' + name for name in metadata]}}
+        (output / 'baseline.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({'baseline': str(output / 'baseline.json'), 'packages': len(packages),
+                      'published_inventory': len(inventory)}))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
+    parser.add_argument('--php', choices=('8.2', '8.3', '8.4', '8.5', '8.6'), required=True)
+    parser.add_argument('--arch', choices=('x86_64', 'arm64'), required=True)
+    parser.add_argument('--el', choices=('el8', 'el9', 'el10'), default='el8')
+    parser.add_argument('--base-url')
+    parser.add_argument('--profile', default=DEFAULT_PROFILE)
+    parser.add_argument('--include-debug', action='store_true', help='Include debug packages with --profile=all')
+    parser.add_argument('--output', type=Path, required=True)
+    freeze(parser.parse_args())
+
+
+if __name__ == '__main__':
+    main()

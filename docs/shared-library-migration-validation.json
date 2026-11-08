@@ -1,0 +1,281 @@
+{
+  "schema": 1,
+  "kind": "el8-shared-migration-native-validation",
+  "generated_at": "2026-10-26T10:07:07.496912+00:00",
+  "complete": true,
+  "scope": {
+    "architecture": "x86_64",
+    "native_containers": true,
+    "php_sources": {
+      "8.2": "8.2.35",
+      "8.6": "8.6.0RC4"
+    },
+    "unique_format_stream_cohorts": 6,
+    "additional_compatibility": [
+      "AlmaLinux 9 CLI",
+      "AlmaLinux 10 CLI"
+    ],
+    "aarch64": "Deferred by the user; not validated in this phase.",
+    "publication": "Local preparation only. No pushes or remote repository/package updates.",
+    "signing": "Disposable signed local mirrors trusted before installing genuine published baseline archives.",
+    "kernel": "Containers share the host kernel; this does not establish minimum-kernel compatibility."
+  },
+  "cohorts": [
+    {
+      "format": "rpm",
+      "php_stream": "8.2",
+      "runtime": "AlmaLinux 8",
+      "passed": true,
+      "archives": 313,
+      "ordinary_upgrade_profiles": 83,
+      "archive_inventory_sha256": "f85f6c7813cc23d6a15ef42763b04c35ba3cf899945bfdae8fabe47d84765cf8",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/franken-provides-r1/rpm/x86_64/8.2/ready.json",
+        "sha256": "1bba39480792b06400b47fe87563899ca3e1c1cea383b3c899f61f90dc93bbb6"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-rpm-8.2-complete.json",
+        "sha256": "c6450b7b8c0124ed24b00cfe8d775c44ed7057f59bae08001140ea24e718d0dc"
+      },
+      "coverage": "Genuine old static RPMs through ordinary dnfupgrade at unchangedEL8URL; individual+disabled+fresh cases, native default trust, real running/stopped systemd core/library/noop checks; no production publication."
+    },
+    {
+      "format": "rpm",
+      "php_stream": "8.6",
+      "runtime": "AlmaLinux 8",
+      "passed": true,
+      "archives": 297,
+      "ordinary_upgrade_profiles": 75,
+      "archive_inventory_sha256": "0cb6b77a2560de85d27e13484fe2a2da96e55790631052fdf8119800f3d8dcf7",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/franken-provides-r1/rpm/x86_64/8.6/ready.json",
+        "sha256": "8d35264c6491aac3b22fed761c1f21cffb415027b02421a46d7ea0d818f8cc67"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-rpm-8.6-complete.json",
+        "sha256": "af250486a5adef15d4327ba407e5bfaf909d493e90588039fbfac4016187b10d"
+      },
+      "coverage": "Native genuine static-to-shared ordinary dnfupgrade; full common/individual/disabled/fresh coverage and all-SAPI weakoptout on EL8, unchanged old EL9/EL10 URL CLI compatibility; RPM82 same operational runtime/layout TLS+systemd proof reused; no public actions."
+    },
+    {
+      "format": "deb",
+      "php_stream": "8.2",
+      "runtime": "Debian 11",
+      "passed": true,
+      "archives": 313,
+      "ordinary_upgrade_profiles": 83,
+      "archive_inventory_sha256": "905c56d7222dfdfbe785e6851e0faffd78fa60cf98c55cbb71b27598fead3ce5",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/deb-services-r1/deb/x86_64/8.2/ready.json",
+        "sha256": "c6c19b46feb456bada2bdc09b55335b67572e092b3a700b5fce5e09683e75fc3"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-deb-8.2-complete.json",
+        "sha256": "b18dc580f6db32cb755b8424d080cfedf25e6b682b16366d54aecaa480ea4831"
+      },
+      "coverage": "All83originalordinaryprofiles were executed.82passed;commonordinary/SAPI/devel/TLS passed beforeitsservicehook failed. The correctedmetadata-only successor thenpassed common/SAPI/devel andstrictactualservice/libraries/noop checks;308archives remainSHA-identical. No full83-profile repeat is claimed."
+    },
+    {
+      "format": "deb",
+      "php_stream": "8.6",
+      "runtime": "Debian 11",
+      "passed": true,
+      "archives": 297,
+      "ordinary_upgrade_profiles": 75,
+      "archive_inventory_sha256": "f44d06aa397abca074197dd266228fe517794672dddc0980ecac431be3adc730",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/deb-services-r1/deb/x86_64/8.6/ready.json",
+        "sha256": "ab890c7c34cba8b29d80410aa3c40c37d6f67be80c1c2ee56d4da1a9f4cfa20c"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-deb-8.6-services-successor-complete.json",
+        "sha256": "a8a0e7b66e8aba8c838f75ecf79602b65e5302f24b67607e5a80656c2dca8d39"
+      },
+      "coverage": "The75-profileparentproof includesallindividual/fresh/disabledcases andweakoptout;292parentarchives remainidentical. Newmetadata-onlysuccessor passedtargetedcommon/SAPI/devel. UniqueDebianTLS/realservice/library-onlyprooffromcorrectedPHP8.2 isreusedwith137identicalSDK/layoutarchives. No full75profile/servicesrepeatclaimed."
+    },
+    {
+      "format": "apk",
+      "php_stream": "8.2",
+      "runtime": "Alpine 3.21",
+      "passed": true,
+      "archives": 314,
+      "ordinary_upgrade_profiles": 84,
+      "archive_inventory_sha256": "8b381a804dbe41ba36a90e59fee75546dc2007f1d130e1df99c57497ea61f279",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/apk/x86_64/8.2/ready.json",
+        "sha256": "bebd777159c8e07564df496bd2e600a947f6397d0cf55be7d39fa4440f6f691e"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-apk-8.2-complete.json",
+        "sha256": "8698ec6f82b14d63f8538d67a1bbb5e67fea2ad974887e20da37494e60b056b7"
+      },
+      "coverage": "Actual genuine-static-to-shared upgrades through unchanged signed local URL; default recommendations, all individual optional packages, disabled INIs, TLS native trust, real OpenRC lifecycle and compatible library-only updates; production publication unchanged."
+    },
+    {
+      "format": "apk",
+      "php_stream": "8.6",
+      "runtime": "Alpine 3.21",
+      "passed": true,
+      "archives": 298,
+      "ordinary_upgrade_profiles": 75,
+      "archive_inventory_sha256": "11eadadb21e72200b7465eb1711f212f1f1a0ba55abaf029a8dcd413634383ef",
+      "ready": {
+        "path": "dist/migration-implementation-2026-10-25/packages/apk/x86_64/8.6/ready.json",
+        "sha256": "3064245c04ca2ba95170e7d5bcb94a76a94656f536824e0e7752ebd529756b4a"
+      },
+      "native_result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-apk-8.6-complete.json",
+        "sha256": "6098179bc96a030f36c47ff42b8f99e3826593a77edefd1787e3e703fd2ce4f0"
+      },
+      "coverage": "See the bound native result."
+    }
+  ],
+  "shared_libraries_between_streams": {
+    "rpm": {
+      "identical_library_archives": 136,
+      "layout_archive_identical": false,
+      "layout_payload_scripts_triggers_and_relationships_identical": true,
+      "archive_difference": "Only local recovery-package build provenance, timestamps and derived hashes differ.",
+      "layout_evidence": {
+        "path": "dist/migration-implementation-2026-10-25/validation/rpm-runtime-layout-raw-comparison.json",
+        "sha256": "4ffcded82acf5aa43017d5eec295c05f8d8b8d9dbd5176eed28ea03b527c4779"
+      }
+    },
+    "deb": {
+      "identical_library_archives": 136,
+      "layout_archive_identical": true
+    },
+    "apk": {
+      "identical_library_archives": 136,
+      "layout_archive_identical": true
+    }
+  },
+  "ordinary_upgrade_profiles": 475,
+  "compatibility": [
+    {
+      "runtime": "AlmaLinux 9",
+      "php_stream": "8.6",
+      "profile": "CLI",
+      "passed": true,
+      "result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-rpm-8.6-alma9-focused.json",
+        "sha256": "2298533c410737dcfdbb2af1fdf6016c2aed90eafe9e180011070973f7973ca8"
+      }
+    },
+    {
+      "runtime": "AlmaLinux 10",
+      "php_stream": "8.6",
+      "profile": "CLI",
+      "passed": true,
+      "result": {
+        "path": "dist/migration-implementation-2026-10-25/validation/native-rpm-8.6-alma10-resumed.json",
+        "sha256": "fc6c11f189458b3284a18a75deae37edbb35ed1dab8d22f005c3cdba390c297d"
+      },
+      "final_cohort_carryover": {
+        "path": "dist/migration-implementation-2026-10-25/validation/alma10-final-cohort-carryover.json",
+        "sha256": "cbd025be5e3db6524e5553d9dac7928bb49d9cce23de0039eeced1b1f7c454de"
+      }
+    }
+  ],
+  "single_rpm_repository_assembly": {
+    "path": "dist/migration-implementation-2026-10-25/validation/rpm-single-cohort-assembly.json",
+    "sha256": "d7ac1510422549c1df7e5bfb39ed40b5de0c8d89a5ea1dc4673f164e166bf4cb"
+  },
+  "common_glibc_consumer_elf_debug_files": {
+    "8.2": 174,
+    "8.6": 158
+  },
+  "elf_identity_evidence": [
+    {
+      "path": "dist/migration-implementation-2026-10-25/packages/final-cross-format-consumers-8.2.json",
+      "sha256": "16569df436fb8b1932427dddb19bcb3f20a81b6f00b5ea2c26b20376dce825aa"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/packages/final-cross-format-consumers-8.6.json",
+      "sha256": "5fb61b98e4844418c6d0363b8c66e8bb915acd8372ed18c1b2975c160dbf4a59"
+    }
+  ],
+  "incremental_evidence": [
+    {
+      "path": "dist/migration-implementation-2026-10-25/validation/incremental-native-compile-counters.json",
+      "sha256": "49bec011a3da993547d3b23af0a0c0495cce3f6a5ba9b2949be64b9fa571ea3e"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/sdk-import/final-approval.json",
+      "sha256": "9933c8bc43dba5469c476e9ca30e17100c0d0302b729c4ad2fba107a3b28a1ce"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/alpine/finalization/proof.json",
+      "sha256": "430091706f6d5f1ad92523d7891c8e90ad641a3da95c59080ab29724a0c81ebe"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/gcc-runtime/cxx-rebuild-state.json",
+      "sha256": "38cf95645e16af10935e18b87ea6f040aed19d889ebe6b3add6ed9fdb12d364b"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/sdk-import/completed-rebuild-input-receipt.json",
+      "sha256": "895aaf398a65993f12d24d2d2e12b14e174c86129f3a32a79f4809ef553ce50e"
+    },
+    {
+      "path": "dist/migration-implementation-2026-10-25/tests/source-plan-cache.json",
+      "sha256": "448d5e771f3c3916667d2e53bf8b373a484c5004d65f0c6063a121e2d082a91d"
+    }
+  ],
+  "incremental_scope": {
+    "real_sdk_selection": "Actual unchanged automatic/manual SDK selections select zero ordinary libraries and preserve managed outputs. These receipts are not independent compiler invocation-counter traces.",
+    "actual_selective_repair": "13 necessary C++ library repairs completed while54other providers and367protected outputs stayed unchanged.",
+    "native_execution_fixture": "Three tiny real DSOs verify compatible root-only compilation and pending-ABI-marker reverse-consumer expansion; it is not a real upstream source-release or automatic typed-ABI discovery experiment."
+  },
+  "known_php86_skips": [
+    "mysqlnd_ed25519",
+    "mysqlnd_parsec",
+    "sqlsrv",
+    "pdo_sqlsrv",
+    "redis",
+    "spx",
+    "swoole"
+  ],
+  "spc_reference": "fbff6898d85b56a172aedc47051fab09939c2a97",
+  "spc_reference_publicly_available": false,
+  "code_fixes_validated": [
+    "Portable installed phpize/php-config sed path for Debian11.",
+    "Selected FrankenPHP debug companions are replaced during partial consumer reuse.",
+    "FrankenPHP RPM self-provides retain native full-EVR conflict semantics.",
+    "Debian maintainer scripts preserve native configure arguments and queue deferred service refresh."
+  ],
+  "normal_upgrade_commands": {
+    "rpm": "dnf upgrade",
+    "deb": "apt update && apt upgrade",
+    "deb_scripts": "apt-get update && apt-get upgrade --with-new-pkgs",
+    "apk": "apk update && apk upgrade"
+  },
+  "verified_implementation_commit": "09f2d94",
+  "disk_budget": {
+    "schema": 1,
+    "checked_at": "2026-10-26T10:16:45.496450+00:00",
+    "state": "final-retained-artifacts-after-disposable-cleanup",
+    "allocated_bytes": 104977076224,
+    "measurement": [
+      "bounded384MiB1CPUdocker",
+      "du",
+      "-sx",
+      "-B1",
+      "/task"
+    ],
+    "task_docker_allowance_bytes": 10000000000,
+    "artifacts_plus_docker_allowance_bytes": 114977076224,
+    "requested_working_budget_bytes": 120000000000,
+    "all_disposable_test_and_packaging_resources_cleaned": true,
+    "note": "Docker allowance is conservative budgeting, not a separate measurement of shared Docker cache. Existing user data/containers and reusable SDK/build images are preserved.",
+    "evidence": {
+      "path": "dist/migration-implementation-2026-10-25/resume/disk-final.json"
+    }
+  },
+  "cleanup": {
+    "complete": true,
+    "disposable_containers_networks_keys_mirrors_snapshots_removed": true,
+    "reusable_sdk_payloads_packages_and_user_containers_preserved": true,
+    "deferred_arm_preparation_preserved_stopped": true
+  },
+  "ci_source_prerequisite": "Hosted CI must be able to fetch the pinned SPC commit from its configured source. This task did not publish it."
+}

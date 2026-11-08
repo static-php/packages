@@ -1,464 +1,104 @@
-name: Build and upload Debian packages to Forgejo
+name: Build Debian packages through shared EL8 pipeline
 
 on:
     workflow_dispatch:
         inputs:
+            mode:
+                description: "Full manual build or incremental source build plan"
+                type: choice
+                options: [full, incremental]
+                default: full
+            libraries:
+                description: "Optional: shared library IDs (comma-separated)"
+                default: ""
             downloads_run_id:
-                description: "Optional: pin the spc-download run providing the source snapshot"
+                description: "Optional: pin the spc-download source snapshot"
+                default: ""
+            iteration:
+                description: "Optional: override package iteration"
+                default: ""
+            bump:
+                description: "Bump package revisions above published packages"
+                type: boolean
+                default: false
+            publish:
+                description: "Publish validated packages and reusable buildroot caches"
+                type: boolean
+                default: false
+            php_versions:
+                description: "Optional: PHP streams (comma-separated); ABI transitions include all affected streams"
+                default: ""
+            architectures:
+                description: "Optional: architectures (comma-separated)"
+                default: ""
+            packages:
+                description: "Optional: PHP package selection"
+                default: ""
+            debug_tmate:
+                description: "Open tmate on failure"
+                type: boolean
+                default: false
+    workflow_call:
+        inputs:
+            mode:
+                type: string
+                required: false
+                default: "full"
+            libraries:
+                type: string
+                required: false
+                default: ""
+            downloads_run_id:
+                type: string
                 required: false
                 default: ""
             iteration:
-                description: "Optional: override package iteration (integer). Leave empty for auto"
+                type: string
                 required: false
                 default: ""
             bump:
-                description: "Bump each package iteration to (latest published on the repo) + 1"
+                type: boolean
+                required: false
+                default: false
+            publish:
                 type: boolean
                 required: false
                 default: false
             php_versions:
-                description: "Optional: PHP versions (comma-separated, e.g., 8.2,8.5). Leave empty for all"
+                type: string
                 required: false
                 default: ""
             architectures:
-                description: "Optional: Architectures (comma-separated, e.g., amd64,arm64). Leave empty for all"
+                type: string
                 required: false
                 default: ""
             packages:
-                description: "Optional: override packages list. Leave empty for default"
+                type: string
                 required: false
                 default: ""
             debug_tmate:
-                description: "Open tmate session on failure"
                 type: boolean
                 required: false
                 default: false
-    repository_dispatch:
-        types: [spc-download]
 
 permissions:
-    contents: read
+    contents: write
     packages: read
+    actions: read
 
 jobs:
-    setup-matrix:
-        runs-on: ubuntu-24.04
-        permissions:
-            contents: read
-        outputs:
-            libs-pairs: ${{ steps.set-matrix.outputs.libs-pairs }}
-            gcc-php-versions: ${{ steps.set-matrix.outputs.gcc-php-versions }}
-            gcc-needed: ${{ steps.set-matrix.outputs.gcc-needed }}
-        steps:
-            -   name: Set up matrix
-                id: set-matrix
-                run: |
-                    default_php='["8.2","8.3","8.4","8.5","8.6"]'
-                    default_arch='["amd64","arm64"]'
-
-                    if [[ -n "${INPUTS_PHP_VERSIONS}" ]]; then
-                        php_versions=$(echo "${INPUTS_PHP_VERSIONS}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        php_versions=$default_php
-                    fi
-
-                    if [[ -n "${INPUTS_ARCHITECTURES}" ]]; then
-                        arch_versions=$(echo "${INPUTS_ARCHITECTURES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-                    else
-                        arch_versions=$default_arch
-                    fi
-
-                    # All PHP versions build with gcc; zig is only used for alpine/musl (separate workflow).
-                    gcc_php="$php_versions"
-
-                    gcc_needed=$(jq -nr --argjson p "$gcc_php" 'if ($p | length) > 0 then "true" else "false" end')
-
-                    libs_pairs=$(jq -nc --argjson arch "$arch_versions" '{include: [$arch[] as $r | {arch: $r}]}')
-
-                    echo "libs-pairs=$libs_pairs" >> $GITHUB_OUTPUT
-                    echo "gcc-php-versions=$gcc_php" >> $GITHUB_OUTPUT
-                    echo "gcc-needed=$gcc_needed" >> $GITHUB_OUTPUT
-                env:
-                    INPUTS_PHP_VERSIONS: ${{ inputs.php_versions }}
-                    INPUTS_ARCHITECTURES: ${{ inputs.architectures }}
-
-    build-libs-gcc:
-        needs: setup-matrix
-        if: ${{ needs.setup-matrix.outputs.gcc-needed == 'true' }}
-        name: Build libs gcc (${{ matrix.arch }})
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ghcr.io/static-php/packages-builder-debian:latest
-        permissions:
-            contents: write
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.setup-matrix.outputs.libs-pairs) }}
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            BASH_ENV: /tmp/gha-bashenv
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-
-            -   name: Set architecture variables
-                run: |
-                    if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-                      echo "RPM_ARCH=aarch64" >> $GITHUB_ENV
-                    else
-                      echo "RPM_ARCH=x86_64" >> $GITHUB_ENV
-                    fi
-
-            -   name: Compute buildroot cache key
-                id: cache-key
-                run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-deb-${{ matrix.arch }}-gcc-${WEEK}" >> $GITHUB_OUTPUT
-
-            -   name: Restore buildroot cache
-                id: cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-
-            -   name: Download artifact from spc-download.yml
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Prepare cache directories
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: composer config -g cache-dir
-
-            -   name: Cache Composer downloads
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Install vendor
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: composer install --no-interaction --prefer-dist --no-progress
-
-            -   name: Extract with permissions
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-
-            -   name: Build libs
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: bin/spp build --phpv=8.4 --type=deb --libs-only
-
-            -   name: Pack buildroot
-                if: steps.cache.outputs.cache-hit != 'true'
-                run: tar --zstd -cf buildroot.tar.zst buildroot
-
-            -   name: Save buildroot cache
-                if: steps.cache.outputs.cache-hit != 'true'
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: save
-                    key: ${{ steps.cache-key.outputs.key }}
-
-            -   name: Upload logs on failure
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: build-logs-libs-${{ matrix.arch }}-gcc
-                    path: log
-
-            -   name: Install tmate
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                run: |
-                    case "${RPM_ARCH}" in
-                      x86_64)  arch="amd64" ;;
-                      aarch64) arch="arm64v8" ;;
-                    esac
-                    dir="tmate-2.4.0-static-linux-$arch"
-                    curl -L "https://github.com/tmate-io/tmate/releases/download/2.4.0/$dir.tar.xz" | tar -xJ -O "$dir/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-
-            -   name: Setup tmate session
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                with:
-                    install-dependencies: false
-                    sudo: false
-                timeout-minutes: 30
-
-    compute-build-gcc-matrix:
-        needs: [setup-matrix, build-libs-gcc]
-        runs-on: ubuntu-24.04
-        if: ${{ !cancelled() && needs.setup-matrix.outputs.gcc-needed == 'true' }}
-        permissions:
-            actions: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Filter build matrix to arches with successful gcc libs
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    GCC_PHP: ${{ needs.setup-matrix.outputs.gcc-php-versions }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Build libs gcc \\("))) | .name' \
-                        | sed -E 's/^Build libs gcc \(([^)]+)\)$/\1/' \
-                        | sort -u)
-                    echo "Successful gcc libs arches:"
-                    printf '%s\n' "$succeeded"
-
-                    include=$(jq -nc --arg s "$succeeded" --argjson p "$GCC_PHP" '
-                        ($s | split("\n") | map(select(length > 0) | {arch: .})) as $arches |
-                        [ $arches[] as $a | $p[] as $php | $a + {"php-version": $php} ]
-                    ')
-                    count=$(jq 'length' <<< "$include")
-                    echo "Filtered combos: $count"
-                    printf '%s\n' "$include" | jq .
-
-                    if [[ "$count" -gt 0 ]]; then
-                        echo "any=true" >> $GITHUB_OUTPUT
-                    else
-                        echo "any=false" >> $GITHUB_OUTPUT
-                    fi
-                    echo "matrix={\"include\":$include}" >> $GITHUB_OUTPUT
-
-    build-gcc:
-        needs: [compute-build-gcc-matrix]
-        if: ${{ !cancelled() && needs.compute-build-gcc-matrix.outputs.any == 'true' }}
-        name: Build for ${{ matrix.arch }} PHP ${{ matrix.php-version }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        container:
-            image: ghcr.io/static-php/packages-builder-debian:latest
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        defaults:
-            run:
-                shell: bash
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-gcc-matrix.outputs.matrix) }}
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            BASH_ENV: /tmp/gha-bashenv
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ github.event_name != 'workflow_dispatch' || inputs.bump }}
-            PACKAGES: ${{ inputs.packages || '' }}
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-
-            -   name: Set architecture variables
-                run: |
-                    if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-                      echo "RPM_ARCH=aarch64" >> $GITHUB_ENV
-                    else
-                      echo "RPM_ARCH=x86_64" >> $GITHUB_ENV
-                    fi
-
-            -   name: Set PHP version short
-                run: |
-                    PHP_VERSION_SHORT=$(echo "${{ matrix.php-version }}" | tr -d '.')
-                    echo "PHP_VERSION_SHORT=$PHP_VERSION_SHORT" >> $GITHUB_ENV
-
-            -   name: Prepare cache directories
-                run: composer config -g cache-dir
-
-            -   name: Cache Composer downloads
-                uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-                with:
-                    path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
-                    restore-keys: |
-                        composer-
-
-            -   name: Install vendor
-                run: composer install --no-interaction --prefer-dist --no-progress
-
-            -   name: Download artifact from spc-download.yml
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ inputs.downloads_run_id }}
-
-            -   name: Extract with permissions
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
-
-            -   name: Compute buildroot cache key
-                id: cache-key
-                run: |
-                    set -euo pipefail
-                    WEEK=$(date -u +%G-%V)
-                    echo "key=buildroot-deb-${{ matrix.arch }}-gcc-${WEEK}" >> $GITHUB_OUTPUT
-
-            -   name: Restore buildroot cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.cache-key.outputs.key }}
-                    fail-on-cache-miss: true
-
-            -   name: Extract buildroot
-                run: |
-                    tar --zstd -xf buildroot.tar.zst
-                    rm buildroot.tar.zst
-
-            -   name: Build PHP packages
-                env:
-                    FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-                run: |
-                    php tests/package-versions.php --type=deb
-                    php tests/package-iterations.php
-                    python3 tests/upgrade-guards.py
-                    PACKAGES_FLAG=""
-                    if [[ -n "${{ env.PACKAGES }}" ]]; then
-                      PACKAGES_FLAG="--packages=${{ env.PACKAGES }}"
-                    fi
-                    ITERATION_FLAG=""
-                    if [[ -n "${ITERATION}" ]]; then
-                      ITERATION_FLAG="--iteration=${ITERATION}"
-                    fi
-                    BUMP_FLAG=""
-                    if [[ "${BUMP}" == "true" && -z "${ITERATION}" ]]; then
-                      BUMP_FLAG="--bump"
-                    fi
-                    bin/spp all --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb --debuginfo $ITERATION_FLAG $BUMP_FLAG $PACKAGES_FLAG
-
-            -   name: Test packages
-                run: |
-                    PACKAGES_FLAG=""
-                    if [[ -n "${{ env.PACKAGES }}" ]]; then
-                      PACKAGES_FLAG="--packages=${{ env.PACKAGES }}"
-                    fi
-                    bin/spp test --phpv=${{ matrix.php-version }} --prefix="-zts" --type=deb $PACKAGES_FLAG
-
-            -   name: Report skipped shared extensions
-                if: ${{ !cancelled() }}
-                run: |
-                    set -uo pipefail
-                    LABEL="${MATRIX_ARCH} php${MATRIX_PHP_VERSION}"
-                    MANIFEST=""
-                    for candidate in "build/${MATRIX_PHP_VERSION}/skipped-shared-extensions.json" "buildroot/skipped-shared-extensions.json"; do
-                      if [[ -f "$candidate" ]]; then
-                        MANIFEST="$candidate"
-                        break
-                      fi
-                    done
-
-                    if [[ -z "$MANIFEST" ]]; then
-                      echo "No skipped-shared-extensions manifest for ${LABEL}; nothing to report."
-                      exit 0
-                    fi
-
-                    if ! tolerant=$(jq -r 'if (.allow_shared_ext_failure // false) == true then "true" else "false" end' "$MANIFEST"); then
-                      echo "::warning::unreadable skipped-extension manifest at ${MANIFEST} (${LABEL})"
-                      exit 0
-                    fi
-
-                    entries=$(jq -r '(.skipped // [])[] | [(.extension // "?"), (.phase // "unknown"), ((.message // "") | gsub("[\r\n|]"; " "))] | @tsv' "$MANIFEST")
-                    if [[ -z "$entries" ]]; then
-                      echo "No shared extensions were skipped for ${LABEL} (allow_shared_ext_failure=${tolerant})."
-                      exit 0
-                    fi
-
-                    {
-                      echo "### Skipped shared extensions — ${LABEL}"
-                      echo ""
-                      echo "Manifest: \`${MANIFEST}\` (allow_shared_ext_failure=${tolerant})"
-                      echo ""
-                      echo "| Extension | Phase | Reason |"
-                      echo "| --- | --- | --- |"
-                    } >> "$GITHUB_STEP_SUMMARY"
-
-                    while IFS=$'\t' read -r ext phase message; do
-                      echo "| ${ext} | ${phase} | ${message} |" >> "$GITHUB_STEP_SUMMARY"
-                      echo "::warning::${LABEL}: skipped shared extension ${ext} (${phase}): ${message}"
-                    done <<< "$entries"
-                env:
-                    MATRIX_ARCH: ${{ matrix.arch }}
-                    MATRIX_PHP_VERSION: ${{ matrix.php-version }}
-
-            -   name: Upload logs on failure
-                if: ${{ failure() }}
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: build-logs-${{ matrix.arch }}-php${{ matrix.php-version }}
-                    path: log
-
-            -   name: Upload to Forgejo Host 1
-                id: upload-host-1
-                working-directory: dist/deb
-                continue-on-error: true
-                run: |
-                    echo "listing from host 1"
-                    ../../bin/forgejo-helper list debian "${{ env.PHP_VERSION_SHORT }}" "${{ secrets.FORGEJO_PASSWORD }}" "*.deb"
-                    echo "uploading to host 1"
-                    ../../bin/forgejo-helper upload debian "${{ env.PHP_VERSION_SHORT }}" "${{ secrets.FORGEJO_PASSWORD }}" "*.deb"
-
-            -   name: Upload to Forgejo Host 2
-                id: upload-host-2
-                working-directory: dist/deb
-                continue-on-error: true
-                run: |
-                    echo "listing from host 2"
-                    ../../bin/forgejo-helper --host=2 list debian "${{ env.PHP_VERSION_SHORT }}" "${{ secrets.FORGEJO_PASSWORD }}" "*.deb"
-                    echo "uploading to host 2"
-                    ../../bin/forgejo-helper --host=2 upload debian "${{ env.PHP_VERSION_SHORT }}" "${{ secrets.FORGEJO_PASSWORD }}" "*.deb"
-
-            -   name: Report upload failures
-                if: ${{ !cancelled() && (steps.upload-host-1.outcome == 'failure') }}
-                run: |
-                    echo "::error::Package uploads failed or were skipped; both Forgejo hosts were attempted."
-                    exit 1
-
-            -   name: Install tmate
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                run: |
-                    case "${RPM_ARCH}" in
-                      x86_64)  arch="amd64" ;;
-                      aarch64) arch="arm64v8" ;;
-                    esac
-                    dir="tmate-2.4.0-static-linux-$arch"
-                    curl -L "https://github.com/tmate-io/tmate/releases/download/2.4.0/$dir.tar.xz" | tar -xJ -O "$dir/tmate" > /usr/bin/tmate
-                    chmod +x /usr/bin/tmate
-
-            -   name: Setup tmate session
-                if: ${{ failure() && inputs.debug_tmate == true }}
-                uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3
-                with:
-                    install-dependencies: false
-                    sudo: false
-                timeout-minutes: 30
-
+    build:
+        name: Build shared EL8 RPM and DEB packages
+        uses: ./.github/workflows/build-rpm-modular-packages.yml
+        with:
+            mode: ${{ inputs.mode }}
+            libraries: ${{ inputs.libraries }}
+            downloads_run_id: ${{ inputs.downloads_run_id }}
+            iteration: ${{ inputs.iteration }}
+            bump: ${{ inputs.bump }}
+            publish: ${{ inputs.publish }}
+            php_versions: ${{ inputs.php_versions }}
+            architectures: ${{ inputs.architectures }}
+            packages: ${{ inputs.packages }}
+            debug_tmate: ${{ inputs.debug_tmate }}
+        secrets: inherit

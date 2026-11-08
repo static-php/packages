@@ -5,7 +5,7 @@ ARG RPM_ARCH
 ARG UID=1000
 ARG GID=1000
 
-ENV PATH=/opt/gcc/bin:${PATH}
+# Packaging and native installation tests consume the sealed EL8 payload.
 
 RUN if [ -z "${RPM_ARCH}" ]; then \
         case "${TARGETARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}" in \
@@ -19,7 +19,7 @@ RUN sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|
     apt-get update && \
     apt-get install -y ruby build-essential jq curl gzip sudo git gnupg tar zstd xz-utils python3 python3-requests \
         bison re2c flex autoconf automake autopoint libtool pkg-config nasm \
-        zlib1g-dev && \
+        zlib1g-dev patchelf abigail-tools && \
     apt-get upgrade -y && \
     gem install --no-document fpm
 
@@ -38,77 +38,5 @@ RUN U=$(id -un 1000 2>/dev/null || echo "") && \
         groupadd -g 1000 builder && useradd -m -u 1000 -g 1000 -s /bin/bash builder && U=builder; \
     fi && \
     echo "$U ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
-
-# GCC 16 toolchain, vanilla source build into /opt/gcc against the system glibc.
-# --enable-multiarch so the native build finds Debian's crt/headers in the multiarch dirs.
-# By default a prebuilt blob is fetched from the toolchain release;
-# .github/workflows/build-toolchain.yml publishes the blobs by passing TOOLCHAIN_URL=
-# (empty) to force this source path.
-ARG GCC_VERSION=16.2.0
-# binutils is bundled into /opt/gcc and gcc is pinned to it (--with-as/--with-ld): the
-# distro assembler predates the aarch64 armv9 extensions (bf16, sve2-aes, …) gcc 16 emits
-# for per-target SIMD dispatch (e.g. highway in libjxl), which otherwise fails to assemble.
-# Bump alongside GCC_VERSION as needed.
-ARG BINUTILS_VERSION=2.44
-ARG TOOLCHAIN_URL=https://github.com/static-php/packages/releases/download/toolchain-gcc-${GCC_VERSION}/gcc-${GCC_VERSION}-debian-%ARCH%.tar.zst
-RUN if [ -n "${TOOLCHAIN_URL}" ]; then \
-        curl -fsSL --retry 5 "$(echo "${TOOLCHAIN_URL}" | sed "s/%ARCH%/$(uname -m)/")" | zstd -dc | tar -xf - -C /; \
-    else \
-        curl -fsSL --retry 5 https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz | tar -xJ -C /tmp && \
-        cd /tmp/binutils-${BINUTILS_VERSION} && mkdir build && cd build && \
-        ../configure --prefix=/opt/gcc --disable-multilib --disable-nls --with-system-zlib \
-            --enable-plugins --enable-ld=default --disable-gprofng && \
-        make -j"$(nproc)" && make install-strip && \
-        cd / && rm -rf /tmp/binutils-${BINUTILS_VERSION} && \
-        curl -fsSL --retry 5 https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz | tar -xJ -C /tmp && \
-        cd /tmp/gcc-${GCC_VERSION} && \
-        contrib/download_prerequisites && \
-        mkdir build && cd build && \
-        ../configure --prefix=/opt/gcc --disable-multilib --disable-bootstrap --disable-nls \
-            --enable-checking=release --enable-languages=c,c++ --with-system-zlib \
-            --with-as=/opt/gcc/bin/as --with-ld=/opt/gcc/bin/ld \
-            --enable-default-pie --enable-multiarch --with-pkgversion="static-php GCC" && \
-        make -j"$(nproc)" && \
-        make install-strip && \
-        cd / && rm -rf /tmp/gcc-${GCC_VERSION}; \
-    fi
-
-# libstdc++.so dev-symlink becomes a linker script INPUT(libstdc++.a) so -lstdc++ links
-# gcc 16's C++ runtime statically: shipped artifacts then depend only on the system
-# glibc/libgcc_s (built on the oldest glibc, so no too-new symbol versions can leak in).
-# The assertions fail the image build if the toolchain regresses.
-RUN for d in /opt/gcc/lib64 /opt/gcc/lib; do \
-        if [ -e "$d/libstdc++.a" ]; then \
-            rm -f "$d/libstdc++.so" && \
-            printf 'INPUT(libstdc++.a)\n' > "$d/libstdc++.so"; \
-        fi; \
-    done && \
-    ln -sf gcc /opt/gcc/bin/cc && \
-    echo 'export PATH=/opt/gcc/bin:$PATH' > /etc/profile.d/gcc16.sh && \
-    command -v gcc | grep -q /opt/gcc && \
-    gcc -dumpfullversion | tee /dev/stderr | grep -qx "${GCC_VERSION}" && \
-    { gcc -print-prog-name=as | grep -qx /opt/gcc/bin/as || echo "WARN: gcc not using bundled /opt/gcc/bin/as — toolchain blob predates binutils bundling; republish via build-toolchain.yml (aarch64 needs it for gcc16 SVE2/bf16)"; } && \
-    echo 'int main(){return 0;}' > /tmp/cc-check.c && \
-    gcc /tmp/cc-check.c -o /tmp/cc-check && /tmp/cc-check && \
-    ! readelf -ld /tmp/cc-check | grep -qE 'linuxbrew|/opt/gcc' && \
-    printf '#include <string>\nint main(){ return std::string("x").size() != 1; }\n' > /tmp/cxx-check.cpp && \
-    g++ /tmp/cxx-check.cpp -o /tmp/cxx-check && /tmp/cxx-check && \
-    ! readelf -ld /tmp/cxx-check | grep -qE 'linuxbrew|/opt/gcc|libstdc\+\+' && \
-    rm -f /tmp/cc-check* /tmp/cxx-check*
-
-# Pre-install SPC's go-xcaddy package so workflows don't redownload it.
-ENV PKG_ROOT_PATH=/opt/spc-pkgroot
-COPY composer.json composer.lock /tmp/spc-bootstrap/
-RUN --mount=type=secret,id=github_token \
-    cd /tmp/spc-bootstrap && \
-    export GITHUB_TOKEN="$(cat /run/secrets/github_token 2>/dev/null || true)" && \
-    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt && \
-    mkdir -p src && \
-    composer install --no-interaction --prefer-dist --no-progress --no-scripts && \
-    php vendor/bin/spc install-pkg go-xcaddy && \
-    SPC_TOOLCHAIN='StaticPHP\Toolchain\GccNativeToolchain' SPC_LIBC=glibc php vendor/bin/spc doctor --auto-fix --debug && \
-    cp /tmp/spc-bootstrap/downloads/.cache.json "$PKG_ROOT_PATH/.cache.json" && \
-    rm -rf /tmp/spc-bootstrap /root/.composer /root/.cache && \
-    chown -R ${UID}:${GID} "$PKG_ROOT_PATH"
 
 WORKDIR /build

@@ -10,6 +10,7 @@ use staticphp\util\TwigRenderer;
 class extension implements package
 {
     private string $prefix;
+    private ?array $stateScripts = null;
 
     public function __construct(
         private readonly string $name,
@@ -115,7 +116,7 @@ class extension implements package
         $depends = array_merge($depends, $ordered);
 
         $versionedConflicts = CreatePackages::getVersionedConflicts('-' . $this->name);
-        return [
+        $config = [
             'config-files' => [
                 getConfdir() . '/conf.d/' . $this->prefix . $this->name . '.ini',
             ],
@@ -123,6 +124,9 @@ class extension implements package
             'provides' => [],
             'replaces' => $versionedConflicts,
             'conflicts' => $versionedConflicts,
+            'apk_scripts' => defined('SPP_TYPE') && SPP_TYPE === 'apk' && $this->isSharedExtension()
+                ? ['preupgrade' => $this->activationScripts()['before'], 'postupgrade' => $this->activationScripts()['after']]
+                : [],
             'files' => [
                 ...($this->getIniPath() ?
                     [$this->getIniPath() => getConfdir() . '/conf.d/' . $this->prefix . $this->name . '.ini']
@@ -134,6 +138,7 @@ class extension implements package
                 ),
             ]
         ];
+        return $config;
     }
 
     protected function getIniPath(): ?string
@@ -179,7 +184,54 @@ class extension implements package
 
     public function getFpmExtraArgs(): array
     {
-        return [];
+        if (!$this->isSharedExtension()) {
+            return [];
+        }
+        $scripts = $this->activationScripts();
+        return ['--before-install', $scripts['before'], '--before-upgrade', $scripts['before'],
+            '--after-install', $scripts['after'], '--after-upgrade', $scripts['after']];
+    }
+
+    private function activationScripts(): array
+    {
+        if ($this->stateScripts === null) {
+            $ini = getConfdir() . '/conf.d/' . $this->prefix . $this->name . '.ini';
+            $this->stateScripts = self::writeActivationScripts($ini,
+                '/run/php-zts-module-state/' . hash('sha256', $ini));
+        }
+        return $this->stateScripts;
+    }
+
+    private static function writeActivationScripts(string $ini, string $state): array
+    {
+        $variables = 'ini=' . escapeshellarg($ini) . "\nstate=" . escapeshellarg($state) . "\n"
+            . 'disabled="$ini.disabled"' . "\n";
+        $before = <<<'SH'
+umask 077
+if [ -f "$disabled" ] && { [ ! -e "$ini" ] || [ -f "$state/disabled" ]; }; then
+    mkdir -p "$state"
+    : > "$state/disabled"
+elif [ -f "$state/disabled" ]; then
+    rm -f "$state/disabled"
+    rmdir "$state" 2>/dev/null || :
+fi
+SH;
+        $after = <<<'SH'
+if [ -f "$state/disabled" ]; then
+    if [ -f "$disabled" ]; then rm -f "$ini"; fi
+    rm -f "$state/disabled"
+    rmdir "$state" 2>/dev/null || :
+fi
+SH;
+        $scripts = [];
+        foreach (['before' => $before, 'after' => $after] as $stage => $body) {
+            $path = TEMP_DIR . '/extension-state-' . hash('sha256', $ini) . '-' . $stage . '.sh';
+            if (file_put_contents($path, "#!/bin/sh\nset -eu\n" . $variables . $body . "\n") === false || !chmod($path, 0755)) {
+                throw new Exception('Cannot stage shared extension activation state script');
+            }
+            $scripts[$stage] = $path;
+        }
+        return $scripts;
     }
 
     public function getDebuginfoFpmConfig(): array
@@ -194,12 +246,13 @@ class extension implements package
         }
         $targetSo = getModuledir() . '/' . $this->name . $sharedLibrarySuffix . '.so';
         $target = '/usr/lib/debug' . $targetSo . '.debug';
-        return [
-            'depends' => [CreatePackages::getPrefix() . '-' . $this->name],
+        $config = [
+            'depends' => [$this->getName()],
             'files' => [
                 $src => $target,
             ],
         ];
+        return $config;
     }
 
     public function getName(): string

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Verify an existing sealed local producer payload before a partial rebuild."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def identity(path):
+    if path.is_symlink():
+        return {'symlink': os.readlink(path)}
+    return {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'mode': path.stat().st_mode & 0o777}
+
+
+def seed(root, payload, packages, source_cache, run_id):
+    subprocess.run(['php', str(Path(__file__).resolve().with_name('build-payload')), 'verify', '--root', str(payload)], check=True)
+    metadata_path = payload / 'build-payload.json'
+    record = json.loads(metadata_path.read_text())
+    if record.get('kind') != 'consumer':
+        raise RuntimeError('A local core seed requires a completed consumer payload')
+    shared = record['configuration'].get('shared-extensions', [])
+    shared = [name.strip() for name in shared.split(',')] if isinstance(shared, str) else shared
+    if not packages or set(packages) - (set(shared) | {'frankenphp'}):
+        raise RuntimeError('A local core seed can rebuild only recorded shared extensions or FrankenPHP')
+    shared_headers = {name.replace('-', '_') for name in shared}
+
+    def core(name):
+        if name.endswith('.bak'):
+            return False
+        if name.startswith('include/php/ext/') and Path(name).parts[3].replace('-', '_') in shared_headers:
+            return False
+        return (name.startswith(('include/php/', 'lib/php/build/'))
+                or re.fullmatch(r'bin/php(?:-cgi|-fpm|dbg|-config|ize)?', name)
+                or re.fullmatch(r'lib/libphp[^/]*\.(?:so(?:\.[^/]*)?|a|la)', name))
+
+    files = {}
+    for directory in ('bin', 'lib', 'include/php'):
+        if not (payload / directory).is_dir():
+            continue
+        for path in sorted((payload / directory).rglob('*')):
+            name = str(path.relative_to(payload))
+            if not (path.is_file() or path.is_symlink()) or not core(name):
+                continue
+            expected = identity(path)
+            actual = root / name
+            if not (actual.is_file() or actual.is_symlink()) or identity(actual) != expected:
+                raise RuntimeError('Local producer core differs from the sealed payload: ' + name)
+            if actual.is_symlink() and root not in actual.resolve().parents:
+                raise RuntimeError('Local core link leaves its buildroot: ' + name)
+            files[name] = expected
+    required = ['bin/php', 'bin/phpize', 'bin/php-config', 'include/php/Zend/zend_modules.h', 'lib/libphp.so']
+    if set(required) - files.keys():
+        raise RuntimeError('Local producer payload has an incomplete reusable core')
+    metadata_hash = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    provenance = root / 'provenance/local-core-seed' / metadata_hash[:16]
+    provenance.mkdir(parents=True, exist_ok=True)
+    metadata_copy = provenance / 'build-payload.json'
+    metadata_copy.write_bytes(metadata_path.read_bytes())
+    cache_bytes = source_cache.read_bytes()
+    cache = json.loads(cache_bytes)
+    (provenance / 'download-cache.json').write_bytes(cache_bytes)
+    source_records = {name: entry['source'] for name, entry in cache.items() if isinstance(entry, dict) and entry.get('source')}
+    recipe_files = {str(path.relative_to(root.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in sorted((root.parent / 'src/hook').glob('*.php'))}
+    source_hash = hashlib.sha256(cache_bytes).hexdigest()
+    receipt = {
+        'schema': 1, 'state': 'verified', 'origin': 'local-recorded-producer',
+        'key': digest({'metadata': metadata_hash, 'sources': source_hash, 'packages': sorted(packages)}),
+        'seed_key': digest(files), 'php_stream': '.'.join(record['php_version'].split('.')[:2]),
+        'rebuild_packages': sorted(packages), 'changed_components': sorted(packages),
+        'cached_metadata_path': str(metadata_copy.relative_to(root)), 'cached_metadata_sha256': metadata_hash,
+        'core_files': files, 'compiled_source_run_id': run_id,
+        'source_snapshot': {'path': str((provenance / 'download-cache.json').relative_to(root)),
+                            'sha256': source_hash, 'records': source_records, 'recipe_files': recipe_files},
+    }
+    (root / 'consumer-cache-seed.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+    return receipt
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--payload', type=Path, required=True)
+    parser.add_argument('--packages', required=True)
+    parser.add_argument('--source-cache', type=Path, required=True)
+    parser.add_argument('--source-run-id', required=True)
+    args = parser.parse_args()
+    packages = [name for name in args.packages.split(',') if name]
+    receipt = seed(args.root.resolve(strict=True), args.payload.resolve(strict=True), packages,
+                   args.source_cache.resolve(strict=True), args.source_run_id)
+    print(json.dumps({'state': receipt['state'], 'core_files': len(receipt['core_files']),
+                      'seed_key': receipt['seed_key'], 'rebuild_packages': receipt['rebuild_packages']}))
+
+
+if __name__ == '__main__':
+    main()

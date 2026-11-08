@@ -1,0 +1,130 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf 'Usage: %s <8.2|8.3|8.4|8.5|8.6>\n' "$0"
+    printf '%s\n' 'Configure the selected PHP ZTS repository, including its shared libraries. Run as root.'
+}
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+case ${1-} in
+    -h|--help) usage; exit 0 ;;
+esac
+[ "$#" -eq 1 ] || { usage >&2; exit 1; }
+case $1 in
+    8.[2-6]) version=$(printf '%s' "$1" | tr -d .) ;;
+    8[2-6]) version=$1 ;;
+    *) fail 'Choose an explicit PHP version from 8.2 through 8.6.' ;;
+esac
+
+root=${SPP_INSTALL_ROOT:-/}
+root=${root%/}
+case $root in
+    ''|/*) ;;
+    *) fail 'SPP_INSTALL_ROOT must be an absolute path.' ;;
+esac
+[ -n "$root" ] || [ "$(id -u)" -eq 0 ] || fail 'Run this script as root.'
+host=${SPP_FORGEJO_HOST:-https://pkg.henderkes.com}
+host=${host%/}
+case $host in
+    http://*|https://*) ;;
+    *) fail 'SPP_FORGEJO_HOST must be an HTTP or HTTPS URL.' ;;
+esac
+case $host in
+    *[[:space:]]*) fail 'SPP_FORGEJO_HOST must not contain whitespace.' ;;
+esac
+
+type=${SPP_INSTALL_TYPE:-}
+if [ -z "$type" ]; then
+    if [ -f "$root/etc/alpine-release" ]; then
+        type=apk
+    elif [ -f "$root/etc/debian_version" ]; then
+        type=deb
+    elif [ -f "$root/etc/redhat-release" ]; then
+        type=rpm
+    else
+        fail 'Supported systems are Debian/Ubuntu, Alpine Linux, and RHEL/AlmaLinux.'
+    fi
+fi
+case $type in
+    deb|apk|rpm) ;;
+    *) fail 'SPP_INSTALL_TYPE must be deb, apk, or rpm.' ;;
+esac
+command -v curl >/dev/null 2>&1 || fail 'curl is required.'
+
+temporary=$(mktemp -d)
+trap 'rm -rf "$temporary"' 0
+trap 'exit 1' HUP INT TERM
+
+fetch() {
+    curl -fLsS "$1" -o "$2"
+    [ -s "$2" ] || fail "Empty download: $1"
+}
+
+case $type in
+    deb)
+        for owner in "$version"; do
+            fetch "$host/api/packages/$owner/debian/repository.key" "$temporary/$owner.asc"
+            grep -q '^-----BEGIN PGP PUBLIC KEY BLOCK-----' "$temporary/$owner.asc" \
+                || fail "Invalid Debian repository key for $owner."
+        done
+        mkdir -p "$root/etc/apt/keyrings" "$root/etc/apt/sources.list.d"
+        for owner in "$version"; do
+            keyfile="/etc/apt/keyrings/henderkes$owner.asc"
+            install -m 0644 "$temporary/$owner.asc" "$root$keyfile"
+            printf 'deb [signed-by=%s] %s/api/packages/%s/debian php-zts main\n' \
+                "$keyfile" "$host" "$owner" > "$temporary/$owner.list"
+            install -m 0644 "$temporary/$owner.list" "$root/etc/apt/sources.list.d/henderkes$owner.list"
+        done
+        printf '%s\n' 'Repositories configured. Run apt-get update, then install or upgrade PHP ZTS.'
+        ;;
+    apk)
+        for owner in "$version"; do
+            mkdir "$temporary/$owner"
+            (cd "$temporary/$owner" && curl -fLsS -OJ "$host/api/packages/$owner/alpine/key")
+            set -- "$temporary/$owner"/*
+            [ "$#" -eq 1 ] && [ -s "$1" ] || fail "Missing Alpine repository key for $owner."
+            keyname=${1##*/}
+            case $keyname in
+                *[!a-zA-Z0-9_.@+-]*|.*) fail "Invalid Alpine key filename for $owner." ;;
+                *.rsa.pub) ;;
+                *) fail "Missing Alpine key filename for $owner." ;;
+            esac
+            grep -q '^-----BEGIN .*PUBLIC KEY-----' "$1" || fail "Invalid Alpine repository key for $owner."
+        done
+        mkdir -p "$root/etc/apk/keys"
+        repositories="$root/etc/apk/repositories"
+        [ ! -f "$repositories" ] || cat "$repositories" > "$temporary/repositories"
+        : >> "$temporary/repositories"
+        for owner in "$version"; do
+            set -- "$temporary/$owner"/*
+            install -m 0644 "$1" "$root/etc/apk/keys/${1##*/}"
+            repository="$host/api/packages/$owner/alpine/main/php-zts"
+            if ! grep -qxF "$repository" "$temporary/repositories"; then
+                printf '\n%s\n' "$repository" >> "$temporary/repositories"
+            fi
+        done
+        install -m 0644 "$temporary/repositories" "$repositories"
+        printf '%s\n' 'Repositories configured. Run apk update, then install or upgrade PHP ZTS.'
+        ;;
+    rpm)
+        rpm_host=${SPP_RPM_REPO_URL:-https://rpm.henderkes.com}
+        rpm_host=${rpm_host%/}
+        fetch "$rpm_host/" "$temporary/index"
+        repository_package=$(grep -o 'static-php-1-[0-9][0-9]*\.noarch\.rpm' "$temporary/index" \
+            | sort -Vu | tail -n 1)
+        [ -n "$repository_package" ] || fail 'The RPM repository package could not be found.'
+        command -v dnf >/dev/null 2>&1 || fail 'dnf is required.'
+        if [ -n "$root" ]; then
+            dnf --installroot="$root" install -y "$rpm_host/$repository_package"
+        else
+            dnf install -y "$rpm_host/$repository_package"
+        fi
+        printf 'Repository configured. Select PHP %s with: dnf module switch-to php-zts:static-%s\n' \
+            "${version%?}.${version#?}" "${version%?}.${version#?}"
+        ;;
+esac

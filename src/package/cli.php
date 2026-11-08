@@ -54,6 +54,9 @@ class cli implements package
             $phpmodPath => '/usr/sbin/phpenmod' . $binarySuffix,
             $phpmodPath2 => '/usr/sbin/phpdismod' . $binarySuffix,
         ];
+        if (SPP_TYPE === 'rpm' && $prefix !== 'php-zts') {
+            $files[CreatePackages::stageSymlink('../lib64/' . $prefix, $prefix)] = '/usr/lib/' . $prefix;
+        }
 
         foreach ($staticExtensions as $ext) {
             $provides[] = CreatePackages::getPrefix() . "-{$ext}";
@@ -101,6 +104,7 @@ class cli implements package
         return [
             'config-files' => $configFiles,
             'empty_directories' => [
+                getModuledir(),
                 getSharedir() . '/preload',
                 getVarLibdir() . '/session',
                 getVarLibdir() . '/wsdlcache',
@@ -123,6 +127,7 @@ class cli implements package
                 getVarLibdir() . '/opcache' => ['mode' => '0770', 'owner' => 'root', 'group' => 'frankenphp'],
             ],
             'provides' => $provides,
+            'recommends' => CreatePackages::getSapiRecommendations(),
             'replaces' => $replaces,
             'conflicts' => $conflicts,
             'files' => $files
@@ -132,12 +137,27 @@ class cli implements package
     public function getFpmExtraArgs(): array
     {
         $binarySuffix = getBinarySuffix();
+        $prefix = CreatePackages::getPrefix();
+        $aliasGuard = '';
+        if (SPP_TYPE === 'rpm' && $prefix !== 'php-zts') {
+            $alias = escapeshellarg('/usr/lib/' . $prefix);
+            $target = escapeshellarg('../lib64/' . $prefix);
+            $absolute = escapeshellarg('/usr/lib64/' . $prefix);
+            $message = escapeshellarg('Conflicting PHP runtime alias /usr/lib/' . $prefix);
+            $aliasGuard = <<<SH
+if [ -e {$alias} ] || [ -L {$alias} ]; then
+    if [ ! -L {$alias} ]; then echo {$message} >&2; exit 1; fi
+    case "\$(readlink {$alias})" in {$target}|{$absolute}) ;; *) echo {$message} >&2; exit 1 ;; esac
+fi
+SH;
+        }
 
         $addGroupCmd = SPP_TYPE === 'apk'
             ? 'addgroup -S'
             : 'groupadd -r';
         $beforeInstallScript = <<<BASH
 #!/bin/sh
+{$aliasGuard}
 # Create frankenphp group if it doesn't exist
 if ! getent group frankenphp > /dev/null 2>&1; then
     {$addGroupCmd} frankenphp
@@ -145,14 +165,16 @@ fi
 BASH;
         $afterInstallScript = <<<BASH
 #!/bin/sh
-if [ ! -e /usr/bin/php ]; then
-    ln -sf /usr/bin/php{$binarySuffix} /usr/bin/php
+if [ ! -e /usr/bin/php ] || { [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; }; then
+    ln -sf php{$binarySuffix} /usr/bin/php
 fi
 BASH;
+        $apkRemoval = SPP_TYPE === 'apk' ? 'true' : 'false';
         $afterRemoveScript = <<<BASH
 #!/bin/sh
-if [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; then
-    rm -f /usr/bin/php
+if { {$apkRemoval} || [ "\${1-}" = 0 ] || [ "\${1-}" = remove ] || [ "\${1-}" = purge ]; } &&
+    [ -L /usr/bin/php ]; then
+    case "\$(readlink /usr/bin/php)" in php{$binarySuffix}|/usr/bin/php{$binarySuffix}) rm -f /usr/bin/php ;; esac
 fi
 BASH;
 
@@ -165,7 +187,9 @@ BASH;
 
         return [
             '--before-install', TEMP_DIR . '/cli-before-install.sh',
+            '--before-upgrade', TEMP_DIR . '/cli-before-install.sh',
             '--after-install', TEMP_DIR . '/cli-after-install.sh',
+            '--after-upgrade', TEMP_DIR . '/cli-after-install.sh',
             '--after-remove', TEMP_DIR . '/cli-after-remove.sh'
         ];
     }
@@ -180,8 +204,8 @@ BASH;
         $debAfterInstallScript = <<<BASH
 #!/bin/sh
 set -e
-if [ ! -e /usr/bin/php ]; then
-    ln -sf /usr/bin/php{$binarySuffix} /usr/bin/php
+if [ ! -e /usr/bin/php ] || { [ -L /usr/bin/php ] && [ "\$(readlink /usr/bin/php)" = "/usr/bin/php{$binarySuffix}" ]; }; then
+    ln -sf php{$binarySuffix} /usr/bin/php
 fi
 
 if getent group frankenphp > /dev/null 2>&1; then

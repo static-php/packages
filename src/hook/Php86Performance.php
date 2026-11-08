@@ -16,7 +16,8 @@ class Php86Performance
     #[PatchDescription('Apply php-src performance PRs #22729, #22728, #22722 and #23604 to PHP 8.6')]
     public function patchBeforeBuildconf(TargetPackage $package): bool
     {
-        if (!str_starts_with(PhpTarget::getPHPVersion($package->getSourceDir()), '8.6.')) {
+        $version = PhpTarget::getPHPVersion($package->getSourceDir());
+        if (!str_starts_with($version, '8.6.') || version_compare($version, '8.6.0RC2', '<')) {
             return false;
         }
 

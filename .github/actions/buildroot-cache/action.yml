@@ -1,9 +1,5 @@
 name: Buildroot release cache
-description: |
-    Restore/save buildroot.tar.zst as a GitHub Release asset on the current
-    repository. Used in place of actions/cache when the asset is too big for
-    the 10 GB GHA cache. Tag pattern: cache-YYYY-WW (ISO week). Releases are
-    marked prerelease so they don't appear as "Latest".
+description: Restore exact compiled SDKs or compatible seeds from weekly release assets.
 
 inputs:
     mode:
@@ -11,20 +7,33 @@ inputs:
         description: '"restore" or "save".'
     key:
         required: true
-        description: Cache key ending in -YYYY-WW (e.g. buildroot-rpm-alma10-arm64-zig-2026-19).
+        description: Exact source/configuration/toolchain key ending in -YYYY-WW.
+    seed-key:
+        required: false
+        default: ''
+        description: Compatible library-build identity used only by library jobs.
     fail-on-cache-miss:
         required: false
         default: 'false'
-        description: Fail the step if no exact match is found (restore mode only).
+        description: Require the exact compiled SDK; never accept a compatible seed.
     path:
         required: false
         default: buildroot.tar.zst
-        description: Local file to push/pull.
+        description: Local compiled SDK archive.
 
 outputs:
     cache-hit:
-        description: '"true" if an exact-tag match was restored, else "false".'
+        description: '"true" when an exact source identity was restored.'
         value: ${{ steps.run.outputs.cache-hit }}
+    seed-hit:
+        description: '"true" when a compatible previous SDK was restored.'
+        value: ${{ steps.run.outputs.seed-hit }}
+    cache-current:
+        description: '"true" when the exact SDK is already in this week release.'
+        value: ${{ steps.run.outputs.cache-current }}
+    restored-key:
+        description: Exact identity of the restored SDK.
+        value: ${{ steps.run.outputs.restored-key }}
 
 runs:
     using: composite
@@ -34,71 +43,12 @@ runs:
             env:
                 MODE: ${{ inputs.mode }}
                 KEY: ${{ inputs.key }}
+                SEED_KEY: ${{ inputs.seed-key }}
                 FAIL_ON_MISS: ${{ inputs.fail-on-cache-miss }}
                 LOCAL_FILE: ${{ inputs.path }}
                 REPO: ${{ github.repository }}
                 GH_TOKEN: ${{ github.token }}
             run: |
-                set -euo pipefail
-
-                if [[ ! "$KEY" =~ ^(.+)-([0-9]{4}-[0-9]{2})$ ]]; then
-                    echo "::error::key must end in -YYYY-WW: $KEY"
-                    exit 1
-                fi
-                EXACT_ASSET="${BASH_REMATCH[1]}.tar.zst"
-                EXACT_WEEK="${BASH_REMATCH[2]}"
-                EXACT_TAG="cache-${EXACT_WEEK}"
-
-                public_dl() {
-                    local tag="$1" asset="$2"
-                    curl -fsSL "https://github.com/${REPO}/releases/download/${tag}/${asset}" -o "$LOCAL_FILE" 2>/dev/null
-                }
-
-                api() {
-                    curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"
-                }
-
-                case "$MODE" in
-                    restore)
-                        if public_dl "$EXACT_TAG" "$EXACT_ASSET"; then
-                            echo "cache-hit=true" >> "$GITHUB_OUTPUT"
-                            echo "Restored ${EXACT_TAG}/${EXACT_ASSET}"
-                            exit 0
-                        fi
-                        echo "cache-hit=false" >> "$GITHUB_OUTPUT"
-                        echo "No release asset found for ${KEY}"
-                        if [ "$FAIL_ON_MISS" = "true" ]; then
-                            echo "::error::buildroot cache miss for ${KEY}"
-                            exit 1
-                        fi
-                        ;;
-                    save)
-                        api -X POST "https://api.github.com/repos/${REPO}/releases" \
-                            -d "$(jq -nc --arg tag "$EXACT_TAG" --arg name "[cache] $EXACT_TAG" --arg body "Buildroot caches for ISO week ${EXACT_WEEK}." \
-                                '{tag_name:$tag, name:$name, body:$body, prerelease:true}')" \
-                            >/dev/null 2>&1 || true
-                        rel_id=$(api "https://api.github.com/repos/${REPO}/releases/tags/${EXACT_TAG}" | jq -r '.id // empty')
-                        if [ -z "$rel_id" ]; then
-                            echo "::error::could not resolve release id for ${EXACT_TAG}"
-                            exit 1
-                        fi
-
-                        existing=$(api "https://api.github.com/repos/${REPO}/releases/${rel_id}/assets" \
-                            | jq -r --arg n "$EXACT_ASSET" '.[] | select(.name == $n) | .id' | head -1)
-                        if [ -n "$existing" ]; then
-                            api -X DELETE "https://api.github.com/repos/${REPO}/releases/assets/${existing}" >/dev/null
-                        fi
-
-                        curl -fsSL -X POST \
-                            -H "Authorization: Bearer $GH_TOKEN" \
-                            -H "Content-Type: application/octet-stream" \
-                            -T "$LOCAL_FILE" \
-                            "https://uploads.github.com/repos/${REPO}/releases/${rel_id}/assets?name=${EXACT_ASSET}" \
-                            >/dev/null
-                        echo "Uploaded ${EXACT_TAG}/${EXACT_ASSET}"
-                        ;;
-                    *)
-                        echo "unknown mode: $MODE"
-                        exit 1
-                        ;;
-                esac
+                python=python3
+                if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi
+                "$python" "$GITHUB_ACTION_PATH/cache.py"

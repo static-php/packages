@@ -5,6 +5,8 @@ namespace staticphp\package;
 use RuntimeException;
 use staticphp\package;
 use staticphp\step\CreatePackages;
+use staticphp\util\BuildPayload;
+use staticphp\util\RuntimeServices;
 use Symfony\Component\Process\Process;
 
 class frankenphp implements package
@@ -27,7 +29,7 @@ class frankenphp implements package
 
     public function getFpmConfig(): array
     {
-        return [];
+        return ['recommends' => CreatePackages::getSapiRecommendations()];
     }
 
     public function getDebuginfoFpmConfig(): array
@@ -48,6 +50,15 @@ class frankenphp implements package
     public function getDescription(): string
     {
         return 'FrankenPHP - The Modern PHP Webserver';
+    }
+
+    private function sharedDependencies(string $type): array
+    {
+        return array_values(array_unique([
+            ...CreatePackages::getSharedLibraryDependencies([BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/frankenphp'], $type),
+            'php-zts-runtime-layout',
+            CreatePackages::getSharedRuntimeCapability(),
+        ]));
     }
 
     /**
@@ -81,11 +92,6 @@ class frankenphp implements package
         }
     }
 
-    /**
-     * Resolve iteration for a FrankenPHP package: --iteration override wins, then --bump
-     * (remote query, shared with CreatePackages), then FrankenPHP's own local globber
-     * (which uses a distinct filename layout).
-     */
     private function resolveIteration(string $name, string $version, string $architecture, string $packageType, ?string $iterationOverride, bool $bump): string
     {
         if ($iterationOverride !== null) {
@@ -94,7 +100,7 @@ class frankenphp implements package
         if ($bump) {
             return (string)\staticphp\step\CreatePackages::getRemoteNextIteration($name, $version, $architecture, $packageType);
         }
-        return (string)$this->getNextIteration($name, $version, $architecture, $packageType);
+        return CreatePackages::resolveIteration($name, $version, $architecture, $packageType);
     }
 
     /**
@@ -104,37 +110,31 @@ class frankenphp implements package
     {
         echo "Creating RPM package for FrankenPHP...\n";
 
-        $packageFolder = DIST_PATH . '/frankenphp/package';
+        $packageFolder = $this->packageFolder();
         $sharedLibrarySuffix = getSharedLibrarySuffix();
         $phpEmbedName = 'libphp' . $sharedLibrarySuffix . '.so';
 
-        $ldLibraryPath = 'LD_LIBRARY_PATH=' . BUILD_LIB_PATH;
-        [, $output] = shell()->execWithResult($ldLibraryPath . ' ' . BUILD_BIN_PATH . '/frankenphp --version');
-        $output = implode("\n", $output);
-        if (!preg_match('/FrankenPHP v(\d+\.\d+\.\d+)/', $output, $matches)) {
-            throw new RuntimeException("Unable to detect FrankenPHP version from output: " . $output);
-        }
-        $version = $matches[1];
+        $version = $this->frankenVersion();
 
         // Append PHP version suffix to FrankenPHP version
         $rpmVersion = CreatePackages::getTaggedPackageVersion('rpm', $version);
 
         $name = $this->getName();
+        $rpmVersion = CreatePackages::migrationPackageVersion('rpm', $name, $rpmVersion, $architecture);
 
         // Calculate iteration for RPM (with possible override)
         $iteration = $this->resolveIteration($name, $rpmVersion, $architecture, 'rpm', $iterationOverride, $bump);
 
         $versionedConflicts = $this->getVersionedConflicts();
 
-        // Add distribution version to filename only
-        $distVersion = $this->getDistVersion();
-        $rpmRelease = $distVersion !== '' ? "{$iteration}.{$distVersion}" : $iteration;
+        $rpmRelease = $iteration;
         $packageFile = DIST_RPM_PATH . "/{$name}-{$rpmVersion}-{$rpmRelease}.{$architecture}.rpm";
 
         $fpmArgs = [
             'fpm',
             '-s', 'dir',
             '-t', 'rpm',
+            '--no-rpm-autoreqprov',
             '--rpm-compression', 'xz',
             '-p', $packageFile,  // Full path with distVersion in filename
             '-n', $name,
@@ -142,8 +142,12 @@ class frankenphp implements package
             '--description', "FrankenPHP - The Modern PHP Webserver",
             '--license', $this->getLicense(),
             '--config-files', '/etc/frankenphp/Caddyfile',
-            '--provides', 'frankenphp',
         ];
+
+        if ($name !== 'frankenphp') {
+            $fpmArgs[] = '--provides';
+            $fpmArgs[] = 'frankenphp = ' . $rpmVersion . '-' . $rpmRelease;
+        }
 
         foreach ($versionedConflicts as $conflict) {
             $fpmArgs[] = '--conflicts';
@@ -161,11 +165,20 @@ class frankenphp implements package
 
         foreach ($consolidatedDeps as $lib => $dependencyVersion) {
             $fpmArgs[] = '--depends';
-            $fpmArgs[] = "$lib({$dependencyVersion})(64bit)";
+            $fpmArgs[] = str_contains($lib, '(') ? "{$lib}(64bit)" : ($dependencyVersion === '0' ? "{$lib}()(64bit)" : "{$lib}({$dependencyVersion})(64bit)");
+        }
+        foreach ($this->sharedDependencies('rpm') as $dependency) {
+            $fpmArgs[] = '--depends';
+            $fpmArgs[] = $dependency;
+        }
+        foreach ($this->getFpmConfig()['recommends'] as $recommendation) {
+            $fpmArgs[] = '--rpm-tag';
+            $fpmArgs[] = 'Recommends: ' . $recommendation;
         }
 
-        if (!is_dir("{$packageFolder}/empty/") && !mkdir("{$packageFolder}/empty/", 0755, true) && !is_dir("{$packageFolder}/empty/")) {
-            throw new RuntimeException(sprintf('Directory "%s" was not created', "{$packageFolder}/empty/"));
+        $empty = TEMP_DIR . '/frankenphp-empty';
+        if (!is_dir($empty) && !mkdir($empty, 0755, true) && !is_dir($empty)) {
+            throw new RuntimeException(sprintf('Directory "%s" was not created', $empty));
         }
 
         // Generate autocompletion
@@ -175,35 +188,43 @@ class frankenphp implements package
 
         $fpmArgs = [...$fpmArgs, ...[
             '--depends', "$phpEmbedName",
-            '--before-install', "{$packageFolder}/rhel/preinstall.sh",
-            '--after-install', "{$packageFolder}/rhel/postinstall.sh",
-            '--before-remove', "{$packageFolder}/rhel/preuninstall.sh",
-            '--after-remove', "{$packageFolder}/rhel/postuninstall.sh",
             '--iteration', $rpmRelease,
             '--rpm-user', 'frankenphp',
             '--rpm-group', 'frankenphp',
             '--config-files', '/etc/frankenphp/Caddyfile',
             '--config-files', '/etc/frankenphp/Caddyfile.d',
-            BUILD_BIN_PATH . '/frankenphp=/usr/bin/frankenphp',
-            $completionFile . '=/usr/share/bash-completion/completions/frankenphp',
-            "{$packageFolder}/rhel/frankenphp.service=/usr/lib/systemd/system/frankenphp.service",
+            $this->runtimeBinary() . '=/usr/bin/' . $name,
+            $completionFile . '=/usr/share/bash-completion/completions/' . $name,
+            $this->serviceUnit($packageFolder . '/rhel/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
             "{$packageFolder}/Caddyfile=/etc/frankenphp/Caddyfile",
             "{$packageFolder}/content/=/usr/share/frankenphp",
-            "{$packageFolder}/empty/=/var/lib/frankenphp",
-            "{$packageFolder}/empty/=/etc/frankenphp/Caddyfile.d",
+            $empty . '/=/var/lib/frankenphp',
+            $empty . '/=/etc/frankenphp/Caddyfile.d',
         ]];
+        array_splice($fpmArgs, 1, 0, [...RuntimeServices::serviceArgs('rpm', $name, true),
+            '--after-install', RuntimeServices::frankenPostInstall('rpm', $name, '/usr/bin/' . $name),
+            '--after-upgrade', RuntimeServices::frankenPostInstall('rpm', $name, '/usr/bin/' . $name, true)]);
+        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
+            $fpmArgs[] = $source . '=' . $destination;
+        }
+        foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
+            $fpmArgs[] = $source . '=' . $destination;
+        }
 
         $rpmProcess = new Process($fpmArgs);
         $rpmProcess->setTimeout(null);
         $rpmProcess->run(function ($type, $buffer) {
             echo $buffer;
         });
+        if (!$rpmProcess->isSuccessful()) {
+            throw new RuntimeException('FrankenPHP RPM package creation failed: ' . $rpmProcess->getOutput() . $rpmProcess->getErrorOutput());
+        }
 
         echo "RPM package created: {$packageFile}\n";
 
         if ($debuginfo) {
-            $frankenDbg = BUILD_ROOT_PATH . '/debug/frankenphp.debug';
-            if (file_exists($frankenDbg)) {
+            $frankenDbg = $this->debugBinary();
+            if ($frankenDbg !== null && file_exists($frankenDbg)) {
                 $dbgPackageFile = DIST_RPM_PATH . "/{$name}-debuginfo-{$rpmVersion}-{$rpmRelease}.{$architecture}.rpm";
                 $dbgArgs = [
                     'fpm',
@@ -217,7 +238,7 @@ class frankenphp implements package
                     '--architecture', $architecture,
                     '--license', $this->getLicense(),
                     '--depends', sprintf('%s = %s-%s', $name, $rpmVersion, $rpmRelease),
-                    $frankenDbg . '=/usr/lib/debug/usr/bin/frankenphp.debug',
+                    $frankenDbg . '=/usr/lib/debug/usr/bin/' . basename($frankenDbg),
                 ];
                 $dbgProcess = new Process($dbgArgs);
                 $dbgProcess->setTimeout(null);
@@ -240,18 +261,12 @@ class frankenphp implements package
     {
         echo "Creating DEB package for FrankenPHP...\n";
 
-        $packageFolder = DIST_PATH . '/frankenphp/package';
+        $packageFolder = $this->packageFolder();
         $sharedLibrarySuffix = getSharedLibrarySuffix();
         // libphp filename with shared library suffix: libphp-zts-85.so, libphp-nts-84.so
         $phpEmbedName = 'libphp' . $sharedLibrarySuffix . '.so';
 
-        $ldLibraryPath = 'LD_LIBRARY_PATH=' . BUILD_LIB_PATH;
-        [, $output] = shell()->execWithResult($ldLibraryPath . ' ' . BUILD_BIN_PATH . '/frankenphp --version');
-        $output = implode("\n", $output);
-        if (!preg_match('/FrankenPHP v(\d+\.\d+\.\d+)/', $output, $matches)) {
-            throw new RuntimeException("Unable to detect FrankenPHP version from output: " . $output);
-        }
-        $version = $matches[1];
+        $version = $this->frankenVersion();
 
         $name = $this->getName();
 
@@ -264,7 +279,7 @@ class frankenphp implements package
 
         // For DEB packages, append PHP version to package version for proper sorting
         // e.g., 1.11.0+php85 is higher than 1.11.0+php83
-        $debVersion = CreatePackages::getTaggedPackageVersion('deb', $version);
+        $debVersion = CreatePackages::migrationPackageVersion('deb', $name, CreatePackages::getTaggedPackageVersion('deb', $version), $debArch);
 
         // Calculate iteration for DEB (with possible override)
         $iteration = $this->resolveIteration($name, $debVersion, $debArch, 'deb', $iterationOverride, $bump);
@@ -312,6 +327,7 @@ class frankenphp implements package
 
         $consolidatedDeps = [];
         foreach ($binaryDependencies as $lib => $ver) {
+            $lib = preg_replace('/\(.*/', '', $lib);
             if (isset($systemLibraryMap[$lib])) {
                 // Use mapped name for system libraries
                 $packageName = $systemLibraryMap[$lib];
@@ -331,9 +347,18 @@ class frankenphp implements package
             $fpmArgs[] = '--depends';
             $fpmArgs[] = "{$packageName} (>= {$numericVersion})";
         }
+        foreach ($this->sharedDependencies('deb') as $dependency) {
+            $fpmArgs[] = '--depends';
+            $fpmArgs[] = $dependency;
+        }
+        foreach ($this->getFpmConfig()['recommends'] as $recommendation) {
+            $fpmArgs[] = '--deb-recommends';
+            $fpmArgs[] = $recommendation;
+        }
 
-        if (!is_dir("{$packageFolder}/empty/") && !mkdir("{$packageFolder}/empty/", 0755, true) && !is_dir("{$packageFolder}/empty/")) {
-            throw new RuntimeException(sprintf('Directory "%s" was not created', "{$packageFolder}/empty/"));
+        $empty = TEMP_DIR . '/frankenphp-empty';
+        if (!is_dir($empty) && !mkdir($empty, 0755, true) && !is_dir($empty)) {
+            throw new RuntimeException(sprintf('Directory "%s" was not created', $empty));
         }
 
         // Determine the FrankenPHP suffix (just version, not prefix)
@@ -351,17 +376,22 @@ class frankenphp implements package
 
         $fpmArgs = [...$fpmArgs, ...[
             '--depends', $phpEmbedName,
-            '--after-install', "{$packageFolder}/debian/postinst.sh",
-            '--before-remove', "{$packageFolder}/debian/prerm.sh",
-            '--after-remove', "{$packageFolder}/debian/postrm.sh",
+            '--after-install', RuntimeServices::frankenPostInstall('deb', $name, '/usr/bin/' . $name),
             '--iteration', $debIteration,
-            BUILD_BIN_PATH . '/frankenphp=/usr/bin/frankenphp' . $frankenphpSuffix,
+            $this->runtimeBinary() . '=/usr/bin/frankenphp' . $frankenphpSuffix,
             $completionFile . '=/usr/share/bash-completion/completions/frankenphp' . $frankenphpSuffix,
-            "{$packageFolder}/debian/frankenphp.service=/usr/lib/systemd/system/frankenphp{$frankenphpSuffix}.service",
+            $this->serviceUnit($packageFolder . '/debian/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
             "{$packageFolder}/Caddyfile=/etc/frankenphp/Caddyfile",
             "{$packageFolder}/content/=/usr/share/frankenphp",
-            "{$packageFolder}/empty/=/var/lib/frankenphp"
+            $empty . '/=/var/lib/frankenphp'
         ]];
+        array_splice($fpmArgs, 1, 0, RuntimeServices::serviceArgs('deb', $name, true));
+        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
+            $fpmArgs[] = $source . '=' . $destination;
+        }
+        foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
+            $fpmArgs[] = $source . '=' . $destination;
+        }
 
         $rpmProcess = new Process($fpmArgs);
         $rpmProcess->setTimeout(null);
@@ -369,12 +399,15 @@ class frankenphp implements package
             echo $buffer;
         });
 
+        if (!$rpmProcess->isSuccessful()) {
+            throw new RuntimeException('FrankenPHP DEB package creation failed: ' . $rpmProcess->getErrorOutput());
+        }
         echo "DEB package created: {$packageFile}\n";
 
         // Create FrankenPHP debuginfo package if debug file exists (only if --debuginfo flag set for DEB)
         if ($debuginfo) {
-            $frankenDbg = BUILD_ROOT_PATH . '/debug/frankenphp.debug';
-            if (file_exists($frankenDbg)) {
+            $frankenDbg = $this->debugBinary();
+            if ($frankenDbg !== null && file_exists($frankenDbg)) {
                 $dbgDebName = "{$name}-debuginfo";
                 $dbgPackageFile = DIST_DEB_PATH . "/{$dbgDebName}_{$debVersion}-{$debIteration}_{$debArch}.deb";
                 $dbgArgs = [
@@ -389,7 +422,7 @@ class frankenphp implements package
                     '--architecture', $debArch,
                     '--license', $this->getLicense(),
                     '--depends', sprintf('%s (= %s-%s)', $name, $debVersion, $debIteration),
-                    $frankenDbg . '=/usr/lib/debug/usr/bin/frankenphp.debug',
+                    $frankenDbg . '=/usr/lib/debug/usr/bin/' . basename($frankenDbg),
                 ];
                 $dbgProcess = new Process($dbgArgs);
                 $dbgProcess->setTimeout(null);
@@ -412,24 +445,18 @@ class frankenphp implements package
     {
         echo "Creating APK package for FrankenPHP using nfpm...\n";
 
-        $packageFolder = DIST_PATH . '/frankenphp/package';
+        $packageFolder = $this->packageFolder();
         $sharedLibrarySuffix = getSharedLibrarySuffix();
         // libphp filename with shared library suffix: libphp-zts-85.so, libphp-nts-84.so
         $phpEmbedName = 'libphp' . $sharedLibrarySuffix . '.so';
 
-        $ldLibraryPath = 'LD_LIBRARY_PATH=' . BUILD_LIB_PATH;
-        [, $output] = shell()->execWithResult($ldLibraryPath . ' ' . BUILD_BIN_PATH . '/frankenphp --version');
-        $output = implode("\n", $output);
-        if (!preg_match('/FrankenPHP v(\d+\.\d+\.\d+)/', $output, $matches)) {
-            throw new RuntimeException("Unable to detect FrankenPHP version from output: " . $output);
-        }
-        $version = $matches[1];
+        $version = $this->frankenVersion();
 
         $name = $this->getName();
 
         // For APK packages, append PHP version to package version for proper sorting
         // e.g., 1.11.0p85 is higher than 1.11.0p83
-        $apkVersion = CreatePackages::getTaggedPackageVersion('apk', $version);
+        $apkVersion = CreatePackages::migrationPackageVersion('apk', $name, CreatePackages::getTaggedPackageVersion('apk', $version), $architecture);
 
         // Calculate iteration for APK (with possible override)
         $iteration = $this->resolveIteration($name, $apkVersion, $architecture, 'apk', $iterationOverride, $bump);
@@ -474,6 +501,10 @@ class frankenphp implements package
 
         $consolidatedDeps = [];
         foreach ($binaryDependencies as $lib => $ver) {
+            $lib = preg_replace('/\(.*/', '', $lib);
+            if (str_starts_with($lib, 'libc.musl-') || str_starts_with($lib, 'ld-musl-')) {
+                $lib = 'libc.so.6';
+            }
             if (isset($alpineLibMap[$lib])) {
                 $packageName = $alpineLibMap[$lib];
             } else {
@@ -489,7 +520,7 @@ class frankenphp implements package
             $depends[] = "{$packageName}>={$numericVersion}";
         }
 
-        $nfpmConfig['depends'] = $depends;
+        $nfpmConfig['depends'] = array_values(array_unique([...$depends, ...$this->sharedDependencies('apk')]));
         $nfpmConfig['provides'] = [$this->getName() !== 'frankenphp' ? 'frankenphp' : ''];
         $nfpmConfig['replaces'] = $versionedConflicts;
         $nfpmConfig['conflicts'] = $versionedConflicts;
@@ -508,7 +539,7 @@ class frankenphp implements package
         // Build contents
         $contents = [
             [
-                'src' => BUILD_BIN_PATH . '/frankenphp',
+                'src' => $this->runtimeBinary(),
                 'dst' => '/usr/bin/frankenphp' . $frankenphpSuffix,
             ],
             [
@@ -516,7 +547,7 @@ class frankenphp implements package
                 'dst' => '/usr/share/bash-completion/completions/frankenphp' . $frankenphpSuffix,
             ],
             [
-                'src' => "{$packageFolder}/alpine/frankenphp.openrc",
+                'src' => $this->serviceUnit($packageFolder . '/alpine/frankenphp.openrc', $name),
                 'dst' => "/etc/init.d/frankenphp{$frankenphpSuffix}",
             ],
             [
@@ -539,12 +570,19 @@ class frankenphp implements package
         ];
 
         $nfpmConfig['contents'] = $contents;
+        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
+            $nfpmConfig['contents'][] = ['src' => $source, 'dst' => $destination];
+        }
+        foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
+            $nfpmConfig['contents'][] = ['src' => $source, 'dst' => $destination];
+        }
 
         $nfpmConfig['scripts'] = [
-            'postinstall' => "{$packageFolder}/alpine/post-install.sh",
-            'preremove' => "{$packageFolder}/alpine/pre-deinstall.sh",
-            'postremove' => "{$packageFolder}/alpine/post-deinstall.sh",
+            'postinstall' => RuntimeServices::frankenPostInstall('apk', $name, '/usr/bin/' . $name),
         ];
+        $serviceArgs = RuntimeServices::serviceArgs('apk', $name, true);
+        $nfpmConfig['scripts']['preremove'] = $serviceArgs[array_search('--before-remove', $serviceArgs, true) + 1];
+        $nfpmConfig['apk']['scripts'] = RuntimeServices::apkScripts($name, true);
 
         // Write nfpm config
         $nfpmConfigFile = TEMP_DIR . "/nfpm-{$name}.yaml";
@@ -577,8 +615,8 @@ class frankenphp implements package
 
         // Create FrankenPHP debuginfo package if debug file exists (only if --debuginfo flag set for APK)
         if ($debuginfo) {
-            $frankenDbg = BUILD_ROOT_PATH . '/debug/frankenphp.debug';
-            if (file_exists($frankenDbg)) {
+            $frankenDbg = $this->debugBinary();
+            if ($frankenDbg !== null && file_exists($frankenDbg)) {
                 $this->createApkDebuginfo($name, $apkVersion, $iteration, $architecture, $frankenDbg, $frankenphpSuffix);
             }
         }
@@ -605,7 +643,7 @@ class frankenphp implements package
             'contents' => [
                 [
                     'src' => $frankenDbg,
-                    'dst' => '/usr/lib/debug/usr/bin/frankenphp' . $frankenphpSuffix . '.debug',
+                    'dst' => '/usr/lib/debug/usr/bin/' . basename($frankenDbg),
                 ],
             ],
         ];
@@ -637,48 +675,58 @@ class frankenphp implements package
         echo "APK debuginfo package created: {$outputFile}\n";
     }
 
-    /**
-     * Prepare FrankenPHP repository by cloning or updating
-     */
     private function prepareFrankenPhpRepository(): string
     {
-        $repoUrl = 'https://github.com/php/frankenphp.git';
-        $targetPath = DIST_PATH . '/frankenphp';
+        return $this->packageFolder();
+    }
 
-        $tagProcess = new Process([
-            'bash', '-c',
-            "git ls-remote --tags $repoUrl | grep -o 'refs/tags/[^{}]*$' | sed 's#refs/tags/##' | sort -V | tail -n1"
-        ]);
-        $tagProcess->run();
-        if (!$tagProcess->isSuccessful()) {
-            throw new RuntimeException("Failed to fetch tags: " . $tagProcess->getErrorOutput());
-        }
-        $latestTag = trim($tagProcess->getOutput());
-
-        if (!is_dir($targetPath . '/.git')) {
-            echo "Cloning FrankenPHP into DIST_PATH...\n";
-            $clone = new Process(['git', 'clone', $repoUrl, $targetPath]);
-            $clone->run();
-            if (!$clone->isSuccessful()) {
-                throw new RuntimeException("Git clone failed: " . $clone->getErrorOutput());
+    private function packageFolder(): string
+    {
+        $recorded = BUILD_ROOT_PATH . '/packaging/frankenphp/package';
+        $paths = BuildPayload::load(BUILD_ROOT_PATH) !== null
+            ? [$recorded]
+            : [$recorded, BASE_PATH . '/source/frankenphp/package', BASE_PATH . '/spc/source/frankenphp/package', DIST_PATH . '/frankenphp/package'];
+        foreach ($paths as $path) {
+            if (is_file($path . '/Caddyfile') && is_dir($path . '/content')) {
+                return $path;
             }
         }
-        else {
-            echo "FrankenPHP already exists, fetching tags...\n";
-            $fetch = new Process(['git', 'fetch', '--tags'], cwd: $targetPath);
-            $fetch->run();
-            if (!$fetch->isSuccessful()) {
-                throw new RuntimeException("Git fetch failed: " . $fetch->getErrorOutput());
-            }
-        }
+        throw new RuntimeException('Missing pinned FrankenPHP package assets; rebuild/export the recorded payload rather than fetching a different source tag.');
+    }
 
-        $checkout = new Process(['git', 'checkout', $latestTag], cwd: $targetPath);
-        $checkout->run();
-        if (!$checkout->isSuccessful()) {
-            throw new RuntimeException("Git checkout failed: " . $checkout->getErrorOutput());
+    private function frankenVersion(): string
+    {
+        $recorded = BuildPayload::load(BUILD_ROOT_PATH)?->metadata()['frankenphp_version'] ?? null;
+        if (is_string($recorded) && preg_match('/^\d+\.\d+\.\d+$/D', $recorded)) {
+            return $recorded;
         }
+        $process = new Process([BUILD_BIN_PATH . '/frankenphp', '--version'], env: ['LD_LIBRARY_PATH' => BUILD_LIB_PATH]);
+        $process->mustRun();
+        if (!preg_match('/FrankenPHP v(\d+\.\d+\.\d+)/', $process->getOutput(), $matches)) {
+            throw new RuntimeException('Cannot resolve recorded FrankenPHP version');
+        }
+        return $matches[1];
+    }
 
-        return $latestTag;
+    private function runtimeBinary(): string
+    {
+        return BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/frankenphp')['runtime'] ?? BUILD_BIN_PATH . '/frankenphp';
+    }
+
+    private function debugBinary(): ?string
+    {
+        return BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/frankenphp')['debug'] ?? BUILD_ROOT_PATH . '/debug/frankenphp.debug';
+    }
+
+    private function serviceUnit(string $source, string $service): string
+    {
+        $contents = file_get_contents($source);
+        $contents = str_replace('/usr/bin/frankenphp', '/usr/bin/' . $service, $contents);
+        $contents = str_replace(['/run/frankenphp', 'RuntimeDirectory=frankenphp'], ['/run/' . $service, 'RuntimeDirectory=' . $service], $contents);
+        $path = TEMP_DIR . '/' . $service . (str_ends_with($source, '.openrc') ? '.openrc' : '.service');
+        file_put_contents($path, $contents);
+        chmod($path, 0755);
+        return $path;
     }
 
     /**
@@ -686,13 +734,16 @@ class frankenphp implements package
      */
     private function getPhpVersionAndArchitecture(): array
     {
+        if (($payload = BuildPayload::load(BUILD_ROOT_PATH)) !== null) {
+            return [$payload->phpVersion(), $payload->architecture()];
+        }
         $basePhpVersion = SPP_PHP_VERSION;
         $phpBinary = BUILD_BIN_PATH . '/php';
 
         if (!file_exists($phpBinary)) {
             throw new RuntimeException("Warning: PHP binary not found at {$phpBinary}, using base PHP version: {$basePhpVersion}");
         }
-        $versionProcess = new Process([$phpBinary, '-r', 'echo PHP_VERSION;']);
+        $versionProcess = new Process([$phpBinary, '-n', '-r', 'echo PHP_VERSION;'], env: ['LD_LIBRARY_PATH' => BUILD_LIB_PATH]);
         $versionProcess->run();
         $detectedVersion = trim($versionProcess->getOutput());
 
@@ -723,64 +774,6 @@ class frankenphp implements package
     }
 
     /**
-     * Get next iteration number for package
-     */
-    private function getNextIteration(string $name, string $version, string $architecture, string $packageType): int
-    {
-        $maxIteration = ($packageType === 'apk') ? -1 : 0;
-
-        if ($packageType === 'rpm') {
-            // RPM: {name}-{version}-{iteration}.{distVersion}.{arch}.rpm
-            // Also match old formats:
-            // - {name}-{version}-{iteration}.{phpSuffix}.{distVersion}.{arch}.rpm (with phpSuffix)
-            // - {name}-{version}-{iteration}.{arch}.rpm (no distVersion)
-            $rpmPattern = DIST_RPM_PATH . "/{$name}-{$version}-*.rpm";
-            $rpmFiles = glob($rpmPattern);
-
-            foreach ($rpmFiles as $file) {
-                // Match all formats: iteration followed by 0-2 parts, then arch.rpm
-                if (preg_match("/{$name}-" . preg_quote($version, '/') . "-(\d+)(?:\.[^.]+){0,2}\.{$architecture}\.rpm$/", $file, $matches)) {
-                    $iteration = (int)$matches[1];
-                    $maxIteration = max($maxIteration, $iteration);
-                }
-            }
-        }
-
-        if ($packageType === 'deb') {
-            // DEB: {name}-{phpSuffix}_{version}-{iteration}_{arch}.deb
-            // Also match old formats for backwards compatibility
-            $debPattern = DIST_DEB_PATH . "/{$name}*.deb";
-            $debFiles = glob($debPattern);
-
-            foreach ($debFiles as $file) {
-                // Match new format: {name}-{phpSuffix}_{version}-{iteration}_{arch}.deb
-                // The name might have the phpSuffix included or not
-                if (preg_match("/" . preg_quote($name, '/') . "(?:-[^_]+)?_" . preg_quote($version, '/') . "-(\d+)_{$architecture}\.deb$/", $file, $matches)) {
-                    $iteration = (int)$matches[1];
-                    $maxIteration = max($maxIteration, $iteration);
-                }
-            }
-        }
-
-        if ($packageType === 'apk') {
-            // APK: {name}-{version}-r{iteration}.{phpSuffix}.{arch}.apk
-            // Also match old format: {name}-{version}-r{iteration}.{arch}.apk (no phpSuffix)
-            $apkPattern = DIST_APK_PATH . "/{$name}-{$version}-r*.apk";
-            $apkFiles = glob($apkPattern);
-
-            foreach ($apkFiles as $file) {
-                // Match both formats: r{iteration} followed by 0-1 parts, then arch.apk
-                if (preg_match("/{$name}-" . preg_quote($version, '/') . "-r(\d+)(?:\.[^.]+)?\.{$architecture}\.apk$/", $file, $matches)) {
-                    $iteration = (int)$matches[1];
-                    $maxIteration = max($maxIteration, $iteration);
-                }
-            }
-        }
-
-        return $maxIteration + 1;
-    }
-
-    /**
      * Get PHP version suffix for package filenames (e.g., "static-83" for PHP 8.3)
      */
     private function getPhpVersionSuffix(): string
@@ -798,40 +791,4 @@ class frankenphp implements package
         return 'static-' . $majorMinorNoDot;
     }
 
-    /**
-     * Get distribution version for RPM filenames (e.g., "el9", "el8", "fc39")
-     */
-    private function getDistVersion(): string
-    {
-        if (!file_exists('/etc/os-release')) {
-            return '';
-        }
-
-        $osRelease = parse_ini_file('/etc/os-release');
-        if (!$osRelease || !isset($osRelease['ID'], $osRelease['VERSION_ID'])) {
-            return '';
-        }
-
-        $id = $osRelease['ID'];
-        $versionId = $osRelease['VERSION_ID'];
-
-        // Extract major version number
-        if (preg_match('/^(\d+)/', $versionId, $matches)) {
-            $majorVersion = $matches[1];
-        } else {
-            return '';
-        }
-
-        // Map distribution ID to prefix
-        $distMap = [
-            'rhel' => 'el',
-            'centos' => 'el',
-            'rocky' => 'el',
-            'almalinux' => 'el',
-            'fedora' => 'fc',
-        ];
-
-        $prefix = $distMap[$id] ?? '';
-        return $prefix !== '' ? $prefix . $majorVersion : '';
-    }
 }

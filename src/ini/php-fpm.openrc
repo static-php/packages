@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+name="PHP FastCGI Process Manager"
+description="The PHP FastCGI Process Manager"
+command="/usr/sbin/php-fpm@binary_suffix@"
+command_args="--nodaemonize -y @confdir@/php-fpm.conf"
+command_background="yes"
+pidfile="/run/php-fpm@binary_suffix@/openrc.pid"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath --directory --owner root:root --mode 0755 "/run/php-fpm@binary_suffix@"
+    "$command" -tt -y "@confdir@/php-fpm.conf"
+}
+
+reload() {
+    ebegin "Reloading $name"
+    start-stop-daemon --signal USR2 --pidfile "$pidfile"
+    eend $?
+}

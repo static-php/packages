@@ -1,0 +1,299 @@
+import hashlib
+import os
+from pathlib import Path
+import runpy
+import json
+import shutil
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
+namespace = planner['dump_abi'].__globals__
+
+
+def library():
+    return {'version': '1.0', 'files': ['lib/libfixture.so.1'],
+            'elf': {'lib/libfixture.so.1': {'soname': 'libfixture.so.1', 'needed': []}}}
+
+
+class AbiDumpCache(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory(prefix='abi-dump-cache-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.runtime = self.root / 'lib/libfixture.so.1'
+        self.runtime.parent.mkdir()
+        self.runtime.write_bytes(b'fixture runtime bytes')
+        self.debug = self.root / 'debug/lib/libfixture.so.1.debug'
+        self.debug.parent.mkdir(parents=True)
+        self.debug.write_bytes(b'fixture debug bytes')
+        self.output = self.root / planner['METADATA'] / 'abi/fixture/libfixture.so.1.xml'
+        self.receipt = self.output.with_suffix('.xml.inputs.json')
+        self.tool = 'libabigail-test-build-1'
+        self.flags = ['--no-corpus-path', '--no-show-locs']
+        self.invocations = []
+        self.generate_failure = False
+        self.inputs_available = True
+        self.input_patch = patch.dict(namespace, {'abi_dump_inputs': self.inputs, 'run': self.command})
+        self.input_patch.start()
+        self.addCleanup(self.input_patch.stop)
+
+    def inputs(self, root, path, flags=None, context=None):
+        if not self.inputs_available:
+            return None
+        return {'runtime_sha256': hashlib.sha256(self.runtime.read_bytes()).hexdigest(),
+                'debug_sha256': hashlib.sha256(self.debug.read_bytes()).hexdigest() if self.debug.exists() else None,
+                'tool': self.tool, 'flags': self.flags + ([] if flags is None else list(flags))}
+
+    def command(self, command):
+        self.assertEqual(Path(command[0]).name, 'abidw')
+        self.assertIn('--out-file', command)
+        self.invocations.append(command)
+        if self.generate_failure:
+            return SimpleNamespace(returncode=1, stdout='', stderr='debug information unavailable')
+        output = Path(command[command.index('--out-file') + 1])
+        output.write_text('<abi-corpus><abi-instr><function-decl name="fixture"/></abi-instr></abi-corpus>')
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    def dump(self):
+        entry = library()
+        planner['dump_abi'](self.root, 'fixture', entry)
+        return entry
+
+    def test_identical_verified_inputs_reuse_one_dump(self):
+        first = self.dump()
+        self.assertTrue(self.receipt.is_file())
+        second = self.dump()
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(first['abi_dump_hashes'], second['abi_dump_hashes'])
+        self.assertEqual(second['abi_empty'], [])
+
+    def test_runtime_bytes_change_regenerates_dump(self):
+        self.dump()
+        self.runtime.write_bytes(b'changed runtime bytes')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_external_debug_bytes_change_regenerates_dump(self):
+        self.dump()
+        self.debug.write_bytes(b'changed debug bytes')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_tool_identity_change_regenerates_dump(self):
+        self.dump()
+        self.tool = 'libabigail-test-build-2'
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_analysis_flags_change_regenerates_dump(self):
+        self.dump()
+        self.flags.append('--load-all-types')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_corrupt_dump_regenerates_instead_of_trusting_receipt(self):
+        self.dump()
+        self.output.write_text('<abi-corpus><abi-instr><type-decl name="different"/></abi-instr></abi-corpus>')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_missing_dump_regenerates(self):
+        self.dump()
+        self.output.unlink()
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_corrupt_receipt_regenerates(self):
+        self.dump()
+        self.receipt.write_text('{interrupted receipt')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_unbound_input_does_not_reuse_old_dump(self):
+        self.dump()
+        self.inputs_available = False
+        self.generate_failure = True
+        with self.assertRaisesRegex(RuntimeError, 'debug ABI'):
+            self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_failed_regeneration_cannot_leave_reusable_old_proof(self):
+        self.dump()
+        self.debug.unlink()
+        self.generate_failure = True
+        with self.assertRaisesRegex(RuntimeError, 'debug ABI'):
+            self.dump()
+        self.generate_failure = False
+        self.dump()
+        self.assertEqual(len(self.invocations), 3)
+
+
+class StreamingAbiValidation(unittest.TestCase):
+    def test_large_typed_dump_validation_has_bounded_memory(self):
+        with TemporaryDirectory(prefix='abi-stream-validation-') as temporary:
+            output = Path(temporary) / 'large.xml'
+            with output.open('w') as handle:
+                handle.write('<abi-corpus><abi-instr>')
+                for _ in range(200):
+                    handle.write('<type-decl name="fixture"/>' * 1000)
+                handle.write('</abi-instr></abi-corpus>')
+            script = ('import json,resource,runpy,sys; p=runpy.run_path(sys.argv[1]); '
+                      'result=p["validate_abi_dump"](sys.argv[2],"unused-typed-source"); '
+                      'print(json.dumps({"empty":result,"rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))')
+            result = subprocess.run([sys.executable, '-c', script, str(ROOT / 'bin/shared-library-plan'), str(output)],
+                                    capture_output=True, text=True, check=True)
+            proof = json.loads(result.stdout)
+            self.assertFalse(proof['empty'])
+            self.assertLess(proof['rss_kib'], 64 * 1024)
+
+    def test_typed_prefix_does_not_hide_malformed_xml_tail(self):
+        with TemporaryDirectory(prefix='abi-stream-invalid-') as temporary:
+            output = Path(temporary) / 'invalid.xml'
+            output.write_text('<abi-corpus><abi-instr><type-decl/></abi-instr><broken></abi-corpus>')
+            with self.assertRaises(namespace['ET'].ParseError):
+                planner['validate_abi_dump'](output, 'unused-typed-source')
+
+
+@unittest.skipUnless(all(shutil.which(tool) for tool in ['gcc', 'objcopy', 'strip', 'abidw', 'readelf']),
+                     'GCC, binutils and libabigail required')
+class NativeAbiDumpCache(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory(prefix='native-abi-dump-cache-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.runtime = self.root / 'lib/libfixture.so.1'
+        self.runtime.parent.mkdir()
+        source = self.root / 'source.c'
+        source.write_text('struct input { int value; }; int fixture(struct input *input) { return input->value; }')
+        subprocess.run(['gcc', '-shared', '-fPIC', '-g', '-Wl,-soname,libfixture.so.1',
+                        '-o', str(self.runtime), str(source)], check=True, capture_output=True)
+        self.output = self.root / planner['METADATA'] / 'abi/fixture/libfixture.so.1.xml'
+        self.original_run = namespace['run']
+        self.invocations = []
+        self.command_patch = patch.dict(namespace, {'run': self.command})
+        self.command_patch.start()
+        self.addCleanup(self.command_patch.stop)
+
+    def command(self, command):
+        if Path(command[0]).name == 'abidw' and '--out-file' in command:
+            self.invocations.append(command)
+        return self.original_run(command)
+
+    def dump(self):
+        planner['dump_abi'](self.root, 'fixture', library())
+
+    def test_native_identical_elf_reuses_verified_dump(self):
+        self.dump()
+        self.dump()
+        self.assertEqual(len(self.invocations), 1)
+
+    def test_native_unrelated_debug_file_does_not_invalidate_this_library(self):
+        unrelated = self.root / 'debug/lib/other.so.1.debug'
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_bytes(b'unrelated debug input')
+        self.dump()
+        unrelated.write_bytes(b'changed unrelated debug input')
+        self.dump()
+        self.assertEqual(len(self.invocations), 1)
+
+    def test_native_identical_copied_root_reuses_verified_dump(self):
+        self.dump()
+        with TemporaryDirectory(prefix='native-abi-copy-') as temporary:
+            copied = Path(temporary) / 'sdk'
+            shutil.copytree(self.root, copied)
+            planner['dump_abi'](copied, 'fixture', library())
+        self.assertEqual(len(self.invocations), 1)
+
+    def test_native_captured_inputs_adopt_completed_dump_and_reject_changed_input(self):
+        captured = planner['abi_dump_inputs'](self.root, 'lib/libfixture.so.1', debug_scope='tree')
+        self.assertIsNotNone(captured)
+        self.dump()
+        proof = self.output.with_suffix('.xml.inputs.json')
+        proof.unlink()
+        output_hash = hashlib.sha256(self.output.read_bytes()).hexdigest()
+        planner['adopt_abi_dump'](self.root, 'lib/libfixture.so.1', self.output, captured, output_hash)
+        self.dump()
+        self.assertEqual(len(self.invocations), 1)
+        with self.runtime.open('ab') as handle:
+            handle.write(b'input changed during old analysis')
+        with self.assertRaisesRegex(RuntimeError, 'captured input proof'):
+            planner['adopt_abi_dump'](self.root, 'lib/libfixture.so.1', self.output, captured, output_hash)
+
+    def test_native_changed_elf_invalidates_old_dump(self):
+        self.dump()
+        with self.runtime.open('ab') as handle:
+            handle.write(b'changed ELF input')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_native_corrupt_dump_regenerates(self):
+        self.dump()
+        self.output.write_text('<abi-corpus/>')
+        self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_native_missing_debug_never_reuses_cached_types(self):
+        self.dump()
+        subprocess.run(['strip', '--strip-debug', str(self.runtime)], check=True, capture_output=True)
+        with self.assertRaisesRegex(RuntimeError, 'type information'):
+            self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def split_debug(self):
+        debug = self.root / 'debug' / str(self.runtime).lstrip('/')
+        debug = debug.with_name(debug.name + '.debug')
+        debug.parent.mkdir(parents=True)
+        subprocess.run(['objcopy', '--only-keep-debug', str(self.runtime), str(debug)], check=True, capture_output=True)
+        subprocess.run(['strip', '--strip-debug', str(self.runtime)], check=True, capture_output=True)
+        subprocess.run(['objcopy', '--add-gnu-debuglink=' + str(debug), str(self.runtime)], check=True, capture_output=True)
+        return debug
+
+    def test_native_external_debug_bytes_are_bound_even_when_runtime_is_unchanged(self):
+        debug = self.split_debug()
+        runtime_hash = hashlib.sha256(self.runtime.read_bytes()).hexdigest()
+        self.dump()
+        with debug.open('ab') as handle:
+            handle.write(b'changed separate debug input')
+        try:
+            self.dump()
+        except RuntimeError as error:
+            self.assertIn('type information', str(error))
+        self.assertEqual(hashlib.sha256(self.runtime.read_bytes()).hexdigest(), runtime_hash)
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_native_missing_external_debug_does_not_reuse_cached_types(self):
+        debug = self.split_debug()
+        self.dump()
+        debug.unlink()
+        with self.assertRaisesRegex(RuntimeError, 'type information'):
+            self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_native_flag_change_regenerates_dump(self):
+        self.dump()
+        with patch.dict(namespace, {'ABI_DUMP_FLAGS': tuple(reversed(namespace['ABI_DUMP_FLAGS']))}):
+            self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+    def test_native_tool_binary_change_regenerates_dump(self):
+        tools = self.root / 'tools'
+        tools.mkdir()
+        executable = tools / 'abidw'
+        shutil.copy2(shutil.which('abidw'), executable)
+        with patch.dict(os.environ, {'PATH': str(tools) + os.pathsep + os.environ['PATH']}):
+            self.dump()
+            with executable.open('ab') as handle:
+                handle.write(b'changed analysis tool bytes')
+            self.dump()
+        self.assertEqual(len(self.invocations), 2)
+
+
+if __name__ == '__main__':
+    unittest.main()
