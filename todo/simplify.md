@@ -22,6 +22,10 @@ Success means working Alpine and EL8 builds, reusable caches, reliable publicati
 
 The cache-hit path must work without workspace files generated only by compilation. Do not re-record an unchanged SDK. Actual library compilation already records its payload in `src/step/RunSPC.php`.
 
+Subsequent CI evidence from job `128746788330` in run `42485596531` confirms the no-op ABI fix: `rebuilt_libraries: []`, cached classifications reused for all 68 libraries, and zero libraries analyzed for both RPM and DEB. No PHP consumer archives were scanned. That run was later superseded for a separate tool/cache-key correction, so it does not prove overall pipeline success.
+
+Its remaining long SDK step was package creation: gRPC RPM debuginfo took approximately ten minutes under the current explicit xz compression. Inspect packaging/compression costs separately from ABI analysis. First publication still needs the library archives; subsequent unchanged updates should reuse already published archives. Preserve target package-manager compatibility when changing compression.
+
 ### Alpine: preinstalled go-xcaddy is not recognized
 
 - Run: https://github.com/static-php/packages/actions/runs/42482906241
