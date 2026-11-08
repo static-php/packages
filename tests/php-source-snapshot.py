@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import unittest
 import subprocess
+import sys
 
 HELPER = Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/php-source.py'
 spec = importlib.util.spec_from_file_location('php_source', HELPER)
@@ -89,6 +90,67 @@ class PhpSources(unittest.TestCase):
         self.assertEqual(after['php-src']['source']['version'], '8.2.35')
         self.assertEqual(after['php-src']['source'], selected['source'])
         self.assertEqual(selected['provenance']['kind'], 'download-cache-capture')
+
+    def run_library_source_selection(self):
+        repository = HELPER.parents[3]
+        (self.root / 'config/templates/craft.yml.twig').write_text((repository / 'config/templates/craft.yml.twig').read_text())
+        helper = self.root / '.github/actions/shared-libraries/php-source.py'
+        helper.parent.mkdir(parents=True)
+        helper.symlink_to(HELPER)
+        spc = self.root / 'spc-probe'
+        spc.write_text('#!' + sys.executable + '\n' + '''import json, sys
+from pathlib import Path
+Path('spc-input.json').write_text(json.dumps({
+    'arguments': sys.argv[1:],
+    'cache': json.loads(Path('downloads/.cache.json').read_text()),
+}))
+sys.exit(1)
+''')
+        spc.chmod(0o755)
+        command = r'''
+namespace staticphp\step {
+    function parse_ini_file($filename) {
+        return $filename === '/etc/os-release'
+            ? ['ID' => 'almalinux', 'VERSION_ID' => '8'] : \parse_ini_file($filename);
+    }
+}
+namespace {
+    require $argv[2] . '/vendor/autoload.php';
+    define('BASE_PATH', $argv[1]);
+    define('SPP_TYPE', 'rpm');
+    define('SPP_TARGET', null);
+    function getSharedLibrarySuffix(): string { return '-zts-84'; }
+    putenv('SPP_SPC_BINARY=' . BASE_PATH . '/spc-probe');
+    exit(\staticphp\step\RunSPC::run(phpVersion: '8.4', libsOnly: true) ? 1 : 0);
+}
+'''
+        return subprocess.run(['php', '-r', command, str(self.root), str(repository)],
+                              capture_output=True, text=True)
+
+    def test_library_build_selects_pinned_php_before_spc(self):
+        self.record('8.4.27', extension='xz')
+        stable = source.capture(self.root, '8.4.27')['source']
+        self.record('8.6.0RC4')
+        source.capture(self.root, '8.6.0RC4')
+        result = self.run_library_source_selection()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        probe = source.read(self.root / 'spc-input.json')
+        self.assertIsNotNone(probe, result.stdout + result.stderr)
+        self.assertEqual(probe['arguments'], ['craft', '--libs-only'])
+        self.assertEqual(probe['cache']['php-src']['source'], stable)
+        self.assertIn('download: false', (self.root / 'craft.yml').read_text())
+
+    def test_library_build_rejects_changed_php_archive_before_spc(self):
+        archive = self.record('8.4.27', extension='xz')
+        source.capture(self.root, '8.4.27')
+        self.record('8.6.0RC4')
+        source.capture(self.root, '8.6.0RC4')
+        archive.write_bytes(archive.read_bytes() + b'changed')
+        result = self.run_library_source_selection()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Frozen PHP source SHA1 differs', result.stdout + result.stderr)
+        self.assertFalse((self.root / 'spc-input.json').exists())
+        self.assertFalse((self.root / 'craft.yml').exists())
 
     def test_capture_rejects_other_current_release(self):
         self.record('8.6.0RC4')

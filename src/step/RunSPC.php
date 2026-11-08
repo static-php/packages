@@ -55,11 +55,9 @@ class RunSPC
             echo "Selected PHP release: {$sourceVersion}\n";
             $craftYml = TwigRenderer::renderCraftTemplate($phpVersion, null, $packages, $sourceVersion, $libraries);
             $configuration = Yaml::parse($craftYml);
-            if (!$libsOnly) {
-                $source = new Process(['python3', BASE_PATH . '/.github/actions/shared-libraries/php-source.py', '--root', BASE_PATH, '--version', $sourceVersion, '--select']);
-                $source->setTimeout(null);
-                $source->mustRun();
-            }
+            $source = new Process(['python3', BASE_PATH . '/.github/actions/shared-libraries/php-source.py', '--root', BASE_PATH, '--version', $sourceVersion, '--select']);
+            $source->setTimeout(null);
+            $source->mustRun();
             $configuration['craft-options']['download'] = false;
             $configuration['download-options']['ignore-cache-sources'] = '';
             if (!$libsOnly) {
