@@ -553,7 +553,7 @@ def apply(sdk, variants, profile):
     for name in sorted(receipt["files"]):
         copy_file(rooted(variants / profile / "files", name), rooted(sdk, name))
     entry = copy.deepcopy(receipt["entry"])
-    for field in ("abi_epoch", "abi_capability", "abi_capabilities", "package_versions"):
+    for field in ("abi_epoch", "abi_capability", "abi_capabilities", "abi_comparison", "package_versions"):
         if field in old:
             entry[field] = copy.deepcopy(old[field])
     manifest["libraries"]["openssl"] = entry

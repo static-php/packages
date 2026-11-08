@@ -436,7 +436,28 @@ def abi_difference(previous, current):
     raise RuntimeError('Unrecognized abidiff result: ' + str(result.returncode))
 
 
-def compare(old, new, old_root, new_root, bootstrap=False):
+def cached_abi(root, library):
+    names = set(soname_files(library))
+    dumps = library.get('abi_dump', {})
+    hashes = library.get('abi_dump_hashes', {})
+    empty = library.get('abi_empty')
+    return ('abi_dump' in library and 'abi_dump_hashes' in library and set(dumps) == names and set(hashes) == names
+            and isinstance(empty, list) and set(empty) <= names
+            and all(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value) for value in hashes.values())
+            and all(rooted(root, path).is_file() for path in dumps.values()))
+
+
+def abi_baseline(library):
+    if library is None:
+        return None
+    names = set(soname_files(library))
+    hashes = library.get('abi_dump_hashes', {})
+    if set(hashes) != names:
+        return None
+    return digest({'sonames': sorted(names), 'hashes': hashes, 'epoch': library.get('abi_epoch', 1)})
+
+
+def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=None):
     if not old['libraries'] and not bootstrap:
         raise RuntimeError('No published ABI baseline; initial migration requires --bootstrap')
     for key in ['architecture', 'libc', 'runtime_libdir']:
@@ -445,17 +466,41 @@ def compare(old, new, old_root, new_root, bootstrap=False):
     annotated = copy.deepcopy(new)
     changes = {}
     abi_context = {}
-    unchanged, compared = 0, 0
+    unchanged, compared, reused = 0, 0, 0
     for identifier, library in sorted(annotated['libraries'].items()):
-        dump_abi(new_root, identifier, library, abi_context)
+        analyze = rebuilt_libraries is None or identifier in rebuilt_libraries
+        if analyze:
+            dump_abi(new_root, identifier, library, abi_context)
+        elif not cached_abi(new_root, library):
+            raise RuntimeError('Unchanged library has no classified cached ABI: ' + identifier)
+        else:
+            reused += 1
         previous = old['libraries'].get(identifier)
         status = 'added' if previous is None else 'compatible'
-        if previous:
+        baseline = abi_baseline(previous)
+        cached = library.get('abi_comparison', {})
+        reuse_comparison = (not analyze and previous and baseline is not None
+                            and cached.get('baseline') == baseline
+                            and cached.get('candidate') == library['abi_dump_hashes']
+                            and cached.get('status') in ('compatible', 'breaking'))
+        if reuse_comparison:
+            status = cached['status']
+        elif previous:
             old_names = soname_files(previous)
             new_names = soname_files(library)
             if old_names.keys() - new_names.keys():
                 status = 'breaking'
             for name in sorted(old_names.keys() & new_names.keys()):
+                if not analyze:
+                    if previous.get('abi_dump_hashes', {}).get(name) == library['abi_dump_hashes'][name]:
+                        unchanged += 1
+                        continue
+                    if name in previous.get('abi_empty', []):
+                        continue
+                    if name in library['abi_empty']:
+                        status = 'breaking'
+                        continue
+                    raise RuntimeError('Published ABI baseline changed for unchanged library; rebuild ' + identifier)
                 old_dump = previous.get('abi_dump', {}).get(name)
                 if not old_dump:
                     raise RuntimeError('Published library has no debug ABI: {} ({})'.format(identifier, name))
@@ -480,10 +525,13 @@ def compare(old, new, old_root, new_root, bootstrap=False):
         library['abi_epoch'] = epoch
         library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
         library['abi_capabilities'] = [library['abi_capability']]
+        library['abi_comparison'] = {'baseline': baseline, 'candidate': library.get('abi_dump_hashes', {}), 'status': status}
         changes[identifier] = {'status': status, 'abi_epoch': epoch, 'abi_capability': library['abi_capability']}
     for identifier in sorted(old['libraries'].keys() - annotated['libraries'].keys()):
         changes[identifier] = {'status': 'removed'}
     progress('ABI comparison complete: {} unchanged shared objects reused, {} compared'.format(unchanged, compared))
+    if rebuilt_libraries is not None:
+        progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed'.format(reused, len(annotated['libraries']) - reused))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
                        'bootstrap': not bool(old['libraries']), 'libraries': changes}
 
@@ -553,7 +601,7 @@ def empty_manifest():
     return {'schema': 1, 'linkage': 'shared', 'libraries': {}}
 
 
-def merge_baselines(baselines, kind, destination):
+def merge_baselines(baselines, kind, destination, abi_libraries=None):
     merged = empty_manifest()
     divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
     drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
@@ -593,7 +641,7 @@ def merge_baselines(baselines, kind, destination):
         if selected.get('abi_epoch', 1) < max(library.get('abi_epoch', 1) for library, _ in available):
             raise RuntimeError('Published ABI generation moved backwards: ' + identifier)
         merged['libraries'][identifier] = copy.deepcopy(selected)
-        for relative in selected.get('abi_dump', {}).values():
+        for relative in selected.get('abi_dump', {}).values() if abi_libraries is None or identifier in abi_libraries else ():
             output = rooted(destination, relative)
             output.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(rooted(source, relative), output)
@@ -688,8 +736,10 @@ def prepare(args):
     if bootstrap and mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
         raise RuntimeError('Bootstrap requires full mode or a full migration request for every PHP stream')
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
-        old, divergent = merge_baselines(baselines, args.type, temporary)
-        annotated, comparison = compare(old, current, temporary, args.root, bootstrap)
+        old, divergent = merge_baselines(baselines, args.type, temporary,
+                                         None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
+        annotated, comparison = compare(old, current, temporary, args.root, bootstrap,
+                                       None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
     for identifier, library in annotated['libraries'].items():
         published = old['libraries'].get(identifier, {}).get('published_version')
         versions = library.setdefault('package_versions', {})
@@ -779,7 +829,12 @@ def prepare(args):
     write_json(args.output, plan)
 
 
-def metadata_entries(archive, prefix=METADATA):
+def selected_metadata(name, prefix, abi_libraries):
+    parts = PurePosixPath(name).relative_to(prefix).parts
+    return abi_libraries is None or parts[0] != 'abi' or len(parts) > 1 and parts[1] in abi_libraries
+
+
+def metadata_entries(archive, prefix=METADATA, abi_libraries=None):
     with tarfile.open(fileobj=archive, mode='r|*', ignore_zeros=True) as data:
         for member in data:
             name = member.name[2:] if member.name.startswith('./') else member.name
@@ -787,11 +842,11 @@ def metadata_entries(archive, prefix=METADATA):
             if not name.startswith(prefix + '/'):
                 continue
             relative_path(name)
-            if member.isfile():
+            if member.isfile() and selected_metadata(name, prefix, abi_libraries):
                 yield name, data.extractfile(member).read()
 
 
-def cpio_entries(data, prefix=METADATA):
+def cpio_entries(data, prefix=METADATA, abi_libraries=None):
     offset = 0
     while offset + 110 <= len(data):
         header = data[offset:offset + 110]
@@ -810,18 +865,18 @@ def cpio_entries(data, prefix=METADATA):
         if name.startswith(prefix + '/'):
             relative_path(name)
             mode = int(header[14:22], 16)
-            if mode & 0o170000 == 0o100000:
+            if mode & 0o170000 == 0o100000 and selected_metadata(name, prefix, abi_libraries):
                 yield name, data[start:start + size]
         offset = (start + size + 3) & ~3
 
 
-def extract_metadata(path, kind, destination):
+def extract_metadata(path, kind, destination, abi_libraries=None):
     if kind == 'rpm':
-        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]))
+        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]), abi_libraries=abi_libraries)
     elif kind == 'deb':
-        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])))
+        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])), abi_libraries=abi_libraries)
     else:
-        entries = metadata_entries(gzip.GzipFile(filename=str(path)))
+        entries = metadata_entries(gzip.GzipFile(filename=str(path)), abi_libraries=abi_libraries)
     found = False
     for name, content in entries:
         output = rooted(destination, name)
@@ -1151,6 +1206,9 @@ def baseline_single(args):
     native_metadata = {stream: {} for stream in STREAMS}
     migration = {}
     layout_metadata = None
+    consumer_stream = getattr(args, 'consumer_stream', '8.5')
+    scan_consumers = not getattr(args, 'skip_consumers', False)
+    abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
     with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
         temporary = Path(temporary)
         if args.type == 'rpm':
@@ -1162,12 +1220,12 @@ def baseline_single(args):
             else:
                 raise RuntimeError('RPM baseline requires --base-url or --host and --remote-directory')
             packages = rpm['published_packages'](reader)
-            consumer_index = published_rpm_consumer_index(reader, packages, architecture)
+            consumer_index = published_rpm_consumer_index(reader, packages, architecture) if scan_consumers else {}
             for package in packages:
                 if (package['arch'] == architecture and not package['name'].startswith('php-zts-lib-')
                         and not package['name'].endswith('-debuginfo') and package['name'] != 'php-zts-runtime-layout'):
                     stream = rpm['php_stream'](package['version'])
-                    if stream in consumers:
+                    if scan_consumers and stream == consumer_stream:
                         consumers[stream].add(package['name'])
                         versions = consumer_versions[stream]
                         if package['name'] not in versions or native_compare('rpm', package['evr'], versions[package['name']]) > 0:
@@ -1200,9 +1258,9 @@ def baseline_single(args):
                     if layout_metadata is None:
                         raise RuntimeError('Published runtime layout has no metadata')
                     layout_metadata.update(package_version=package['evr'], archive=package['archive'], archive_sha256=package['archive_sha256'], complete=True)
-                elif not extract_metadata(path, 'rpm', destination):
+                elif not extract_metadata(path, 'rpm', destination, abi_libraries):
                     raise RuntimeError('Published library has no ABI metadata: ' + package['name'])
-            for stream, versions in consumer_versions.items():
+            for stream, versions in consumer_versions.items() if scan_consumers else ():
                 shared = any(package['name'] == 'php-zts-cli' and package['evr'] == versions.get('php-zts-cli')
                              and any(name.startswith('php-zts-shared-runtime') for name in package.get('provides', [])) for package in packages)
                 if not shared:
@@ -1245,9 +1303,9 @@ def baseline_single(args):
             consumer_password = os.environ.get(args.consumer_password_env, '') if args.consumer_password_env else password
             auth = (args.owner, password) if password else None
             packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
-            consumer_streams = STREAMS
+            consumer_streams = [consumer_stream] if scan_consumers else []
             if args.owner in [value.replace('.', '') for value in STREAMS]:
-                consumer_streams = [args.owner[0] + '.' + args.owner[1:]]
+                consumer_streams = [consumer_stream] if scan_consumers and args.owner == consumer_stream.replace('.', '') else []
             for stream in consumer_streams:
                 owner = stream.replace('.', '')
                 versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, native_metadata,
@@ -1288,7 +1346,7 @@ def baseline_single(args):
                             if layout_metadata is None:
                                 raise RuntimeError('Published runtime layout has no metadata')
                             layout_metadata.update(package_version=item['version'], archive=item['archive'], archive_sha256=item['archive_sha256'], complete=True)
-                        elif not extract_metadata(path, args.type, destination):
+                        elif not extract_metadata(path, args.type, destination, abi_libraries):
                             raise RuntimeError('Published library has no ABI metadata: ' + name)
                         selected[name] = item
                         matched = True
@@ -1301,7 +1359,9 @@ def baseline_single(args):
     aggregate['consumer_dependencies'] = dependencies
     aggregate['consumer_components'] = components
     aggregate['consumer_native_metadata'] = native_metadata
-    aggregate['consumer_inventory_complete'] = True
+    aggregate['consumer_inventory_complete'] = scan_consumers and (args.type == 'rpm' or args.owner == consumer_stream.replace('.', ''))
+    if aggregate['consumer_inventory_complete']:
+        aggregate['consumer_inventory_stream'] = consumer_stream
     aggregate['migration_cutoffs'] = migration
     if layout_metadata:
         aggregate['runtime_layout'] = layout_metadata
@@ -1329,10 +1389,11 @@ def baseline_single(args):
             library['published_debug_required'] = package.get('debug_required', False)
             if package.get('debug_archive'):
                 library['published_debug_archive'] = package['debug_archive']
-            hashes = {name: file_sha256(rooted(destination, relative)) for name, relative in library.get('abi_dump', {}).items()}
-            if library.get('abi_dump_hashes', hashes) != hashes:
-                raise RuntimeError('Published ABI data checksum mismatch: ' + identifier)
-            library['abi_dump_hashes'] = hashes
+            if abi_libraries is None or identifier in abi_libraries:
+                hashes = {name: file_sha256(rooted(destination, relative)) for name, relative in library.get('abi_dump', {}).items()}
+                if library.get('abi_dump_hashes', hashes) != hashes:
+                    raise RuntimeError('Published ABI data checksum mismatch: ' + identifier)
+                library['abi_dump_hashes'] = hashes
     validate_manifest(aggregate, False)
     write_json(destination / 'shared-libraries.json', aggregate)
 
@@ -1366,7 +1427,7 @@ def baseline(args):
         if not sources:
             raise RuntimeError('RPM baseline requires --base-url or --remote-directory')
     else:
-        owners = getattr(args, 'owners', None) or ','.join(stream.replace('.', '') for stream in STREAMS)
+        owners = getattr(args, 'owners', None) or '85'
         owners = [owner.strip() for owner in owners.split(',') if owner.strip()]
         if getattr(args, 'owner', None):
             owners.append(args.owner)
@@ -1394,13 +1455,26 @@ def baseline(args):
             progress('Read {} baseline from {} in {:.1f}s'.format(args.type, location, time.monotonic() - started))
             baselines.append((manifest(Path(source_args.output) / 'shared-libraries.json', False), source_args.output))
             captured.append(source)
-        merged, divergent = merge_baselines(baselines, args.type, destination)
+        abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
+        merged, divergent = merge_baselines(baselines, args.type, destination, abi_libraries)
         merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
         merged['divergent_libraries'] = sorted(divergent)
         merged['baseline_origins'] = captured
+        if not getattr(args, 'skip_consumers', False):
+            stream = getattr(args, 'consumer_stream', '8.5')
+            shared_consumer_inventory(merged, stream)
+            merged['consumer_inventory_complete'] = any(value.get('consumer_inventory_stream') == stream
+                                                        and value.get('consumer_inventory_complete') for value, _ in baselines)
         if skipped:
             merged['skipped_origins'] = skipped
         write_json(destination / 'shared-libraries.json', merged)
+
+
+def shared_consumer_inventory(value, stream='8.5'):
+    for field in ['consumers', 'consumer_dependencies', 'consumer_components']:
+        canonical = value.get(field, {}).get(stream, [] if field == 'consumers' else {})
+        value[field] = {target: copy.deepcopy(canonical) for target in STREAMS}
+    value['consumer_inventory_stream'] = stream
 
 
 def cutoff_baseline(path, kind):
@@ -1653,6 +1727,9 @@ def main():
     command.add_argument('--owners')
     command.add_argument('--password-env')
     command.add_argument('--consumer-password-env', default='FORGEJO_PASSWORD')
+    command.add_argument('--consumer-stream', choices=STREAMS, default='8.5')
+    command.add_argument('--skip-consumers', action='store_true')
+    command.add_argument('--abi-libraries')
     command.add_argument('--output', required=True)
     command = commands.add_parser('migration-cutoffs')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])

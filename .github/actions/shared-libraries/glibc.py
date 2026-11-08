@@ -42,9 +42,11 @@ def architecture():
     return 'aarch64' if os.environ['MATRIX_ARCH'] == 'arm64' else 'x86_64'
 
 
-def baseline(kind, directory):
+def baseline(kind, directory, consumers=False, abi_libraries=()):
     args = ['python3', 'bin/shared-library-plan', 'baseline', '--type', kind,
             '--arch', os.environ['MATRIX_ARCH'], '--output', directory]
+    args += ['--consumer-stream', '8.5'] if consumers else ['--skip-consumers']
+    args += ['--abi-libraries', ','.join(sorted(abi_libraries))]
     if kind == 'rpm':
         host = os.environ.get('RPM_BASE_URL', 'https://rpm.henderkes.com').rstrip('/')
         args += ['--base-url', host + '/' + architecture() + '/el8']
@@ -54,6 +56,17 @@ def baseline(kind, directory):
         args += ['--host', 'https://git.henderkes.com',
                  '--password-env', 'FORGEJO_PASSWORD', '--consumer-password-env', 'FORGEJO_PASSWORD']
     run(args)
+
+
+def share_consumers(source, destination):
+    canonical = read(source / 'shared-libraries.json')
+    path = destination / 'shared-libraries.json'
+    value = read(path)
+    for field in ['consumers', 'consumer_dependencies', 'consumer_components',
+                  'consumer_inventory_complete', 'consumer_inventory_stream']:
+        if field in canonical:
+            value[field] = canonical[field]
+    write(path, value)
 
 
 def revision_flags():
@@ -105,7 +118,7 @@ def merge_library_abi(common, formats):
         capability = 'php-zts-lib-' + name + '-abi-' + str(entry['abi_epoch'])
         entry['abi_capability'] = capability
         entry['abi_capabilities'] = [capability]
-        for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty']:
+        for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_comparison']:
             if field in current:
                 entry[field] = current[field]
         yield kind, entry
@@ -132,11 +145,17 @@ def classify():
     STAGE.mkdir(exist_ok=True)
     run(['python3', '.github/actions/shared-libraries/source-plan.py', '--reconcile', '--root', '.',
          '--output', STAGE / 'effective-source-plan.json'])
+    build_plan = read(STAGE / 'library-build-plan.json')
+    rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
     for kind in FORMATS:
         run(['php', 'tests/package-versions.php', '--type=' + kind])
-        baseline(kind, STAGE / kind / 'baseline')
-    rebuilt = set(read(STAGE / 'library-build-plan.json').get('rebuilt_libraries', []))
+        baseline(kind, STAGE / kind / 'baseline', consumers=bool(rebuilt) and kind == 'deb', abi_libraries=rebuilt)
+    if rebuilt:
+        share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
     variants_ready = False
+    if not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
+        run(variants('build', sdk))
+        variants_ready = True
     for phase in range(100):
         plans, reverse_roots = {}, set()
         for kind in FORMATS:
@@ -172,8 +191,6 @@ def classify():
                 break
             run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
             run(variants('build', sdk))
-            run(['php', 'bin/build-payload', 'record', '--root', sdk, '--config', 'craft.yml',
-                 '--php-version', '8.4', '--arch', architecture(), '--kind', 'sdk'])
             run(['php', 'bin/build-payload', 'seal', '--root', sdk])
             variants_ready = True
             continue

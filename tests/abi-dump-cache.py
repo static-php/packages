@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import os
 from pathlib import Path
@@ -94,6 +95,66 @@ class AbiDumpCache(unittest.TestCase):
         self.assertEqual(len(self.invocations), 1)
         self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 7)
         self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
+
+    def test_explicit_unchanged_selection_skips_all_abi_tools_and_xml_reads(self):
+        baseline, previous = self.baseline()
+        forbidden = {name: Mock(side_effect=AssertionError('Unchanged ABI must be reused directly'))
+                     for name in ['dump_abi', 'abi_dump_inputs', 'validate_abi_dump', 'abi_difference', 'file_sha256']}
+        with patch.dict(namespace, forbidden):
+            updated, result = planner['compare'](previous, previous, baseline, self.root, rebuilt_libraries=set())
+        for operation in forbidden.values():
+            operation.assert_not_called()
+        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 7)
+        self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
+
+    def test_only_the_regenerated_library_enters_abi_analysis(self):
+        baseline, previous = self.baseline()
+        other = copy.deepcopy(previous['libraries']['fixture'])
+        other.update(files=['lib/libother.so.1'], elf={'lib/libother.so.1': {'soname': 'libother.so.1', 'needed': []}},
+                     abi_dump={'libother.so.1': previous['libraries']['fixture']['abi_dump']['libfixture.so.1']},
+                     abi_dump_hashes={'libother.so.1': previous['libraries']['fixture']['abi_dump_hashes']['libfixture.so.1']})
+        previous['libraries']['other'] = other
+        dump = Mock()
+        with patch.dict(namespace, {'dump_abi': dump}):
+            planner['compare'](previous, previous, baseline, self.root, rebuilt_libraries={'fixture'})
+        self.assertEqual([call.args[1] for call in dump.call_args_list], ['fixture'])
+
+    def test_unchanged_library_with_no_sonames_reuses_empty_abi_inventory(self):
+        entry = dict(version='1.0', files=[], elf={}, abi_dump={}, abi_dump_hashes={}, abi_empty=[])
+        value = {'libraries': {'fixture': entry}}
+        with patch.dict(namespace, {'dump_abi': Mock(side_effect=AssertionError('unchanged library'))}):
+            updated, result = planner['compare'](value, value, self.root, self.root, rebuilt_libraries=set())
+        self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
+
+    def test_changed_published_baseline_requires_rebuild_without_analyzing_unchanged_outputs(self):
+        baseline, previous = self.baseline()
+        published = copy.deepcopy(previous)
+        published['libraries']['fixture']['abi_dump_hashes']['libfixture.so.1'] = 'f' * 64
+        dump, difference = Mock(), Mock()
+        with patch.dict(namespace, {'dump_abi': dump, 'abi_difference': difference}), self.assertRaisesRegex(RuntimeError, 'baseline changed.*rebuild fixture'):
+            planner['compare'](published, previous, baseline, self.root, rebuilt_libraries=set())
+        dump.assert_not_called()
+        difference.assert_not_called()
+
+    def test_cached_breaking_result_is_reused_without_advancing_epoch_twice(self):
+        baseline, previous = self.baseline()
+        candidate = copy.deepcopy(previous)
+        candidate['libraries']['fixture']['abi_dump_hashes']['libfixture.so.1'] = 'e' * 64
+        with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': Mock(return_value='breaking')}):
+            updated, _ = planner['compare'](previous, candidate, baseline, self.root, rebuilt_libraries={'fixture'})
+        forbidden = {name: Mock(side_effect=AssertionError('Cached ABI result must be reused'))
+                     for name in ['dump_abi', 'abi_difference', 'file_sha256']}
+        with patch.dict(namespace, forbidden):
+            retried, result = planner['compare'](previous, updated, baseline, self.root, rebuilt_libraries=set())
+        self.assertEqual(retried['libraries']['fixture']['abi_epoch'], 8)
+        self.assertEqual(result['libraries']['fixture']['status'], 'breaking')
+
+    def test_unchanged_library_without_classified_cache_is_rejected(self):
+        baseline, previous = self.baseline()
+        candidate = copy.deepcopy(previous)
+        candidate['libraries']['fixture'].pop('abi_dump_hashes')
+        with self.assertRaisesRegex(RuntimeError, 'no classified cached ABI'):
+            planner['compare'](previous, candidate, baseline, self.root, rebuilt_libraries=set())
 
     def test_new_published_baseline_requires_comparison_even_without_a_rebuild(self):
         baseline, previous = self.baseline()

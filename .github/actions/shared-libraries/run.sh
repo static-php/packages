@@ -54,6 +54,13 @@ fi
 baseline() {
     local output=$1
     local args=(--type "$TYPE" --arch "$MATRIX_ARCH" --output "$output")
+    local rebuilt
+    rebuilt=$(python3 -c 'import json; from pathlib import Path; f=Path("stage/library-build-plan.json"); p=json.loads(f.read_text()) if f.is_file() else {}; print(",".join(json.load(open("buildroot/shared-libraries.json"))["libraries"] if p.get("full") else p.get("rebuilt_libraries", [])))')
+    args+=(--abi-libraries "$rebuilt")
+    if [[ -z "$rebuilt" ]]; then
+        args+=(--skip-consumers)
+    fi
+    args+=(--consumer-stream 8.5)
     if [[ "$TYPE" == rpm ]]; then
         if [[ "${GLIBC_PIPELINE:-}" == true ]]; then
             local arch="$MATRIX_ARCH"
@@ -116,7 +123,7 @@ case "$command" in
         for phase in $(seq 1 1000); do
             rebuilt=''
             if [[ -f stage/library-build-plan.json ]]; then
-                rebuilt=$(python3 -c 'import json; print(",".join(json.load(open("stage/library-build-plan.json")).get("rebuilt_libraries", [])))')
+                rebuilt=$(python3 -c 'import json; p=json.load(open("stage/library-build-plan.json")); print(",".join(json.load(open("buildroot/shared-libraries.json"))["libraries"] if p.get("full") else p.get("rebuilt_libraries", [])))')
             fi
             python3 bin/shared-library-plan prepare "${args[@]}" --rebuilt-libraries "$rebuilt"
             roots=$(python3 -c 'import json; p=json.load(open("stage/shared-library-plan.json")); m=json.load(open("buildroot/shared-libraries.json")); print(",".join(sorted(set(p.get("abi_rebuild_roots", [])) | {provider for dependencies in m.get("pending_rebuilds", {}).values() for provider in dependencies.values()})))')

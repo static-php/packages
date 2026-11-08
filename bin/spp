@@ -10,16 +10,28 @@ const DIST_DEB_PATH = DIST_PATH . '/deb';
 const DIST_APK_PATH = DIST_PATH . '/apk';
 define('TEMP_DIR', sys_get_temp_dir() . '/spc-packages-' . bin2hex(random_bytes(8)));
 
-// Seed SPC's download cache from the container's prebuilt PKG_ROOT_PATH (set in
-// Dockerfile.{rhel,debian,alpine}). The bootstrap step installs zig + go-xcaddy
-// into PKG_ROOT_PATH and saves the resulting cache; without this merge SPC would
-// re-download them on first run inside /build.
+// Binary metadata must describe the tools installed in this image, even when
+// the source snapshot was produced on another architecture.
 $_seed = ($_pkg_root = getenv('PKG_ROOT_PATH')) ? $_pkg_root . '/.cache.json' : null;
 $_target = BASE_PATH . '/downloads/.cache.json';
 if ($_seed && is_readable($_seed)) {
     $_seed_data = json_decode((string) file_get_contents($_seed), true) ?: [];
     $_target_data = is_readable($_target) ? (json_decode((string) file_get_contents($_target), true) ?: []) : [];
     $_merged = $_target_data + $_seed_data;
+    foreach ($_seed_data as $_artifact => $_entry) {
+        foreach ($_entry['binary'] ?? [] as $_platform => $_binary) {
+            if (!is_string($_binary['extract'] ?? null)) {
+                continue;
+            }
+            $_installed = str_replace('{pkg_root_path}', $_pkg_root, $_binary['extract'] ?? '');
+            if (str_starts_with($_installed, $_pkg_root . '/') && is_dir($_installed)) {
+                $_binary['cache_type'] = 'local';
+                $_binary['dirname'] = $_installed;
+                $_binary['hash'] = null;
+                $_merged[$_artifact]['binary'][$_platform] = $_binary;
+            }
+        }
+    }
     if ($_merged !== $_target_data) {
         if (!is_dir(dirname($_target))) {
             mkdir(dirname($_target), 0755, true);
@@ -27,7 +39,7 @@ if ($_seed && is_readable($_seed)) {
         file_put_contents($_target, json_encode($_merged, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 }
-unset($_seed, $_target, $_seed_data, $_target_data, $_merged, $_pkg_root);
+unset($_seed, $_target, $_seed_data, $_target_data, $_merged, $_pkg_root, $_artifact, $_entry, $_platform, $_binary, $_installed);
 
 // Ensure autoloading is set up
 $composerLoader = require BASE_PATH . '/vendor/autoload.php';

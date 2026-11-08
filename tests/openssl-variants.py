@@ -88,6 +88,14 @@ class VariantTests(unittest.TestCase):
         for profile in variants.PROFILES:
             self.assertEqual((self.output / profile).stat().st_mode & 0o777, 0o755)
 
+    def test_cached_profiles_do_not_run_abi_tools(self):
+        self.build()
+        with patch.object(variants, 'assert_el8'), patch.object(variants, 'probe_directory'), \
+                patch.object(variants, 'abi_inventory', side_effect=AssertionError('unchanged ABI')), \
+                patch.object(variants, 'produce', side_effect=AssertionError('unchanged profile')):
+            result = variants.build(self.root, self.sdk, self.environment, self.output)
+        self.assertEqual(result['rebuilt_profiles'], [])
+
     def test_profile_sdk_keeps_all_owned_dependency_outputs_and_rebuilds_openssl(self):
         dependency_files = ["lib/libz.so.1", "lib/libz.a", "include/zlib.h", "include/zconf.h"]
         for name in dependency_files + ["bin/openssl"]:

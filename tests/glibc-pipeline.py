@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,62 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
+        for rebuilt, cached_variants in [(False, False), (False, True), (True, False)]:
+            with self.subTest(rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sdk, stage = root / 'buildroot', root / 'stage'
+                value = {'libraries': {'fixture': {'abi_epoch': 1}}}
+                glibc.write(sdk / 'shared-libraries.json', value)
+                glibc.write(stage / 'library-build-plan.json', {'full': False, 'rebuilt_libraries': ['fixture'] if rebuilt else []})
+                glibc.write(stage / 'effective-source-plan.json', {})
+                if cached_variants:
+                    glibc.write(sdk / 'openssl-variants/variants.json', {})
+                calls, scans = [], []
+                def baseline(kind, destination, consumers=False, abi_libraries=()):
+                    scans.append((kind, consumers, set(abi_libraries)))
+                    glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
+                def execute(arguments, **kwargs):
+                    args = [str(arg) for arg in arguments]
+                    calls.append(args)
+                    option = lambda name: Path(args[args.index(name) + 1])
+                    if args[0] == 'cp':
+                        subprocess.run(args, check=True)
+                    elif 'prepare' in args:
+                        glibc.write(option('--manifest-output'), value)
+                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}})
+                    elif 'stage-publication-retries' in args:
+                        glibc.write(option('--output'), {'remaining_libraries': []})
+                    elif 'manifest' in args:
+                        shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
+                with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute):
+                    glibc.classify()
+                expected = {'fixture'} if rebuilt else set()
+                self.assertEqual(scans, [('rpm', False, expected), ('deb', rebuilt, expected)])
+                self.assertFalse((root / 'craft.yml').exists())
+                self.assertFalse(any('record' in call for call in calls))
+                self.assertTrue(any('seal' in call for call in calls))
+                prepares = [call for call in calls if 'prepare' in call]
+                self.assertEqual(len(prepares), 2 if cached_variants else 4)
+                self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
+
+    def test_shared_consumer_graph_preserves_native_rpm_versions_and_libraries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            deb, rpm = root / 'deb', root / 'rpm'
+            glibc.write(deb / 'shared-libraries.json', {'consumers': {'8.5': ['php-zts-cli']},
+                'consumer_dependencies': {'8.5': {'php-zts-cli': ['openssl']}},
+                'consumer_inventory_complete': True, 'consumer_inventory_stream': '8.5',
+                'consumer_versions': {'8.5': {'php-zts-cli': 'deb-version'}}})
+            glibc.write(rpm / 'shared-libraries.json', {'libraries': {'openssl': {'published_version': 'rpm-version'}},
+                'consumer_versions': {'8.5': {'php-zts-cli': 'rpm-version'}}})
+            glibc.share_consumers(deb, rpm)
+            result = glibc.read(rpm / 'shared-libraries.json')
+            self.assertEqual(result['consumer_dependencies']['8.5']['php-zts-cli'], ['openssl'])
+            self.assertEqual(result['consumer_versions']['8.5']['php-zts-cli'], 'rpm-version')
+            self.assertEqual(result['libraries']['openssl']['published_version'], 'rpm-version')
+
     def test_format_plans_merge_compile_and_packaging_requests_without_extra_compilation(self):
         value = glibc.combine_plans({
             'rpm': {'php_requests': {'8.6': {'full': True, 'packages': [], 'compile': False, 'compile_full': False, 'compile_packages': []}}},

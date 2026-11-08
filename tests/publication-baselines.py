@@ -34,7 +34,7 @@ class PublicationBaselines(unittest.TestCase):
                     output=str(self.root / 'baseline'))
         return SimpleNamespace(**dict(args, **values))
 
-    def test_default_forgejo_baseline_merges_every_existing_owner(self):
+    def test_explicit_forgejo_baseline_merges_every_requested_owner(self):
         owners = []
         def capture(args):
             owners.append((args.owner, args.password_env))
@@ -43,11 +43,54 @@ class PublicationBaselines(unittest.TestCase):
             planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
         with patch.dict(plan_globals, {'baseline_single': capture,
                                       'native_compare': lambda kind, a, b: (int(a) > int(b)) - (int(a) < int(b))}):
-            planner['baseline'](self.baseline_args())
+            planner['baseline'](self.baseline_args(owners='82,83,84,85,86'))
         result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
         self.assertEqual(owners, [(str(owner), 'PASSWORD') for owner in range(82, 87)])
         self.assertEqual(result['consumer_versions']['8.6']['php-zts-cli'], '86')
         self.assertEqual(result['architecture'], 'x86_64')
+
+    def test_default_baseline_reads_only_php85_and_shares_dependencies(self):
+        owners = []
+        def capture(args):
+            owners.append(args.owner)
+            value = planner['empty_manifest']()
+            value.update(consumer_inventory_complete=True, consumer_inventory_stream='8.5')
+            value['consumers'] = {'8.5': ['php-zts-cli']}
+            value['consumer_dependencies'] = {'8.5': {'php-zts-cli': ['openssl']}}
+            value['consumer_versions'] = {'8.5': {'php-zts-cli': '8.5.12-1'}}
+            planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
+        with patch.dict(plan_globals, {'baseline_single': capture}):
+            planner['baseline'](self.baseline_args())
+        result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
+        self.assertEqual(owners, ['85'])
+        self.assertTrue(result['consumer_inventory_complete'])
+        for stream in planner['STREAMS']:
+            self.assertEqual(result['consumer_dependencies'][stream], {'php-zts-cli': ['openssl']})
+            self.assertEqual(result['consumers'][stream], ['php-zts-cli'])
+            if stream != '8.5':
+                self.assertEqual(result['consumer_versions'][stream], {})
+
+    def test_no_rebuild_skips_deb_and_apk_consumer_archives(self):
+        for kind in ['deb', 'apk']:
+            with self.subTest(kind=kind):
+                args = self.baseline_args(type=kind, owner='85', skip_consumers=True,
+                                          abi_libraries='', output=str(self.root / kind))
+                helper = {'get_remote_packages': Mock(return_value=[])}
+                with patch.dict(plan_globals, {'published_consumers': Mock(side_effect=AssertionError('consumer scan'))}), \
+                        patch.object(runpy, 'run_path', return_value=helper):
+                    planner['baseline_single'](args)
+                result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
+                self.assertFalse(result['consumer_inventory_complete'])
+
+    def test_no_rebuild_skips_rpm_consumer_inventory(self):
+        args = self.baseline_args(type='rpm', base_url='https://fixture/el8', skip_consumers=True,
+                                  abi_libraries='')
+        rpm = {'published_packages': Mock(return_value=[])}
+        with patch.dict(plan_globals, {'published_rpm_consumer_index': Mock(side_effect=AssertionError('consumer scan'))}), \
+                patch.object(runpy, 'run_path', return_value=rpm):
+            planner['baseline_single'](args)
+        result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
+        self.assertFalse(result['consumer_inventory_complete'])
 
     def test_historical_rpm_urls_share_a_highest_version_baseline(self):
         sources = []
@@ -73,10 +116,12 @@ class PublicationBaselines(unittest.TestCase):
                 raise requests.HTTPError(response=response)
             value = planner['empty_manifest']()
             value['consumer_inventory_complete'] = True
+            if args.owner == '85':
+                value['consumer_inventory_stream'] = '8.5'
             value['consumer_versions'] = {args.owner[0] + '.' + args.owner[1:]: {'php-zts-cli': '1'}}
             planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
         with patch.dict(plan_globals, {'baseline_single': capture}), patch.object(requests, 'get', return_value=Mock(status_code=404)) as lookup:
-            planner['baseline'](self.baseline_args())
+            planner['baseline'](self.baseline_args(owners='82,83,84,85,86'))
         result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
         self.assertEqual([value['owner'] for value in result['baseline_origins']], ['82', '83', '84', '85'])
         self.assertEqual(result['skipped_origins'], [{'owner': '86', 'password_env': 'PASSWORD', 'reason': 'owner-not-found'}])
