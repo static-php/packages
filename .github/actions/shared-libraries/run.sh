@@ -14,6 +14,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
     exec docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
         -v "$HOME/.cache/composer":/composer-cache \
         -e IN_BUILDER=true -e COMPOSER_CACHE_DIR=/composer-cache \
+        -e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)" \
         -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP \
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
@@ -22,6 +23,19 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
 fi
 
 if [[ "$TYPE" == apk ]]; then
+    if [[ -n "${BUILDER_HOST_UID:-}" && -n "${BUILDER_HOST_GID:-}" ]]; then
+        builder_workspace=$PWD
+        restore_workspace_owner() {
+            local status=$?
+            trap - EXIT
+            chown -R "$BUILDER_HOST_UID:$BUILDER_HOST_GID" "$builder_workspace" || exit $?
+            if [[ -n "${COMPOSER_CACHE_DIR:-}" && -d "$COMPOSER_CACHE_DIR" ]]; then
+                chown -R "$BUILDER_HOST_UID:$BUILDER_HOST_GID" "$COMPOSER_CACHE_DIR" || exit $?
+            fi
+            exit "$status"
+        }
+        trap restore_workspace_owner EXIT
+    fi
     # The host extracts source repositories before the root-run Alpine builder mounts them.
     for repository in "$PWD"/downloads/*/.git; do
         [[ -e "$repository" ]] || continue

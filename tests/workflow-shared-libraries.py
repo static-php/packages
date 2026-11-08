@@ -304,6 +304,27 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CacheAndCohortTests(unittest.TestCase):
+    def test_alpine_builder_returns_ownership_after_success_and_failure(self):
+        for status in [0, 7]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
+                root = Path(temporary)
+                for name in ['dist/apk', 'shims', 'composer-cache', '.github/actions/shared-libraries']:
+                    (root / name).mkdir(parents=True)
+                (root / '.github/actions/shared-libraries/publish-forgejo.py').write_text(
+                    'import sys\nsys.exit(' + str(status) + ')\n')
+                chown = root / 'shims/chown'
+                chown.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$OWNER_CALL"\n')
+                chown.chmod(0o755)
+                env = dict(os.environ, TYPE='apk', IN_BUILDER='true', MODE='full',
+                           PATH=str(root / 'shims') + ':' + os.environ['PATH'],
+                           BUILDER_HOST_UID='1001', BUILDER_HOST_GID='1002',
+                           COMPOSER_CACHE_DIR=str(root / 'composer-cache'), OWNER_CALL=str(root / 'ownership'))
+                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'upload-1'],
+                                        cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual((root / 'ownership').read_text().splitlines(),
+                                 ['-R', '1001:1002', str(root), '-R', '1001:1002', str(root / 'composer-cache')])
+
     def test_alpine_builder_trusts_only_downloaded_source_repositories(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
             root = Path(temporary)
