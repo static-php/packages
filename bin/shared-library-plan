@@ -445,6 +445,7 @@ def compare(old, new, old_root, new_root, bootstrap=False):
     annotated = copy.deepcopy(new)
     changes = {}
     abi_context = {}
+    unchanged, compared = 0, 0
     for identifier, library in sorted(annotated['libraries'].items()):
         dump_abi(new_root, identifier, library, abi_context)
         previous = old['libraries'].get(identifier)
@@ -461,12 +462,16 @@ def compare(old, new, old_root, new_root, bootstrap=False):
                 old_path = rooted(old_root, old_dump)
                 if not old_path.is_file():
                     raise RuntimeError('Published ABI data is missing: ' + str(old_path))
-                if 'abi_empty' in previous and name in previous['abi_empty']:
+                if file_sha256(old_path) == library.get('abi_dump_hashes', {}).get(name):
+                    difference = 'compatible'
+                    unchanged += 1
+                elif 'abi_empty' in previous and name in previous['abi_empty']:
                     difference = 'compatible'
                 elif 'abi_empty' in previous and name in library['abi_empty']:
                     difference = 'breaking'
                 else:
                     difference = abi_difference(old_path, rooted(new_root, library['abi_dump'][name]))
+                    compared += 1
                 if difference == 'breaking':
                     status = 'breaking'
         epoch = previous.get('abi_epoch', 1) if previous else 1
@@ -478,6 +483,7 @@ def compare(old, new, old_root, new_root, bootstrap=False):
         changes[identifier] = {'status': status, 'abi_epoch': epoch, 'abi_capability': library['abi_capability']}
     for identifier in sorted(old['libraries'].keys() - annotated['libraries'].keys()):
         changes[identifier] = {'status': 'removed'}
+    progress('ABI comparison complete: {} unchanged shared objects reused, {} compared'.format(unchanged, compared))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
                        'bootstrap': not bool(old['libraries']), 'libraries': changes}
 

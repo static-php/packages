@@ -9,7 +9,7 @@ import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +73,49 @@ class AbiDumpCache(unittest.TestCase):
         self.assertEqual(len(self.invocations), 1)
         self.assertEqual(first['abi_dump_hashes'], second['abi_dump_hashes'])
         self.assertEqual(second['abi_empty'], [])
+
+    def baseline(self):
+        entry = self.dump()
+        entry['abi_epoch'] = 7
+        baseline = self.root / 'baseline'
+        dump = baseline / entry['abi_dump']['libfixture.so.1']
+        dump.parent.mkdir(parents=True)
+        shutil.copy2(self.output, dump)
+        value = {'schema': 1, 'linkage': 'shared', 'architecture': 'x86_64', 'libc': 'glibc',
+                 'runtime_libdir': '/usr/lib/php-zts/lib', 'libraries': {'fixture': entry}}
+        return baseline, value
+
+    def test_unchanged_library_reuses_dump_and_published_generation_without_comparison(self):
+        baseline, previous = self.baseline()
+        difference = Mock(side_effect=AssertionError('Unchanged ABI must not invoke abidiff'))
+        with patch.dict(namespace, {'abi_difference': difference}):
+            updated, result = planner['compare'](previous, previous, baseline, self.root)
+        difference.assert_not_called()
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 7)
+        self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
+
+    def test_new_published_baseline_requires_comparison_even_without_a_rebuild(self):
+        baseline, previous = self.baseline()
+        (baseline / previous['libraries']['fixture']['abi_dump']['libfixture.so.1']).write_text(
+            '<abi-corpus><abi-instr><function-decl name="changed"/></abi-instr></abi-corpus>')
+        difference = Mock(return_value='breaking')
+        with patch.dict(namespace, {'abi_difference': difference}):
+            updated, _ = planner['compare'](previous, previous, baseline, self.root)
+            retried, _ = planner['compare'](previous, updated, baseline, self.root)
+        self.assertEqual(difference.call_count, 2)
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 8)
+        self.assertEqual(retried['libraries']['fixture']['abi_epoch'], 8)
+
+    def test_changed_comparison_failure_preserves_published_generation(self):
+        baseline, previous = self.baseline()
+        (baseline / previous['libraries']['fixture']['abi_dump']['libfixture.so.1']).write_text(
+            '<abi-corpus><abi-instr><function-decl name="changed"/></abi-instr></abi-corpus>')
+        difference = Mock(side_effect=RuntimeError('ABI comparison failed'))
+        with patch.dict(namespace, {'abi_difference': difference}), self.assertRaisesRegex(RuntimeError, 'comparison failed'):
+            planner['compare'](previous, previous, baseline, self.root)
+        self.assertEqual(previous['libraries']['fixture']['abi_epoch'], 7)
 
     def test_runtime_bytes_change_regenerates_dump(self):
         self.dump()

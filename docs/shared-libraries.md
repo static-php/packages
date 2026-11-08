@@ -143,6 +143,11 @@ changes reuse sealed PHP payloads; extension-only changes reuse the verified cor
 `bump` defaults to false; explicit iterations take precedence. `publish=false`
 builds and tests without repository or release-cache writes.
 
+ABI dumps are reused after verifying the ELF, debug information and analyzer
+inputs. Identical published and candidate dumps skip `abidiff` and retain the
+published ABI generation. Changed inputs or missing cache proofs require fresh
+analysis; unchanged libraries still receive cheap integrity checks.
+
 To publish those tested archives later, dispatch `publish-packages.yml` with
 `format=rpm`, `format=deb` or `format=apk` and `build_run_id=<package-build-run>`.
 Each dispatch publishes only its selected format. RPM and DEB refer to the same
