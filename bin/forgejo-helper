@@ -9,6 +9,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from fnmatch import fnmatch
 from urllib.parse import quote
@@ -18,6 +19,7 @@ MAX_MIGRATION_CUTOFF_BYTES = 256 * 1024
 CONSUMER_METADATA_DIRECTORY = 'usr/share/php-zts/consumers'
 MAX_CONSUMER_METADATA_BYTES = 256 * 1024
 CONSUMER_SIDECAR_PACKAGE = 'php-zts-consumer-metadata'
+VERIFIED_ARCHIVE_IDENTITIES = {}
 
 host1 = "https://git.henderkes.com"
 host2 = "https://git.static-php.dev"
@@ -247,6 +249,13 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
             if not file.get('name', '').endswith(extension):
                 continue
             url = f"{host}/{quote(owner, safe='')}/-/packages/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files/{file['id']}"
+            registry_digest = file.get('sha256')
+            cache_key = (url, registry_digest.lower()) if isinstance(registry_digest, str) and re.fullmatch(r'[a-fA-F0-9]{64}', registry_digest) else None
+            if cache_key in VERIFIED_ARCHIVE_IDENTITIES:
+                record = deepcopy(VERIFIED_ARCHIVE_IDENTITIES[cache_key])
+                record['filename'] = file['name']
+                records.append(record)
+                continue
             sidecar = read_consumer_sidecar(host, owner, password, pkg_type, name, version, file.get('sha256'))
             if sidecar is not None and not (pkg_type == 'alpine' and name.endswith('-cli') and not sidecar.get('native_metadata')):
                 records.append({key: sidecar.get(key) for key in ('name', 'version', 'arch', 'sha256', 'migration_cutoffs', 'consumer_metadata', 'native_metadata')} |
@@ -279,6 +288,8 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
             records.append({'name': name, 'version': version, 'arch': arch, 'sha256': digest.hexdigest(),
                             'file_id': file['id'], 'filename': file['name'], 'owner': owner, 'url': url,
                             'migration_cutoffs': cutoffs, 'consumer_metadata': consumer, 'native_metadata': native})
+            if cache_key is not None:
+                VERIFIED_ARCHIVE_IDENTITIES[cache_key] = deepcopy(records[-1])
     identities = {}
     for record in records:
         previous = identities.setdefault(record['arch'], record['sha256'])

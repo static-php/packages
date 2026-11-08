@@ -44,6 +44,7 @@ def response(status=200, payload=None, data=b''):
 
 class ForgejoPublication(unittest.TestCase):
     def setUp(self):
+        helper_globals['VERIFIED_ARCHIVE_IDENTITIES'].clear()
         self.temporary = TemporaryDirectory(prefix='forgejo-publication-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -77,6 +78,37 @@ class ForgejoPublication(unittest.TestCase):
         with patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=[{'id': 45, 'name': 'library.apk'}]), response(data=data)]):
             with self.assertRaisesRegex(RuntimeError, 'header differs'):
                 helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'library', '3.6.0-r1')
+
+    def test_verified_file_is_downloaded_once_but_registry_is_read_again(self):
+        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'x86_64')
+        digest = hashlib.sha256(data).hexdigest()
+        files = [{'id': 45, 'name': 'library.apk', 'sha256': digest}]
+        with patch.dict(helper_globals, {'read_consumer_sidecar': lambda *args: None}), patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), response(data=data), response(payload=files), response(payload=[])]) as get:
+            first = helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+            first[0]['native_metadata']['depends'].append('mutated caller result')
+            second = helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+            self.assertEqual(second[0]['native_metadata']['depends'], [])
+            self.assertEqual(helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1'), [])
+        self.assertEqual(get.call_count, 4)
+
+    def test_changed_digest_requires_download_and_cannot_reuse_old_identity(self):
+        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'x86_64')
+        files = [{'id': 45, 'name': 'library.apk', 'sha256': hashlib.sha256(data).hexdigest()}]
+        changed = [dict(files[0], sha256='0' * 64)]
+        with patch.dict(helper_globals, {'read_consumer_sidecar': lambda *args: None}), patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), response(data=data), response(payload=changed), response(data=data)]) as get:
+            helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+            with self.assertRaisesRegex(RuntimeError, 'differs from registry file digest'):
+                helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+        self.assertEqual(get.call_count, 4)
+
+    def test_each_registry_file_endpoint_is_verified_even_with_the_same_digest(self):
+        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'x86_64')
+        file = {'id': 45, 'name': 'library.apk', 'sha256': hashlib.sha256(data).hexdigest()}
+        replies = [response(payload=[file]), response(data=data), response(payload=[dict(file, id=46)]), response(data=data), response(payload=[file]), response(data=data)]
+        with patch.dict(helper_globals, {'read_consumer_sidecar': lambda *args: None}), patch.object(helper_globals['requests'], 'get', side_effect=replies) as get:
+            for owner in ('85', '85', '86'):
+                helper['remote_package_archives']('https://example.com', owner, 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+        self.assertEqual(get.call_count, 6)
 
     def test_cli_apk_retains_optional_cutoffs_during_download(self):
         cutoffs = {'schema': 1, 'php_stream': '8.6', 'architecture': 'x86_64', 'formats': {'apk': {'php-zts-intl': '8.6.0_rc4-r2'}}}
