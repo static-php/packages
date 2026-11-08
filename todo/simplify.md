@@ -10,6 +10,17 @@ This is a simplification assignment, not a request to keep patching the current 
 
 Success means working Alpine and EL8 builds, reusable caches, reliable publication and ordinary package-manager upgrades. Passing mocked tests alone is insufficient.
 
+## Current handoff status
+
+Verified on 2026-11-08 at commit `d32002f`:
+
+- [EL8 run `42499442120`](https://github.com/static-php/packages/actions/runs/42499442120): both shared SDK jobs succeeded and saved their caches. PHP payload jobs for 8.2–8.6 on both architectures are still running.
+- [Alpine run `42500878781`](https://github.com/static-php/packages/actions/runs/42500878781): both shared SDK jobs succeeded and saved their caches. PHP jobs for 8.2–8.6 on both architectures are still running.
+- The targeted ngtcp2 repair rebuilt only ngtcp2. Both architectures of both producers confirm 67 cached ABI classifications reused and one library analyzed. The four canonical SDK archives and JSON receipts are present on the `cache` release. This verifies the narrow repair, not the overall design or successful publication.
+- Full package installation, load, upgrade and publication results remain unverified for these runs. Preserve their in-flight work and saved caches; inspect their eventual results before launching replacements.
+
+The immediate assignment is to simplify the design, not accumulate another sequence of symptom fixes. The detailed failure history below explains why the current contracts are fragile; it is evidence for deleting duplication, not a specification to retain every workaround. Prioritize the unchanged update path and the one-library update path. Both must be understandable without tracing repeated planning, grafting, classification and metadata rewrites across numerous helpers.
+
 ## Confirmed failures
 
 ### EL8: an unchanged SDK fails after restoring successfully
