@@ -21,6 +21,18 @@ spec.loader.exec_module(incremental)
 
 
 class IncrementalLibraryTests(unittest.TestCase):
+    def test_noop_runtime_scan_preserves_recorded_build_identity(self):
+        runtime = {'fingerprint': 'same-runtime', 'compiler_runtime_inputs': None, 'uses_cxx_runtime': False}
+        previous = {'recipe_hash': 'same-recipe', 'compiler_runtime': incremental.compact_runtime(runtime),
+                    'compiler_runtime_attestation': 'rebuilt'}
+        plan = {'full': False, 'reused': ['openssl'], 'compatibility': 'same-compiler',
+                'inventory': {'libraries': {'openssl': {'depends': []}}},
+                'previous_state': {'libraries': {'openssl': previous}}, 'effective_sources': {},
+                'compiler_runtime_scan': {'libraries': {'openssl': runtime}}}
+        result = incremental.record_state(plan, {'libraries': {'openssl': {'depends': []}}})
+        self.assertEqual(result['libraries']['openssl'], previous)
+        self.assertEqual(result['libraries']['openssl']['compiler_runtime_attestation'], 'rebuilt')
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="selective-library-build-")
         self.addCleanup(self.directory.cleanup)

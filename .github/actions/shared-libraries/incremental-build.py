@@ -290,6 +290,8 @@ def record_state(plan, manifest):
             actual[name]["compiled_compatibility"] = plan["compatibility"]
         runtime = plan.get("compiler_runtime_scan", {}).get("libraries", {}).get(name)
         if runtime is not None:
+            if name in plan.get('reused', []) and actual[name].get('compiler_runtime') == compact_runtime(runtime):
+                continue
             # This is inspection of actual linkage; it does not relabel reused recipe inputs.
             actual[name] = dict(actual[name], compiler_runtime=compact_runtime(runtime),
                                 compiler_runtime_attestation="artifact-scan" if name in plan.get("reused", []) else "rebuilt")
