@@ -50,6 +50,9 @@ class ForgejoPublication(unittest.TestCase):
         client = patch.dict(helper_globals, {'registry_session': lambda: helper_globals['requests']})
         client.start()
         self.addCleanup(client.stop)
+        indexes = patch.dict(publisher['publish'].__globals__, {'verify_debian_indexes': Mock(return_value=[])})
+        indexes.start()
+        self.addCleanup(indexes.stop)
         self.temporary = TemporaryDirectory(prefix='forgejo-publication-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -631,6 +634,9 @@ class ForgejoPublication(unittest.TestCase):
 
     def test_numeric_rpm_release_is_understood(self):
         self.assertEqual(helper['get_package_info'](Path('php-zts-cli-8.6.0~rc4-42.x86_64.rpm'), 'rpm')[:3], ('php-zts-cli', '8.6.0~rc4-42', 'x86_64'))
+
+
+ForgejoIndex = runpy.run_path(str(ROOT / 'tests/forgejo-index.py'), run_name='forgejo_index_tests')['ForgejoIndex']
 
 
 if __name__ == '__main__':

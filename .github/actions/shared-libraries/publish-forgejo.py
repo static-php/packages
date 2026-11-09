@@ -174,6 +174,11 @@ def stage_mirror_debug(cohort, directory, package_type, helper, owners, records)
     return failures
 
 
+def verify_debian_indexes(host, password, groups, helper):
+    verifier = runpy.run_path(str(Path(__file__).with_name('forgejo-index.py')))
+    return verifier['verify_indexes'](host, password, groups, helper)
+
+
 def publish(action, host, password, kind, groups, helper, bootstrap, mirror=False):
     if action not in ('check', 'upload'):
         raise RuntimeError('Unknown publication action: ' + action)
@@ -193,6 +198,7 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
     if action == 'check':
         return
     ordered = publication_order(selected, helper, kind, bootstrap)
+    completed = {owner: [] for owner in selected}
     def upload(item):
         index, (_, owner, path) = item
         print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
@@ -205,11 +211,14 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
             print(failure + '; continuing with remaining packages', flush=True)
             return failure
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
+        completed[owner].append(path)
     # Mirror cohorts are serialized by the workflow; bound concurrent large uploads.
     failures = []
     with ThreadPoolExecutor(max_workers=2 if mirror else 4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
             failures.extend(error for error in pool.map(upload, phase) if error)
+    if kind == 'debian':
+        failures.extend(verify_debian_indexes(host, password, completed, helper))
     if failures:
         raise RuntimeError(f'{len(failures)} package uploads failed; remaining packages were attempted: '
                            + ' | '.join(failures[:5]))
