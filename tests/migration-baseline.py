@@ -217,6 +217,10 @@ class BaselineCapture(unittest.TestCase):
         cli = {'name': 'php-zts-cli', 'version': '8.6.0-4', 'requires': ['php-zts-lib-ssl-abi-1']}
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli], {'cli'})
+        defects = []
+        selected = helper['select_packages']('rpm', [cli], {'cli'}, defects=defects)
+        self.assertEqual(selected, {'php-zts-cli': cli})
+        self.assertEqual(defects[0]['dependency'], 'php-zts-lib-ssl-abi-1')
         providers = [dict(name='php-zts-lib-' + name, version='1-1', provides=['php-zts-lib-ssl-abi-1'])
                      for name in ['openssl', 'another']]
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):

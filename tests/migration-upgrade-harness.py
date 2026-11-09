@@ -28,6 +28,60 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_broken_old_install_uses_clean_replacement_but_candidate_failures_still_block(self):
+        for old_broken, candidate_broken, partial, tampered in [
+                (True, False, False, False), (True, True, False, False),
+                (False, True, False, False), (True, False, True, False), (True, False, False, True)]:
+            with self.subTest(old=old_broken, candidate=candidate_broken, partial=partial, tampered=tampered), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine',
+                                                         profile='cli', partial_consumers=partial))
+                mirror = object.__new__(harness['PreparedMirror'])
+                mirror.args, mirror.scratch, mirror.client_image = args, root, 'clean-client'
+                mirror.baseline = {'origin': {}, 'packages': [{'name': 'php-zts-cli'}]}
+                mirror.inventory = {'old': mirror.baseline['packages'], 'incoming': mirror.baseline['packages']}
+                mirror.report = {'ledger_sha256': 'test', 'profiles_started': 0}
+                generations, executions = [], []
+                mirror.select_generation = generations.append
+                checks = []
+                def bound(_):
+                    checks.append(True)
+                    if tampered and len(checks) > 1:
+                        raise harness['PreparedInputError']('changed candidate')
+                mirror.assert_bound = bound
+                resources = SimpleNamespace(execution={'native': True, 'emulated': False}, containers=[], runtime_evidence=[])
+                mirror.resources = resources
+                def start(image, name):
+                    self.assertEqual(image, 'clean-client')
+                    resources.containers.append(name)
+                    resources.runtime_evidence.append({'container': name})
+                    return name
+                def execute(client, command):
+                    phase = command[-1]
+                    executions.append((client, phase))
+                    if phase == 'old':
+                        if old_broken:
+                            raise RuntimeError('old package dependency missing')
+                        (root / 'client-before.json').write_text(json.dumps({'installed': {}, 'probe': {}, 'module_state': {},
+                            'config_sha256': 'config', 'key_sha256': 'key', 'php_ini_sha256': 'ini'}))
+                    if phase in ('new', 'replacement') and candidate_broken:
+                        raise RuntimeError('candidate dependency missing')
+                    return SimpleNamespace(stdout='SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True}))
+                resources.start, resources.exec = start, execute
+                with patch.dict(scope, {'run': lambda *a, **k: SimpleNamespace(returncode=0, stderr='')}), patch('sys.stdout', new_callable=io.StringIO):
+                    result = mirror.execute(args)
+                expected = old_broken and not candidate_broken and not partial and not tampered
+                self.assertEqual(result['ok'], expected)
+                if expected:
+                    self.assertIn('old package dependency missing', result['baseline_failure'])
+                    old_client = next(client for client, phase in executions if phase == 'old')
+                    new_client = next(client for client, phase in executions if phase == 'replacement')
+                    self.assertNotEqual(old_client, new_client)
+                if not old_broken or partial or tampered:
+                    self.assertFalse(any(phase == 'replacement' for _, phase in executions))
+                if tampered:
+                    self.assertTrue(result['prepared_inputs_invalid'])
+
     def test_auto_runs_only_the_frozen_affected_profiles(self):
         baseline = {'selection': {'mode': 'affected', 'complete': False},
                     'packages': [{'name': name} for name in

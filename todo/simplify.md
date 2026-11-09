@@ -2,7 +2,7 @@
 
 ## Assignment
 
-The user has explicitly prohibited publication. Run CI with `publish=false`; do not dispatch publish-only workflows or resume canceled publishers. Preserve publication safeguards in the implementation, but verify this assignment through build/test-only runs unless the user explicitly authorizes publication again.
+The simplification assignment was verified with `publish=false`. The user subsequently authorized full cached repackaging with `bump=true`, `publish=true` on 2026-11-09 to migrate all repositories to shared libraries. The user also explicitly required that a broken old baseline cannot prevent a complete replacement from repairing the repository. Preserve candidate validation and downgrade guards; record unavailable old-baseline coverage rather than claiming an upgrade was tested.
 
 Make routine upstream updates stable, fast and understandable. The shared-library migration introduced too much orchestration: cache restoration, planning, ABI classification, packaging and publication have overlapping state and failure points. Hours of successful compilation can be followed by an unrelated metadata or packaging failure.
 

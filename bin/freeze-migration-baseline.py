@@ -228,7 +228,7 @@ def affected_profile(latest, packages, libraries):
     return {normalize(name) for name in names}
 
 
-def select_packages(kind, inventory, profile, include_debug=False, latest=None):
+def select_packages(kind, inventory, profile, include_debug=False, latest=None, defects=None):
     latest = latest_packages(kind, inventory) if latest is None else latest
     def wanted(name):
         if 'all' not in profile:
@@ -251,7 +251,11 @@ def select_packages(kind, inventory, profile, include_debug=False, latest=None):
                 continue
             choices = list(providers.get(dependency, {}).values())
             if len(choices) != 1:
-                raise RuntimeError('Missing or ambiguous published managed dependency: ' + dependency)
+                message = 'Missing or ambiguous published managed dependency: ' + dependency
+                if defects is None:
+                    raise RuntimeError(message)
+                defects.append({'package': package['name'], 'dependency': dependency, 'error': message})
+                continue
             provider = choices[0]
             if provider['name'] not in selected:
                 selected[provider['name']] = provider
@@ -303,7 +307,10 @@ def freeze(args):
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
         stage = Path(temporary)
-        selected = select_packages(args.type, inventory, profile, args.include_debug, latest=latest)
+        defects = []
+        selected = select_packages(args.type, inventory, profile, args.include_debug, latest=latest, defects=defects)
+        for defect in defects:
+            print('::warning::Published baseline defect: ' + defect['package'] + ': ' + defect['error'])
         if 'php-zts-cli' not in selected and not library_plan:
             raise RuntimeError('Published baseline has no matching CLI package')
         for name, content in metadata.items():
@@ -320,7 +327,7 @@ def freeze(args):
             packages = list(downloads.map(lambda package: download_package(package, args.type, output, stage), selected.values()))
         result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'origin': {'publication_url': base, 'real_published': True},
-                  'packages': packages, 'published_packages': inventory, 'keys': key_paths,
+                  'packages': packages, 'published_packages': inventory, 'keys': key_paths, 'defects': defects,
                   'selection': {'profile': ','.join(sorted(profile)), 'complete': 'all' in profile,
                                 'mode': 'affected' if requested or library_plan else 'full',
                                 'include_debug': args.include_debug,

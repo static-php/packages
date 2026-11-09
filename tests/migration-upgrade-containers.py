@@ -689,6 +689,33 @@ def inside(args):
                                                         'incoming_changes': incoming_changes, 'library': library,
                                                         'published_names': published_names}))
         return
+    if args.inside == 'replacement':
+        inventory = json.loads(Path('/spp/inventory.json').read_text())
+        candidate = {p['name']: p for p in inventory['incoming']}
+        names = json.loads(Path('/spp/selected.json').read_text())
+        if args.library_only or args.partial_consumers or not names or set(names) - set(candidate):
+            raise RuntimeError('Broken-baseline recovery requires a complete replacement for the selected profile')
+        configure_client(kind, args.php, args.arch, args.runtime)
+        command = {'rpm': ['dnf', 'install', '-y'], 'deb': ['apt-get', 'install', '-y'], 'apk': ['apk', 'add']}[kind]
+        run(command + names)
+        after = installed(kind)
+        for name in set(names) | {name for name in after if managed(name)}:
+            if name not in candidate or after.get(name) != candidate[name]['version']:
+                raise RuntimeError('Replacement installation did not select the candidate version: ' + name)
+        runtime = runpy.run_path('/spp/shared-runtime-containers.py')
+        managed_names = sorted(name for name in after if managed(name))
+        elf = runtime['assert_elf'](kind, managed_names)
+        smokes = runtime['sapi_checks'](args.php, managed_names, kind)
+        development = runtime['development_checks'](kind, managed_names)
+        ordinary_upgrade(kind)
+        if installed(kind) != after:
+            raise RuntimeError('Replacement unchanged upgrade was not a no-op')
+        print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True,
+              'coverage': 'fresh_replacement_after_broken_baseline',
+              'installed_versions': {name: after[name] for name in managed_names},
+              'installed_elf_checks': elf, 'installed_sapi_smokes': smokes,
+              'installed_development_smoke': development, 'second_upgrade_noop': True}, sort_keys=True))
+        return
     if args.inside == 'fresh':
         inventory = json.loads(Path('/spp/inventory.json').read_text())
         allowed = {p['fresh_package'] for p in candidate_only_profiles({'packages': inventory['old']}, inventory)}
@@ -884,7 +911,9 @@ def lifetime_hooks(args, scratch, result):
     hooks = []
     if args.tls:
         hooks.append(('tls', HERE / 'tls-runtime-containers.py', ['--repo', str(repository)]))
-    if args.services:
+    if args.services and result.get('baseline_failure'):
+        result['services_checks'] = {'state': 'unavailable', 'reason': 'Published baseline is broken; fresh SAPI checks passed'}
+    elif args.services:
         hooks.append(('services', HERE / 'runtime-service-containers.py',
                       ['--old-repo', str(hook_repository(scratch, args.type, 'old', args.arch)),
                        '--candidate-repo', str(repository),
@@ -1189,18 +1218,35 @@ class PreparedMirror:
                 checked = resources.exec(client, common + ['--inside', 'fresh'])
                 result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
                 return result
-            resources.exec(client, common + ['--inside', 'old'])
-            before = json.loads((scratch / 'client-before.json').read_text())
-            result['old_installation'] = {
-                'versions': {name: version for name, version in before['installed'].items() if managed(name)},
-                'probe': before['probe'], 'module_state': before['module_state'],
-                'repository_sha256': before['config_sha256'], 'key_sha256': before['key_sha256'],
-                'custom_php_ini_sha256': before['php_ini_sha256'],
-                'disabled_extension': before.get('disabled_extension'),
-            }
-            self.select_generation('new')
-            checked = resources.exec(client, common + ['--inside', 'new'])
-            result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
+            try:
+                resources.exec(client, common + ['--inside', 'old'])
+            except RuntimeError as error:
+                if args.library_only or args.partial_consumers:
+                    raise
+                self.assert_bound(args)
+                result['baseline_failure'] = str(error)
+                print('::warning::Published baseline cannot be installed or loaded; validating its replacement: ' + str(error)[-2000:], flush=True)
+                resources.exec(client, ['true'])
+                run(['docker', 'rm', '-f', client])
+                resources.containers.remove(client)
+                client = None
+                self.select_generation('new')
+                client = resources.start(self.client_image, 'replacement-' + str(self.report['profiles_started']))
+                result['runtime_evidence'] = resources.runtime_evidence[-1]
+                checked = resources.exec(client, common + ['--inside', 'replacement'])
+                result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
+            else:
+                before = json.loads((scratch / 'client-before.json').read_text())
+                result['old_installation'] = {
+                    'versions': {name: version for name, version in before['installed'].items() if managed(name)},
+                    'probe': before['probe'], 'module_state': before['module_state'],
+                    'repository_sha256': before['config_sha256'], 'key_sha256': before['key_sha256'],
+                    'custom_php_ini_sha256': before['php_ini_sha256'],
+                    'disabled_extension': before.get('disabled_extension'),
+                }
+                self.select_generation('new')
+                checked = resources.exec(client, common + ['--inside', 'new'])
+                result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
             if args.tls or args.services:
                 self.assert_bound(args)
                 removed = run(['docker', 'rm', '-f', client], check=False)
@@ -1333,7 +1379,7 @@ def main():
     modes.add_argument('--library-only', action='store_true', help='Upgrade only affected libraries under an existing shared PHP installation')
     modes.add_argument('--partial-consumers', action='store_true', help='Upgrade incoming consumer/library candidates while retaining an already-shared baseline')
     parser.add_argument('--allow-unaffected-profile', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--inside', choices=('index', 'old', 'new', 'fresh'), help=argparse.SUPPRESS)
+    parser.add_argument('--inside', choices=('index', 'old', 'new', 'fresh', 'replacement'), help=argparse.SUPPRESS)
     parser.add_argument('--fresh-package', help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.runtime = args.runtime or {'rpm': 'alma8', 'deb': 'debian', 'apk': 'alpine'}[args.type]
