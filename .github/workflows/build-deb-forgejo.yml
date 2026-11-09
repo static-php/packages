@@ -89,6 +89,10 @@ permissions:
 jobs:
     build:
         name: Build shared EL8 RPM and DEB packages
+        permissions:
+            contents: write
+            packages: read
+            actions: write
         uses: ./.github/workflows/build-rpm-modular-packages.yml
         with:
             mode: ${{ inputs.mode }}

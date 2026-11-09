@@ -678,23 +678,17 @@ jobs:
         secrets: inherit
 
     mirror:
-        name: Mirror (${{ matrix.type }} ${{ matrix.target }})
-        needs: [setup-matrix, compute-build-matrix, publish]
-        if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        name: Queue secondary mirror
+        needs: [compute-build-matrix, publish]
+        if: ${{ !cancelled() && inputs.publish == true && contains(inputs.formats, 'deb') && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        runs-on: ubuntu-24.04
+        continue-on-error: true
         permissions:
-            contents: read
-            packages: read
-            actions: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        uses: ./.github/workflows/publish-package-cohort.yml
-        with:
-            mirror: true
-            format: ${{ matrix.type }}
-            target: ${{ matrix.target }}
-            arch: ${{ matrix.arch }}
-            image: ${{ matrix.image }}
-            package-image-digest: ${{ matrix.package-image-digest }}
-            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-        secrets: inherit
+            actions: write
+        steps:
+            -   name: Queue mirror independently of the producer lock
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: |
+                    gh workflow run publish-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+                        -f format=deb -f build_run_id="$GITHUB_RUN_ID" -f mirror_run_id="$GITHUB_RUN_ID"

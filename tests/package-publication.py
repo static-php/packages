@@ -395,8 +395,13 @@ class WorkflowContracts(unittest.TestCase):
             mirror = jobs['mirror']
             self.assertIn('publish', mirror['needs'])
             self.assertIn('!cancelled()', mirror['if'])
-            self.assertTrue(mirror['with']['mirror'])
-            self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
+            if name == 'publish-packages.yml':
+                self.assertTrue(mirror['with']['mirror'])
+                self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
+            else:
+                self.assertTrue(mirror['continue-on-error'])
+                self.assertEqual(mirror['permissions'], {'actions': 'write'})
+                self.assertNotIn('uses', mirror)
             self.assertEqual(job['uses'], './.github/workflows/publish-package-cohort.yml')
             self.assertEqual(job['secrets'], 'inherit')
             self.assertTrue(required <= set(job['with']) <= set(declared))
@@ -417,6 +422,26 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")
         self.assertEqual(self.publisher['jobs']['publish-glibc']['steps'], self.publisher['jobs']['publish-apk']['steps'])
+
+    def test_producers_queue_mirrors_without_holding_the_producer_lock(self):
+        for name, kind in [('build-rpm-modular-packages.yml', 'deb'), ('build-apk-forgejo.yml', 'apk')]:
+            job = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']['mirror']
+            step = job['steps'][0]
+            self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
+            with self.subTest(workflow=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / 'gh'
+                executable.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\nPath(os.environ["DISPATCH_LOG"]).write_text(json.dumps(sys.argv[1:]))\n')
+                executable.chmod(0o755)
+                log = root / 'dispatch.json'
+                environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                    DISPATCH_LOG=str(log), GITHUB_REPOSITORY='static-php/packages', GITHUB_REF_NAME='master', GITHUB_RUN_ID='42')
+                subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], env=environment, check=True)
+                self.assertEqual(json.loads(log.read_text()), ['workflow', 'run', 'publish-packages.yml',
+                    '--repo', 'static-php/packages', '--ref', 'master', '-f', 'format=' + kind,
+                    '-f', 'build_run_id=42', '-f', 'mirror_run_id=42'])
+        wrapper = yaml.safe_load((ROOT / '.github/workflows/build-deb-forgejo.yml').read_text())
+        self.assertEqual(wrapper['jobs']['build']['permissions']['actions'], 'write')
 
     def test_publisher_reads_inherited_secrets_directly(self):
         inputs = self.publisher[True]['workflow_call']['inputs']
