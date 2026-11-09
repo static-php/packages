@@ -690,7 +690,12 @@ jobs:
                     sudo apt-get update
                     sudo apt-get install -y python3-rpm rpm2cpio zstd
             -   name: Freeze actual published baseline
-                run: python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline
+                env:
+                    LIBRARY_ONLY: ${{ matrix.library-only }}
+                run: |
+                    args=(--packages "$PACKAGES")
+                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-plan "stage/$TYPE/shared-library-plan.json"); fi
+                    python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline "${args[@]}"
             -   name: Package sealed payload without compilation
                 if: matrix.library-only != true
                 run: |
@@ -708,8 +713,8 @@ jobs:
                 run: |
                     args=()
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
-                    profile=all
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only); profile=cli,fpm,frankenphp;
+                    profile=auto
+                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                     else
                         mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
                         if [[ "$mode" == shared ]]; then args+=(--partial-consumers); else args+=(--individual-profiles); fi

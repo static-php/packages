@@ -177,7 +177,9 @@ case "$command" in
         python3 .github/actions/shared-libraries/runtime-checks.py --type "$TYPE" --payload "build/$PHPV"             --candidates "dist/$TYPE" --baseline-dir stage/published-baseline --output stage/runtime-libraries
         ;;
     freeze-baseline)
-        python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline
+        baseline_args=(--packages "${PACKAGES:-}")
+        if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan stage/shared-library-plan.json); fi
+        python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline "${baseline_args[@]}"
         ;;
     upload-1|upload-2)
         host=${command##*-}

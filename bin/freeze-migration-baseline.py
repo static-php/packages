@@ -4,6 +4,7 @@
 import argparse
 import ast
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import io
@@ -209,8 +210,24 @@ def latest_packages(kind, inventory):
     return latest
 
 
-def select_packages(kind, inventory, profile, include_debug=False):
-    latest = latest_packages(kind, inventory)
+def affected_profile(latest, packages, libraries):
+    names = {'php-zts-cli', 'php-zts-fpm', 'frankenphp'}
+    normalize = lambda name: name.removeprefix('php-zts-').replace('_', '-')
+    requested = {normalize('pie-zts' if p == 'pie' else p) for p in packages}
+    names.update(name for name in latest if normalize(name) in requested)
+    affected = {'php-zts-lib-' + name for name in libraries}
+    while affected:
+        names.update(affected)
+        capabilities = {capability for name in affected for capability in
+                        [name, *latest.get(name, {}).get('provides', [])]}
+        affected = {name for name, package in latest.items() if name not in names
+                    and not name.endswith(('-debuginfo', '-dbgsym'))
+                    and capabilities.intersection(package.get('requires', []))}
+    return {normalize(name) for name in names}
+
+
+def select_packages(kind, inventory, profile, include_debug=False, latest=None):
+    latest = latest_packages(kind, inventory) if latest is None else latest
     def wanted(name):
         if 'all' not in profile:
             return name.removeprefix('php-zts-').replace('_', '-') in profile
@@ -272,11 +289,19 @@ def freeze(args):
         if args.type == 'apk' and not args.base_url:
             inventory = registered_apk_packages(inventory, owner)
     profile = {name.strip().removeprefix('php-zts-').replace('_', '-') for name in args.profile.split(',') if name.strip()}
+    requested = {name.strip() for name in getattr(args, 'packages', '').split(',') if name.strip()}
+    library_plan = getattr(args, 'library_plan', None)
+    libraries = json.loads(library_plan.read_text())['libraries'] if library_plan else []
+    latest = latest_packages(args.type, inventory)
+    if requested or library_plan:
+        if library_plan and not libraries:
+            raise RuntimeError('Library-only baseline requires planned library updates')
+        profile = affected_profile(latest, requested, libraries)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
         stage = Path(temporary)
-        selected = select_packages(args.type, inventory, profile, args.include_debug)
+        selected = select_packages(args.type, inventory, profile, args.include_debug, latest=latest)
         if 'php-zts-cli' not in selected:
             raise RuntimeError('Published baseline has no matching CLI package')
         for name, content in metadata.items():
@@ -289,13 +314,13 @@ def freeze(args):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             key_paths.append(str(target.relative_to(output)))
-        packages = []
-        for package in selected.values():
-            packages.append(download_package(package, args.type, output, stage))
+        with ThreadPoolExecutor(max_workers=4) as downloads:
+            packages = list(downloads.map(lambda package: download_package(package, args.type, output, stage), selected.values()))
         result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'origin': {'publication_url': base, 'real_published': True},
                   'packages': packages, 'published_packages': inventory, 'keys': key_paths,
-                  'selection': {'profile': args.profile, 'complete': 'all' in profile,
+                  'selection': {'profile': ','.join(sorted(profile)), 'complete': 'all' in profile,
+                                'mode': 'affected' if requested or library_plan else 'full',
                                 'include_debug': args.include_debug,
                                 'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},
                   'repository': {'publication_url': base, 'metadata': ['metadata/' + name for name in metadata]}}
@@ -321,6 +346,8 @@ def main():
     parser.add_argument('--el', choices=('el8', 'el9', 'el10'), default='el8')
     parser.add_argument('--base-url')
     parser.add_argument('--profile', default=DEFAULT_PROFILE)
+    parser.add_argument('--packages', default='', help='Limit the baseline to these changed consumers and runtime hosts')
+    parser.add_argument('--library-plan', type=Path, help='Limit a library-only baseline to affected published consumers and dependencies')
     parser.add_argument('--include-debug', action='store_true', help='Include debug packages with --profile=all')
     parser.add_argument('--output', type=Path, required=True)
     freeze(parser.parse_args())

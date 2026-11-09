@@ -28,6 +28,57 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_auto_runs_only_the_frozen_affected_profiles(self):
+        baseline = {'selection': {'mode': 'affected', 'complete': False},
+                    'packages': [{'name': name} for name in
+                                 ('php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-imagick')]}
+        calls = []
+        def checked(args, prepared=None):
+            calls.append(set(args.profile.split(',')))
+            return {'ok': True, 'applicable': True, 'cleanup': {'complete': True}}
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / 'report.json'
+            arguments = ['migration-upgrade-containers.py', '--type', 'deb', '--php', '8.5', '--arch', 'x86_64',
+                         '--baseline-dir', '/unused', '--artifacts', '/unused', '--profile', 'auto',
+                         '--partial-consumers', '--report', str(report)]
+            with patch.dict(scope, {'load_baseline': lambda *args: baseline, 'cell': checked, 'PreparedMirror': PreparedStub}), \
+                    patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(harness['main'](), 0)
+            self.assertTrue(json.loads(report.read_text())['complete'])
+        self.assertEqual(calls, [{'frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-imagick'},
+                                 {'php-zts-cli', 'php-zts-imagick'}])
+
+    def test_affected_profiles_load_selected_instrumentation_under_runtime_hosts(self):
+        names = ['php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-xdebug', 'php-zts-lib-zlib']
+        baseline = {'selection': {'mode': 'affected', 'complete': False},
+                    'packages': [{'name': name} for name in names]}
+        profiles = harness['affected_profiles'](baseline)
+        common, instrumentation = profiles['profiles']
+        self.assertEqual(common['packages'], ['frankenphp', 'php-zts-cli', 'php-zts-fpm'])
+        self.assertEqual(instrumentation['packages'], ['frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-xdebug'])
+        with self.assertRaisesRegex(RuntimeError, 'complete'):
+            harness['all_profiles'](baseline)
+        with self.assertRaisesRegex(RuntimeError, 'changed packages'):
+            harness['affected_profiles']({'packages': baseline['packages']})
+
+    def test_new_optional_extension_is_exercised_with_retained_runtime_hosts(self):
+        baseline = {'selection': {'mode': 'affected'}, 'packages': [{'name': 'php-zts-cli'}]}
+        profiles = harness['candidate_only_profiles'](baseline, {'incoming': [{'name': 'php-zts-new-extension'}]})
+        self.assertEqual(profiles, [{'id': 'fresh-php-zts-new-extension', 'fresh_package': 'php-zts-new-extension',
+                                    'packages': ['frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-new-extension']}])
+
+    def test_scoped_library_profiles_keep_other_instrumentation_out(self):
+        baseline = {'packages': [
+            {'name': 'php-zts-cli'},
+            {'name': 'php-zts-lib-base', 'provides': ['php-zts-lib-base-abi-1']},
+            {'name': 'php-zts-xdebug', 'requires': ['php-zts-lib-base-abi-1']},
+            {'name': 'php-zts-pcov', 'requires': ['php-zts-lib-base-abi-1']},
+        ]}
+        selected = harness['library_old_profile'](baseline, ['php-zts-lib-base'],
+                                                 ['php-zts-cli', 'php-zts-xdebug'], expand_consumers=False)
+        self.assertEqual(selected, ['php-zts-cli', 'php-zts-lib-base', 'php-zts-xdebug'])
+        self.assertIn('php-zts-pcov', harness['library_old_profile'](baseline, ['php-zts-lib-base'], ['php-zts-cli']))
+
     def baseline(self, directory):
         root = Path(directory)
         (root / 'artifacts').mkdir()

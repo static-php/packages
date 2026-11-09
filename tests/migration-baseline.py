@@ -9,6 +9,7 @@ from pathlib import Path
 import runpy
 import tarfile
 import tempfile
+from threading import Event
 from types import SimpleNamespace
 import unittest
 import urllib.error
@@ -42,6 +43,71 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 
 class BaselineCapture(unittest.TestCase):
+
+    def test_partial_extension_downloads_only_runtime_hosts_and_dependency_closure(self):
+        rows = [
+            ('php-zts-cli', [], []),
+            ('php-zts-fpm', ['php-zts-cli'], []),
+            ('frankenphp', ['php-zts-embed'], []),
+            ('php-zts-embed', ['php-zts-cli'], []),
+            ('php-zts-imagick', ['php-zts-lib-imagemagick-abi-1'], []),
+            ('php-zts-lib-imagemagick', ['php-zts-runtime-layout'], ['php-zts-lib-imagemagick-abi-1']),
+            ('php-zts-runtime-layout', [], []),
+            ('php-zts-redis', ['php-zts-cli'], []),
+            ('php-zts-grpc', ['php-zts-lib-unrelated-missing-abi-1'], []),
+        ]
+        inventory, archives, downloaded = [], {}, []
+        another_download = Event()
+        for name, requires, provides in rows:
+            data = apk_fixture(name, '1-r0', depends=requires, provides=provides)
+            url = 'https://example.test/' + name + '.apk'
+            archives[url] = data
+            inventory.append({'name': name, 'version': '1-r0', 'architecture': 'x86_64',
+                              'requires': requires, 'provides': provides, 'publication_url': url,
+                              'published_checksum': {'algorithm': 'apk-control-sha1', 'value': helper['apk_control_checksum'](data)}})
+        def fetch(url):
+            downloaded.append(url)
+            if len(downloaded) == 1:
+                self.assertTrue(another_download.wait(timeout=2), 'Required archives were downloaded sequentially')
+            else:
+                another_download.set()
+            return archives[url]
+        with tempfile.TemporaryDirectory() as temporary:
+            args = SimpleNamespace(type='apk', php='8.5', arch='x86_64', base_url='https://example.test/',
+                                   profile='all', packages='imagick', library_plan=None,
+                                   output=Path(temporary), include_debug=False)
+            with patch.dict(helper['freeze'].__globals__, {'apk_index': lambda *args: (inventory, {}, []), 'fetch': fetch}):
+                helper['freeze'](args)
+            result = json.loads((args.output / 'baseline.json').read_text())
+        expected = {name for name, _, _ in rows} - {'php-zts-redis', 'php-zts-grpc'}
+        self.assertEqual({p['name'] for p in result['packages']}, expected)
+        self.assertEqual(set(downloaded), {'https://example.test/' + name + '.apk' for name in expected})
+        self.assertEqual(result['published_packages'], inventory)
+        self.assertEqual(result['selection']['mode'], 'affected')
+        self.assertFalse(result['selection']['complete'])
+
+    def test_library_update_selects_reverse_consumers_without_unrelated_extensions(self):
+        packages = [
+            {'name': 'php-zts-cli', 'version': '1', 'requires': []},
+            {'name': 'php-zts-fpm', 'version': '1', 'requires': ['php-zts-cli']},
+            {'name': 'frankenphp', 'version': '1', 'requires': ['php-zts-cli']},
+            {'name': 'php-zts-lib-base', 'version': '1', 'provides': ['php-zts-lib-base-abi-1']},
+            {'name': 'php-zts-lib-dependent', 'version': '1', 'requires': ['php-zts-lib-base-abi-1'], 'provides': ['php-zts-lib-dependent-abi-1']},
+            {'name': 'php-zts-imagick', 'version': '1', 'requires': ['php-zts-lib-dependent-abi-1']},
+            {'name': 'php-zts-redis', 'version': '1', 'requires': ['php-zts-cli']},
+        ]
+        latest = helper['latest_packages']('apk', packages)
+        profile = helper['affected_profile'](latest, [], ['base'])
+        selected = helper['select_packages']('apk', packages, profile, latest=latest)
+        self.assertEqual(set(selected), {p['name'] for p in packages} - {'php-zts-redis'})
+
+    def test_partial_package_aliases_preserve_pie_and_native_extension_names(self):
+        packages = [{'name': name, 'version': '1'} for name in
+                    ('php-zts-cli', 'php-zts-fpm', 'frankenphp', 'pie-zts', 'php-zts-pdo_mysql', 'php-zts-redis')]
+        latest = helper['latest_packages']('apk', packages)
+        profile = helper['affected_profile'](latest, ['pie', 'pdo_mysql'], [])
+        selected = helper['select_packages']('apk', packages, profile, latest=latest)
+        self.assertEqual(set(selected), {p['name'] for p in packages} - {'php-zts-redis'})
 
     def test_deb_baseline_reads_architecture_independent_dependency_index(self):
         native = b'Package: php-zts-cli\nVersion: 8.3.36-3\nArchitecture: amd64\nDepends: php-zts-runtime-layout\nFilename: cli.deb\nSHA256: cli\n'

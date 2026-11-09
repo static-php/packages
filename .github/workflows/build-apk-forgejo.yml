@@ -468,8 +468,8 @@ jobs:
                     args=()
                     if [[ "$RUNTIME_CHECKS" == true ]]; then args+=(--services --library-artifacts stage/runtime-libraries); fi
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
-                    profile=all
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only); profile=cli,fpm,frankenphp;
+                    profile=auto
+                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                     else
                         mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
                         if [[ "$mode" == shared ]]; then args+=(--partial-consumers); else args+=(--individual-profiles); fi

@@ -119,13 +119,15 @@ def resolve_profile(baseline, names):
     return sorted(set(names))
 
 
-def library_old_profile(baseline, incoming_changes, requested):
+def library_old_profile(baseline, incoming_changes, requested, expand_consumers=True):
     packages = {p['name']: p for p in baseline['packages']}
     roots = {name for name in incoming_changes if name.startswith('php-zts-lib-')
              and not name.endswith('-debuginfo') and name in packages}
     if not roots:
         raise RuntimeError('Library-only validation needs an affected provider in the published shared baseline')
     selected = set(requested) | roots
+    if not expand_consumers:
+        return sorted(selected)
     capabilities = set()
     for name in roots:
         capabilities.update([name] + packages[name].get('provides', []))
@@ -149,18 +151,30 @@ def all_profiles(baseline, individual=False):
     selection = baseline.get('selection', {})
     if selection.get('profile') != 'all' or selection.get('complete') is not True:
         raise RuntimeError('--profile all requires a complete --profile all frozen baseline, not a representative subset')
+    return package_profiles(baseline, individual)
+
+
+def affected_profiles(baseline):
+    if baseline.get('selection', {}).get('mode') != 'affected':
+        raise RuntimeError('Affected profiles require a baseline captured for the changed packages')
+    return package_profiles(baseline)
+
+
+def package_profiles(baseline, individual=False):
     names = sorted({p['name'] for p in baseline['packages']
                     if managed(p['name']) and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))})
     if 'php-zts-cli' not in names:
-        raise RuntimeError('Full baseline has no CLI package')
+        raise RuntimeError('Baseline has no CLI package')
     # Keep VM instrumentation profiles independent while testing ordinary modules together.
     isolated = {'php-zts-xdebug', 'php-zts-pcov', 'php-zts-spx', 'php-zts-xhprof'} & set(names)
     profiles = [{'id': 'common', 'packages': [name for name in names if name not in isolated]}]
     core = {'php-zts', 'php-zts-cli', 'php-zts-cgi', 'php-zts-fpm', 'php-zts-embed', 'php-zts-devel', 'frankenphp'}
     separate = set(names) - core if individual else isolated
+    hosts = ({'php-zts-cli', 'php-zts-fpm', 'frankenphp'} & set(names)
+             if baseline.get('selection', {}).get('mode') == 'affected' else {'php-zts-cli'})
     for name in sorted(separate):
-        profiles.append({'id': 'independent-' + name, 'packages': sorted({'php-zts-cli', name})})
+        profiles.append({'id': 'independent-' + name, 'packages': sorted(hosts | {name})})
     if 'php-zts-imagick' in names:
         profiles.append({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
                          'disabled_extension': 'imagick'})
@@ -183,7 +197,9 @@ def candidate_only_profiles(baseline, inventory):
                     if p['name'].startswith('php-zts-') and p['name'] not in published | core
                     and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))}
-    return [{'id': 'fresh-' + name, 'packages': [name], 'fresh_package': name} for name in sorted(names)]
+    hosts = ({'php-zts-cli', 'php-zts-fpm', 'frankenphp'}
+             if baseline.get('selection', {}).get('mode') == 'affected' else set())
+    return [{'id': 'fresh-' + name, 'packages': sorted(hosts | {name}), 'fresh_package': name} for name in sorted(names)]
 
 
 class Docker:
@@ -640,7 +656,8 @@ def inside(args):
             raise RuntimeError('Fresh optional-package profile must name a candidate absent from the published baseline')
         config, key = configure_client(kind, args.php, args.arch, args.runtime)
         command = {'rpm': ['dnf', 'install', '-y'], 'deb': ['apt-get', 'install', '-y'], 'apk': ['apk', 'add']}[kind]
-        run(command + [args.fresh_package])
+        names = json.loads(Path('/spp/selected.json').read_text())
+        run(command + names)
         after = installed(kind)
         candidate = {p['name']: p for p in inventory['new']}
         actual = args.fresh_package
@@ -680,7 +697,7 @@ def inside(args):
         elif kind == 'deb' and run(['dpkg', '--audit']).stdout.strip():
             raise RuntimeError('Fresh optional-package installation left an incomplete dpkg transaction')
         print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True,
-              'coverage': 'fresh_candidate_only', 'requested_installation': [args.fresh_package],
+              'coverage': 'fresh_candidate_only', 'requested_installation': names,
               'physical_package': actual,
               'installed_versions': {name: version for name, version in after.items() if managed(name)},
               'automatic_libraries': libraries, 'curl_fileinfo_automatic': True,
@@ -1093,7 +1110,7 @@ class PreparedMirror:
         args = options(args)
         scratch, resources, baseline = self.scratch, self.resources, self.baseline
         repository = scratch / 'repository'
-        names = [args.fresh_package] if args.fresh_package else resolve_profile(baseline, profile_names(args.profile))
+        names = resolve_profile(baseline, profile_names(args.profile))
         result = {'schema': 1, 'ok': False, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'runtime': args.runtime, 'baseline_origin': baseline['origin'], 'profile': names,
                   'library_only': args.library_only, 'partial_consumers': args.partial_consumers,
@@ -1110,7 +1127,8 @@ class PreparedMirror:
             if missing:
                 raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
             if args.library_only:
-                expanded = library_old_profile(baseline, self.inventory['incoming_changes'], names)
+                expanded = library_old_profile(baseline, self.inventory['incoming_changes'], names,
+                    expand_consumers=baseline.get('selection', {}).get('mode') != 'affected')
                 result['library_profile_expansion'] = sorted(set(expanded) - set(names))
                 names = expanded
                 result['profile'] = names
@@ -1293,9 +1311,11 @@ def main():
         raise KeyboardInterrupt('Interrupted by signal ' + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        if args.profile == 'all':
+        if args.profile in ('all', 'auto'):
             baseline = load_baseline(args.baseline_dir, args.type, args.php, args.arch)
-            profiles = all_profiles(baseline, args.individual_profiles)
+            profiles = (affected_profiles(baseline) if args.profile == 'auto' and
+                        baseline.get('selection', {}).get('mode') == 'affected'
+                        else all_profiles(baseline, args.individual_profiles))
             result = suite(args, baseline, profiles)
         else:
             result = cell(args)
