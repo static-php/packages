@@ -547,8 +547,11 @@ def assert_library_upgrade(before, after, incoming):
     for name, package in updates.items():
         if after.get(name) != package['version'] or after[name] == before[name]:
             raise RuntimeError('Ordinary upgrade held back library ' + name)
+    layout = incoming.get('php-zts-runtime-layout')
+    if layout and after.get('php-zts-runtime-layout') != layout['version']:
+        raise RuntimeError('Ordinary upgrade held back runtime layout')
     consumers = {name: version for name, version in before.items()
-                 if managed(name) and not name.startswith('php-zts-lib-')}
+                 if managed(name) and not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout'}
     for name, version in consumers.items():
         if after.get(name) != version:
             raise RuntimeError('Library-only update changed a PHP consumer: ' + name)
@@ -570,16 +573,10 @@ def assert_partial_upgrade(before, after, incoming, changed, allow_unaffected=Fa
     return updates
 
 
-def validate_library_only_candidates(old, incoming):
-    frozen = {p['name']: p for p in old}
-    for package in incoming:
-        if package['name'].startswith('php-zts-lib-'):
-            continue
-        previous = frozen.get(package['name'])
-        if (package['name'] != 'php-zts-runtime-layout' or previous is None
-                or package['version'] != previous['version']
-                or sha256(package['path']) != sha256(previous['path'])):
-            raise RuntimeError('Library-only candidates may include only libraries and an exact unchanged frozen layout archive')
+def validate_library_only_candidates(incoming):
+    if any(not package['name'].startswith('php-zts-lib-') and package['name'] != 'php-zts-runtime-layout'
+           for package in incoming):
+        raise RuntimeError('Library-only candidates may include only libraries and their runtime layout')
 
 
 def validate_partial_candidates(kind, old, incoming):
@@ -612,7 +609,7 @@ def inside(args):
         if partial:
             frozen = inspect_directory(kind, Path('/spp/repository/generations/old'))
             if args.library_only:
-                validate_library_only_candidates(frozen, incoming)
+                validate_library_only_candidates(incoming)
             incoming_changes = validate_partial_candidates(kind, frozen, incoming)
         make_keys(kind)
         old = index_generation(kind, 'old', args.php, args.arch)
@@ -629,7 +626,7 @@ def inside(args):
         library = None
         if args.library_artifacts:
             incoming_library = inspect_directory(kind, Path('/spp/library-input'))
-            validate_library_only_candidates(new, incoming_library)
+            validate_library_only_candidates(incoming_library)
             changed_library = validate_partial_candidates(kind, new, incoming_library)
             if not any(name.startswith('php-zts-lib-') for name in changed_library):
                 raise RuntimeError('Service lifecycle needs a genuine higher library package revision')

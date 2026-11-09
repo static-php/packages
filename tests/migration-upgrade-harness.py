@@ -329,6 +329,10 @@ class MigrationUpgradeHarness(unittest.TestCase):
         self.assertEqual(harness['assert_library_upgrade'](before, after, incoming), ['php-zts-lib-openssl'])
         with self.assertRaisesRegex(RuntimeError, 'held back library'):
             harness['assert_library_upgrade'](before, before, incoming)
+        before['php-zts-runtime-layout'] = '1-1'
+        after['php-zts-runtime-layout'] = '2-1'
+        incoming['php-zts-runtime-layout'] = {'version': '2-1'}
+        self.assertEqual(harness['assert_library_upgrade'](before, after, incoming), ['php-zts-lib-openssl'])
         after['php-zts-imagick'] = '3.8-5'
         with self.assertRaisesRegex(RuntimeError, 'changed a PHP consumer'):
             harness['assert_library_upgrade'](before, after, incoming)
@@ -351,17 +355,27 @@ class MigrationUpgradeHarness(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'affected provider'):
             harness['library_old_profile'](baseline, ['php-zts-lib-not-published'], ['php-zts-cli'])
 
-    def test_library_only_retry_accepts_only_an_identical_frozen_layout_archive(self):
+    def test_library_layout_obeys_the_same_native_version_and_identity_guards(self):
         with tempfile.TemporaryDirectory(prefix='spp-migration-layout-') as directory:
             old, new = Path(directory) / 'old.rpm', Path(directory) / 'new.rpm'
             old.write_bytes(b'unchanged signed layout archive')
             new.write_bytes(old.read_bytes())
             baseline = [{'name': 'php-zts-runtime-layout', 'version': '1-2', 'path': str(old)}]
             incoming = [{'name': 'php-zts-runtime-layout', 'version': '1-2', 'path': str(new)}]
-            harness['validate_library_only_candidates'](baseline, incoming)
+            harness['validate_library_only_candidates'](incoming)
+            harness['validate_partial_candidates']('deb', baseline, incoming)
             new.write_bytes(b'different bytes at the same version')
-            with self.assertRaisesRegex(RuntimeError, 'exact unchanged frozen layout'):
-                harness['validate_library_only_candidates'](baseline, incoming)
+            with self.assertRaisesRegex(RuntimeError, 'Equal-version partial candidate'):
+                harness['validate_partial_candidates']('deb', baseline, incoming)
+            incoming[0]['version'] = '2-1'
+            with patch.dict(scope, {'newer': lambda *args: True}):
+                self.assertEqual(harness['validate_partial_candidates']('deb', baseline, incoming), ['php-zts-runtime-layout'])
+            incoming[0]['version'] = '1-1'
+            with patch.dict(scope, {'newer': lambda *args: False}):
+                with self.assertRaisesRegex(RuntimeError, 'lower than the frozen version'):
+                    harness['validate_partial_candidates']('deb', baseline, incoming)
+            with self.assertRaisesRegex(RuntimeError, 'only libraries'):
+                harness['validate_library_only_candidates']([{'name': 'php-zts-cli'}])
 
     def test_partial_extension_update_keeps_core_and_other_modules_exact(self):
         before = {'php-zts-cli': '8.6-8', 'php-zts-imagick': '3.8-3', 'php-zts-intl': '8.6-2'}
