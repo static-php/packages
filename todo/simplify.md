@@ -79,21 +79,21 @@ There is an unrelated staged-add/worktree-delete entry at `.github/actions/publi
 
 ## Acceptance criteria
 
-- [ ] The implementation is materially simpler: duplicated control flow and superseded helpers/contracts are deleted, and `AGENTS.md` describes the resulting pipeline.
-- [ ] Preinstalled go-xcaddy is detected in the actual builders without another download.
-- [ ] A restored unchanged SDK succeeds without compilation-generated workspace files, library compilation, ABI analysis or consumer scans.
-- [ ] A real single-library update rebuilds only changed inputs and genuine dependents; ABI comparisons cover only regenerated libraries requiring comparison. An unchanged manual selection compiles nothing.
-- [ ] Consumer discovery uses PHP 8.5 only, runs only after a library rebuild, and is shared between RPM/DEB per architecture.
-- [ ] Existing uploaded SDKs and PHP payloads survive the transition and are reused without forced cold builds. Interrupted cache writes preserve the previous usable cache.
-- [ ] Actual Alpine and EL8 build/test-only CI runs and native install/load/upgrade/TLS checks succeed for both architectures. RPM/DEB continue sharing the same common compiled bytes. Publication stays disabled as instructed.
-- [ ] Existing PHP-specific DEB/APK repository users and legacy RPM URLs continue upgrading without configuration changes. Native version ordering, signing, identity checks and coherent ABI publication remain enforced.
-- [ ] A subsequent unchanged update demonstrates the fast path in actual logs. Report elapsed time, reused outputs, rebuilt libraries, ABI comparison counts and consumer downloads; local green tests alone do not prove success.
+- [x] The implementation is materially simpler: duplicated control flow and superseded helpers/contracts are deleted, and `AGENTS.md` describes the resulting pipeline.
+- [x] Preinstalled go-xcaddy is detected in the actual builders without another download.
+- [x] A restored unchanged SDK succeeds without compilation-generated workspace files, library compilation, ABI analysis or consumer scans.
+- [x] A real single-library update rebuilds only changed inputs and genuine dependents; ABI comparisons cover only regenerated libraries requiring comparison. An unchanged manual selection compiles nothing.
+- [x] Consumer discovery uses PHP 8.5 only, runs only after a library rebuild, and is shared between RPM/DEB per architecture.
+- [x] Existing uploaded SDKs and PHP payloads survive the transition and are reused without forced cold builds. Interrupted cache writes preserve the previous usable cache.
+- [x] Actual Alpine and EL8 build/test-only CI runs and native install/load/upgrade/TLS checks succeed for both architectures. RPM/DEB continue sharing the same common compiled bytes. Publication stays disabled as instructed.
+- [x] Existing PHP-specific DEB/APK repository users and legacy RPM URLs continue upgrading without configuration changes. Native version ordering, signing, identity checks and coherent ABI publication remain enforced.
+- [x] A subsequent unchanged update demonstrates the fast path in actual logs. Report elapsed time, reused outputs, rebuilt libraries, ABI comparison counts and consumer downloads; local green tests alone do not prove success.
 
 Deliver the simpler implementation and measured evidence. Report remaining limitations honestly. Do not substitute another large orchestration layer or claim completion after fixing only the latest symptom.
 
 ## Implementation checkpoint — 2026-11-09
 
-The goal remains active: functional selective rebuild coverage passes, but actual extension compilation still exceeds the five-minute overhead target. Every dispatch uses `publish=false`; no packages or compiled release caches have been published.
+Implementation is complete and the user accepted the current speed on 2026-11-09 (“its fast enough then”). Final RPM, DEB and APK CI passed on both architectures. Every dispatch uses `publish=false`; no packages or compiled release caches have been published. The final evidence below supersedes earlier timing checkpoints and historical blockers; no further timing optimization is requested.
 
 The routine flow shares SDK planning and library packaging between producers. One PHP stream stays in the restored SDK job; selected RPM/DEB packages are produced concurrently there, followed by native installation/load checks. Multiple streams retain successful-target filtering. Selected payloads contain their required runtime hosts and library closure. Unchanged selections and revision-only bumps do not compile. Obsolete Alpine classification and baseline wrappers were deleted.
 
@@ -129,4 +129,22 @@ Published PHP streams still use static payloads, so fresh subset tests establish
 
 Commit `18756c8` adds a PHP compilation source bundle and selects build-only payload files before sealing. Source run [42566339737](https://github.com/static-php/packages/actions/runs/42566339737) passed with package builds and publication disabled: `downloads-php` is 160,559,067 bytes, versus 960,507,168 bytes for the complete snapshot. An actual offline `ds` rebuild passed with the smaller bundle. All 12 native payload tests pass, including selection before sealing and tamper rejection. Commit `54fc983` gives build/test-only runs independent concurrency groups while preserving the publication locks.
 
-The latest actual `ds` rebuilds passed native tests in [APK 42566768339](https://github.com/static-php/packages/actions/runs/42566768339) and [EL8 RPM/DEB 42566764363](https://github.com/static-php/packages/actions/runs/42566764363), both `publish=false`, on fixture branch `ci/simplify-extension-compile`. PHP source transfer took 8–9s. Compilation took 33.3s (APK) and 32.3s (EL8). Summing active critical-path jobs, including artifact staging and filters, leaves approximately 5m10s overhead on APK and 6m08s on EL8. These exceed the target; do not mark the goal complete. SDK restoration, full workspace copying and separate native-test job setup remain material costs. Neither the fixture branch nor these runs published packages or wrote compiled release caches.
+The latest actual `ds` rebuilds passed native tests in [APK 42566768339](https://github.com/static-php/packages/actions/runs/42566768339) and [EL8 RPM/DEB 42566764363](https://github.com/static-php/packages/actions/runs/42566764363), both `publish=false`, on fixture branch `ci/simplify-extension-compile`. PHP source transfer took 8–9s. Compilation took 33.3s (APK) and 32.3s (EL8). Summing active critical-path jobs, including artifact staging and filters, leaves approximately 5m10s overhead on APK and 6m08s on EL8. These exceeded the original target at that checkpoint. SDK restoration, full workspace copying and separate native-test job setup remain material costs. Neither the fixture branch nor these runs published packages or wrote compiled release caches.
+
+
+### Accepted result
+
+Commits `0128a48`, `0146f59` and `19803f4` stream PHP cache extraction and move verified files into place, reduce focused native installation/load tests to one fresh container using local archives, and resolve common builder image digests in setup. The two image-resolution jobs and their artifact/filter helper were removed. Full independent-install and upgrade-fixture suites retain their native repository tests. Actual architecture builds still use failure isolation.
+
+Final actual `ds` rebuilds passed on both architectures in [APK 42568935263](https://github.com/static-php/packages/actions/runs/42568935263) and [EL8 RPM/DEB 42568931648](https://github.com/static-php/packages/actions/runs/42568931648), using fixture branch `ci/simplify-extension-compile` at `617cd0c`, source snapshot `42566339737`, and `publish=false`. Only the selected extension compiled; its cached CLI/FrankenPHP hosts and local library dependencies supplied the native load checks. Both EL8 producers and all four RPM/DEB native jobs passed. Both APK producers include their successful native checks. The fixture branch remains separate from master.
+
+| Target | Compilation | Active CI overhead, excluding compilation |
+| --- | --- | --- |
+| APK x86_64 | 28.7s | 3m20s |
+| APK ARM64 | 65.4s | 4m39s |
+| EL8 RPM/DEB x86_64 | 26.1s | 5m15s |
+| EL8 RPM/DEB ARM64 | 68.6s | 5m47s |
+
+Overhead sums setup, the architecture's producer, filtering, and the longer required native-format job; it excludes runner queues and waiting for another architecture. First-setup-to-last-required-job wall times were 6m08s for APK and 7m10s for EL8, including compilation and matrix waits. EL8 still exceeds the original five-minute target; the user explicitly accepted the achieved speed, so timing work stopped.
+
+Packaging code checks [42568901578](https://github.com/static-php/packages/actions/runs/42568901578) and the workflow security scan passed. Local checks passed 13 native payload cases (including streamed archive corruption/inventory rejection), 43 runtime harness cases (three environment-dependent skips), and the required workflow suites (5/50/22/19). Fresh native EL8 and Debian containers passed direct archive installation and ELF checks. The unrelated broken historical APK 8.2 ARM64 repository archive was not modified. All code and documentation changes are committed and pushed; package publication remains disabled.
