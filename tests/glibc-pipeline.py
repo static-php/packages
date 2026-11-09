@@ -31,6 +31,12 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_complete_repackage_can_recover_a_broken_shared_baseline(self):
+        baseline = {'packages': [{'name': 'php-zts-cli', 'requires': ['php-zts-lib-openssl']}]}
+        self.assertEqual(workflow.upgrade_mode(baseline, {'php_requests': {'8.5': {'full': True}}}, '8.5'), 'full')
+        self.assertEqual(workflow.upgrade_mode(baseline, {'php_requests': {'8.5': {'packages': ['curl']}}}, '8.5'), 'shared')
+        self.assertEqual(workflow.upgrade_mode({'packages': [{'name': 'php-zts-cli'}]}, {}, '8.5'), 'static')
+
     def test_native_inventory_capture_skips_unpublished_plans_and_isolates_stream_failures(self):
         freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
         captured = []

@@ -216,6 +216,15 @@ def verify_upgrades(source, library_artifact, kind, streams=None):
         raise RuntimeError("Missing successful native ordinary-upgrade cells: " + ", ".join(sorted(missing)))
 
 
+def upgrade_mode(baseline, plan, stream):
+    if plan.get('php_requests', {}).get(stream, {}).get('full'):
+        return 'full'
+    cli = next((item for item in baseline.get('packages', []) if item.get('name') == 'php-zts-cli'), None)
+    if cli is None:
+        raise RuntimeError('Frozen baseline has no CLI identity')
+    return 'shared' if any(name.startswith('php-zts-lib-') for name in cli.get('requires', [])) else 'static'
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
@@ -270,6 +279,8 @@ def main():
     native.add_argument("--output", type=Path, required=True)
     mode = sub.add_parser("upgrade-mode")
     mode.add_argument("--baseline", type=Path, required=True)
+    mode.add_argument("--plan", type=Path, required=True)
+    mode.add_argument("--php-stream", required=True)
     verify_native = sub.add_parser("verify-upgrades")
     verify_native.add_argument("--source", type=Path, required=True)
     verify_native.add_argument("--library-artifact", type=Path, required=True)
@@ -387,11 +398,7 @@ def main():
         value = upgrade_receipt(args.report, args.plan, args.packages, args.type, args.source_run_id, args.image, args.php_stream, args.architecture, args.libraries_only)
         args.output.write_text(json.dumps(value, sort_keys=True) + "\n")
     elif args.command == "upgrade-mode":
-        baseline = json.loads(args.baseline.read_text())
-        cli = next((item for item in baseline.get("packages", []) if item.get("name") == "php-zts-cli"), None)
-        if cli is None:
-            raise RuntimeError("Frozen baseline has no CLI identity")
-        print("shared" if any(name.startswith("php-zts-lib-") for name in cli.get("requires", [])) else "static")
+        print(upgrade_mode(json.loads(args.baseline.read_text()), json.loads(args.plan.read_text()), args.php_stream))
     elif args.command == "verify-upgrades":
         verify_upgrades(args.source, args.library_artifact, args.type, args.php_streams.split(',') if args.php_streams else None)
     elif args.command == "prune-consumers":

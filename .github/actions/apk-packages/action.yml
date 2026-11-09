@@ -63,7 +63,7 @@ runs:
                 profile=auto
                 if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                 else
-                    mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
+                    mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json --plan "stage/shared-library-plan.json" --php-stream "$PHPV")
                     if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
                 fi
                 python3 tests/migration-upgrade-containers.py --type apk --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/apk --baseline-dir stage/published-baseline --report dist/apk/native-upgrade-receipt.json --profile "$profile" "${args[@]}"
