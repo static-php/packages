@@ -368,7 +368,7 @@ class WorkflowContracts(unittest.TestCase):
             if name != 'build-apk-forgejo.yml':
                 self.assertEqual(job['with']['package-image-digest'], '${{ matrix.package-image-digest }}')
         self.assertEqual(self.publisher['concurrency'], {
-            'group': "shared-publish-${{ inputs.format }}-${{ inputs.target }}${{ inputs.mirror && '-mirror' || '' }}", 'cancel-in-progress': False, 'queue': 'max'})
+            'group': "${{ inputs.mirror && 'shared-publish-host2' || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}", 'cancel-in-progress': False, 'queue': 'max'})
         self.assertNotIn('container', self.publisher['jobs']['publish-apk'])
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")

@@ -136,7 +136,9 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
         except Exception as error:
             raise RuntimeError(f'Upload failed for {host} {owner}/{path.name}: {error}') from error
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    # Limit contention while recovering the secondary registry's HTTP 500 failures.
+    # Primary publication keeps its parallel uploads.
+    with ThreadPoolExecutor(max_workers=1 if mirror else 4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
             list(pool.map(upload, phase))
 
