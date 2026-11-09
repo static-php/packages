@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Integrity and job selection checks for the single EL8 producer pipeline."""
+import copy
 import hashlib
 import importlib.util
 import json
@@ -70,6 +71,80 @@ class Pipeline(unittest.TestCase):
             self.assertNotIn('error', glibc.read(snapshots / '8.5.json'))
             self.assertIn('HTTP 522', glibc.read(snapshots / '8.6.json')['error'])
             self.assertEqual(list((stage / 'common/deb/native-inventories').iterdir()), [])
+
+    def test_abi_consumer_scope_uses_actual_stream_inventory_and_preserves_explicit_requests(self):
+        plan = {'type': 'apk', 'php_requests': {'8.6': {'full': False, 'packages': ['cli', 'mysqlnd_parsec', 'swoole'],
+                'compile_packages': ['cli', 'mysqlnd_parsec', 'swoole'], 'compile_full': True}},
+                'abi_consumer_requests': {'8.6': {'full': False,
+                    'consumers': ['php-zts-cli', 'php-zts-mysqlnd_parsec', 'php-zts-swoole'],
+                    'packages': ['cli', 'mysqlnd_parsec', 'swoole']}},
+                'expected_consumers': {'8.6': ['php-zts-cli', 'php-zts-mysqlnd_parsec', 'php-zts-swoole']}}
+        snapshot = {'type': 'apk', 'php_stream': '8.6', 'architecture': 'arm64', 'inventory': [
+            {'name': 'php-zts-cli', 'architecture': 'aarch64'},
+            {'name': 'php-zts-mysqlnd_parsec', 'architecture': 'x86_64'}]}
+        original = copy.deepcopy(plan)
+        self.assertFalse(glibc.scope_abi_consumers(plan, dict(snapshot, error='offline'), '8.6'))
+        self.assertEqual(plan, original)
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.6', ['swoole']))
+        self.assertEqual(plan['php_requests']['8.6']['packages'], ['cli', 'swoole'])
+        self.assertEqual(plan['php_requests']['8.6']['compile_packages'], ['cli', 'swoole'])
+        self.assertEqual(plan['expected_consumers']['8.6'], ['php-zts-cli'])
+        self.assertEqual(plan['abi_consumer_requests']['8.6']['packages'], ['cli'])
+        self.assertTrue(plan['php_requests']['8.6']['compile_full'])
+
+    def test_native_inventory_refinement_updates_format_and_common_plans_before_receipts(self):
+        run_path = glibc.runpy.run_path
+        freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+        freezer['snapshot_inventory'] = lambda args: {'type': args.type, 'php_stream': args.php,
+            'architecture': args.arch, 'inventory': [{'name': 'php-zts-cli', 'architecture': args.arch}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            for kind in ('rpm', 'deb'):
+                glibc.write(stage / kind / 'shared-library-plan.json', {'schema': 1, 'type': kind, 'abi_break': True,
+                    'candidate_fingerprint': 'compiled-inputs', 'baseline_fingerprint': 'captured-baseline',
+                    'php_requests': {'8.6': {'full': False, 'packages': ['cli', 'swoole'], 'compile': True, 'compile_full': True}},
+                    'expected_consumers': {'8.6': ['php-zts-cli', 'php-zts-swoole']},
+                    'abi_consumer_requests': {'8.6': {'full': False, 'consumers': ['php-zts-cli', 'php-zts-swoole'], 'packages': ['cli', 'swoole']}}})
+            with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path', side_effect=lambda path: freezer if str(path).endswith('freeze-migration-baseline.py') else run_path(path)), \
+                    patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='arm64', PHP_VERSIONS='8.6', PACKAGES=''):
+                glibc.capture_native_inventories()
+            common = glibc.read(stage / 'common/shared-library-plan.json')
+            self.assertEqual(common['php_requests']['8.6']['packages'], ['cli'])
+            for kind in ('rpm', 'deb'):
+                actual = glibc.read(stage / kind / 'shared-library-plan.json')
+                self.assertEqual(actual, glibc.read(stage / 'common' / kind / 'shared-library-plan.json'))
+                self.assertEqual(actual['candidate_fingerprint'], 'compiled-inputs')
+                self.assertEqual(actual['baseline_fingerprint'], 'captured-baseline')
+                self.assertEqual(actual['expected_consumers']['8.6'], ['php-zts-cli'])
+                self.assertEqual(common['format_selection'][kind]['php_requests']['8.6']['packages'], ['cli'])
+
+    def test_native_bindings_add_stream_specific_consumers_and_skip_completed_abi_rollouts(self):
+        plan = {'type': 'apk', 'libraries': ['openssl'], 'abi_rebuild_roots': ['openssl'],
+                'expected_libraries': {'openssl': {'abi_capability': 'php-zts-lib-openssl-abi-2'}},
+                'abi_core_rebuild_streams': ['8.4'],
+                'php_requests': {'8.4': {'full': False, 'packages': ['cli', 'curl', 'mysqlnd_parsec'], 'compile_full': True}},
+                'expected_consumers': {'8.4': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec']},
+                'abi_consumer_requests': {'8.4': {'full': False, 'consumers': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec'],
+                    'packages': ['cli', 'curl', 'mysqlnd_parsec']}}}
+        snapshot = {'type': 'apk', 'php_stream': '8.4', 'architecture': 'arm64', 'inventory': [
+            {'name': 'php-zts-lib-openssl', 'version': '3.6.5-r1', 'provides': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-cli', 'version': '8.4.27-r4', 'requires': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-mysqlnd', 'version': '8.4.27-r2', 'requires': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-curl', 'version': '8.4.27-r2', 'requires': []}]}
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4'))
+        self.assertEqual(plan['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
+        self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd'])
+        self.assertEqual(plan['published_consumers']['8.4']['php-zts-mysqlnd'], '8.4.27-r2')
+        previous = copy.deepcopy(plan)
+        snapshot['inventory'][0]['provides'] = ['php-zts-lib-openssl-abi-2']
+        for package in snapshot['inventory'][1:3]:
+            package['requires'] = ['php-zts-lib-openssl-abi-2']
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4', ['curl']))
+        self.assertEqual(plan['php_requests']['8.4']['packages'], ['curl'])
+        self.assertEqual(plan['expected_consumers']['8.4'], [])
+        snapshot['inventory'].append({'name': 'php-zts-lib-curl', 'requires': ['php-zts-lib-openssl-abi-1']})
+        glibc.scope_abi_consumers(previous, snapshot, '8.4')
+        self.assertEqual(previous['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
 
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
