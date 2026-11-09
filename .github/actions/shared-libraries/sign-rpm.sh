@@ -30,6 +30,12 @@ declare -A existing_signatures=()
 while IFS= read -r -d '' name; do existing_signatures["$name"]=true; done < "$GNUPGHOME/reused-signatures"
 for archive in dist/rpm/*.rpm; do
     if [[ "${existing_signatures[${archive##*/}]:-}" == true ]]; then continue; fi
+    unsigned_hash=$(sha256sum "$archive" | cut -d ' ' -f 1)
+    if [[ -n "${SIGNED_RPM_CACHE:-}" && -f "$SIGNED_RPM_CACHE/$unsigned_hash" ]]; then
+        cp "$SIGNED_RPM_CACHE/$unsigned_hash" "$archive"
+        continue
+    fi
     rpmsign --define "_gpg_name $fingerprint" --define "_gpg_path $GNUPGHOME" \
         --define '__gpg /usr/bin/gpg' --addsign "$archive"
+    if [[ -n "${SIGNED_RPM_CACHE:-}" ]]; then cp "$archive" "$SIGNED_RPM_CACHE/$unsigned_hash"; fi
 done

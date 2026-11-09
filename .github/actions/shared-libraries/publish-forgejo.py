@@ -36,16 +36,18 @@ def consumer_owners(cohort, package_type, helper):
     return owners
 
 
-def package_groups(directory, package_type, owners, helper):
+def package_groups(directory, package_type, owners, helper, selected_owners=None):
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
     groups = {}
     for path in sorted(directory.glob('*.' + package_type)):
         if path.is_symlink() or not path.is_file():
             raise RuntimeError('Invalid cohort archive: ' + str(path))
         key = helper['package_metadata'](path, kind)
-        destinations = STREAM_OWNERS if independent(key[0]) else [owners.get(key)]
+        destinations = (selected_owners or STREAM_OWNERS) if independent(key[0]) else [owners.get(key)]
         if not all(destinations):
             raise RuntimeError('Package has no consumer ownership record: ' + key[0])
+        if selected_owners and not set(destinations) <= set(selected_owners):
+            raise RuntimeError('Package belongs to an unselected PHP owner: ' + key[0])
         for owner in destinations:
             groups.setdefault(owner, []).append(path)
     if not groups:
@@ -115,7 +117,10 @@ def main(argv=None):
     cohort = args.cohort or root / 'cohort'
     kind = {'deb': 'debian', 'apk': 'alpine'}[args.package_type]
     owners = consumer_owners(cohort, args.package_type, helper)
-    groups = package_groups(args.directory, args.package_type, owners, helper)
+    selected = [stream.replace('.', '') for stream in os.environ.get('PUBLICATION_PHP_STREAMS', '').split(',') if stream]
+    if set(selected) - set(STREAM_OWNERS):
+        raise RuntimeError('Invalid publication PHP streams')
+    groups = package_groups(args.directory, args.package_type, owners, helper, selected)
     bootstrap, _ = publication_mode(cohort, args.package_type, args.plan)
     publish(args.action, helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap)
 

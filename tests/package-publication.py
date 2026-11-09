@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -18,6 +19,42 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_failed_validation_preflight_and_upload_do_not_stop_other_streams(self):
+        for kind in ('rpm', 'deb', 'apk'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                library = root / 'cohort' / f'shared-libs-{kind}-target'
+                library.mkdir(parents=True)
+                (library / 'shared-library-plan.json').write_text(json.dumps({'abi_break': True,
+                    'php_requests': {f'8.{n}': {'full': True} for n in range(2, 7)}}))
+                events = []
+                def verify(source, library, kind, scope):
+                    events.append((scope[0], 'verify'))
+                    if scope == ['8.2']:
+                        raise RuntimeError('missing native receipt')
+                def run(command, **kwargs):
+                    stream = kwargs['env']['PUBLICATION_PHP_STREAMS']
+                    phase = command[-1]
+                    events.append((stream, phase))
+                    if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload-1', 'publish-rpm'):
+                        raise subprocess.CalledProcessError(1, command)
+                previous = Path.cwd()
+                try:
+                    os.chdir(root)
+                    with patch.object(publication, 'prune_consumers'), patch.object(publication, 'verify_upgrades', side_effect=verify), \
+                            patch.object(publication, 'assemble'), patch.object(publication.subprocess, 'run', side_effect=run), \
+                            patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(io.StringIO()):
+                        self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
+                finally:
+                    os.chdir(previous)
+                upload = 'publish-rpm' if kind == 'rpm' else 'upload-1'
+                self.assertNotIn(('8.2', 'publish'), events)
+                self.assertNotIn(('8.3', upload), events)
+                for stream in ('8.5', '8.6'):
+                    self.assertLess(events.index((stream, 'verify')), events.index((stream, 'publish')))
+                    self.assertLess(events.index((stream, 'publish')), events.index((stream, upload)))
+                    self.assertIn(f'PHP {stream}: published', (root / 'summary').read_text())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='spp-publication-')
         self.addCleanup(self.temporary.cleanup)
@@ -105,17 +142,18 @@ class Publication(unittest.TestCase):
         self.artifacts = [item for item in self.artifacts if item['name'] != 'shared-consumers-rpm-alma8-arm64-php8.6']
         with contextlib.redirect_stderr(io.StringIO()) as warnings:
             values = publication.publication_matrix(self.state(), self.plans)
-        self.assertEqual([value['target'] for value in values], ['alma8-x86_64'])
-        self.assertIn('Skipping incomplete rpm alma8-arm64', warnings.getvalue())
+        self.assertEqual({value['target'] for value in values}, {'alma8-x86_64', 'alma8-arm64'})
+        self.assertIn('Skipping unavailable stream: shared-consumers-rpm-alma8-arm64-php8.6', warnings.getvalue())
         self.assertEqual(len(publication.publication_matrix(self.state('deb'), self.plans)), 2)
 
-    def test_expired_consumer_prevents_partial_publication(self):
+    def test_expired_consumer_does_not_block_other_streams(self):
         self.plan()
         for item in self.artifacts:
             if item['name'] == 'shared-consumers-rpm-alma8-x86_64-php8.4':
                 item['expired'] = True
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'No complete retained rpm'):
-            publication.publication_matrix(self.state(), self.plans)
+        with contextlib.redirect_stderr(io.StringIO()):
+            value, = publication.publication_matrix(self.state(), self.plans)
+        self.assertEqual(len(value['artifact-ids'].split(',')), 2)
 
     def test_expired_plans_and_builds_without_packages_fail_clearly(self):
         with self.assertRaisesRegex(RuntimeError, 'No retained build plans'):
@@ -233,7 +271,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertFalse((ROOT / '.github/actions/publish-packages/action.yml').exists())
         steps = self.publisher['jobs']['publish-glibc']['steps']
         ssh = next(step for step in steps if step['name'] == 'Set up SSH key')
-        signing = next(step for step in steps if step['name'] == 'Sign RPM packages')
+        signing = next(step for step in steps if step['name'] == 'Publish each validated PHP stream independently')
         self.assertEqual(ssh['with']['ssh-private-key'], '${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}')
         self.assertEqual(signing['env']['RPM_SIGNING_KEY'], '${{ secrets.DEB_GPG_PRIVATE_KEY }}')
         self.assertEqual(signing['env']['RPM_SIGNING_PASSWORD'], '${{ secrets.DEB_GPG_PASSWORD }}')
@@ -241,14 +279,11 @@ class WorkflowContracts(unittest.TestCase):
     def test_publication_never_compiles_and_checks_receipts_before_signing(self):
         steps = self.publisher['jobs']['publish-glibc']['steps']
         names = [step['name'] for step in steps]
-        self.assertLess(names.index('Verify native ordinary upgrade receipts'), names.index('Sign RPM packages'))
-        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Publish cohort to primary registry'))
-        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Stage and promote canonical RPM generation'))
-        commands = [step['run'] for step in steps if 'run.sh' in step.get('run', '')]
-        self.assertEqual({command.rsplit(' ', 1)[1] for command in commands}, {'assemble', 'publish', 'upload-1', 'upload-2', 'publish-rpm'})
+        self.assertLess(names.index('Verify selected build target'), names.index('Publish each validated PHP stream independently'))
         self.assertNotIn('bin/spp', json.dumps(self.workflow))
-        download = next(step for step in steps if step['name'] == 'Download complete staged cohort')['with']
-        self.assertEqual(download['artifact-ids'], '${{ inputs.artifact-ids }}')
+        download = next(step for step in steps if step['name'] == 'Download staged native packages')['with']
+        self.assertEqual(download['artifact-ids'], '${{ inputs.artifact-ids || steps.selected-artifacts.outputs.ids }}')
+        self.assertNotIn('pattern', download)
         self.assertEqual(download['github-token'], '${{ github.token }}')
 
     def test_artifacts_needed_for_later_publication_last_seven_days(self):

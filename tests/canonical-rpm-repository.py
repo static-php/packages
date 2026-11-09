@@ -51,6 +51,19 @@ class RepositoryMetadata(unittest.TestCase):
 
 @unittest.skipUnless(all(shutil.which(tool) for tool in ["rpmbuild", "rpm", "rpmdev-vercmp", "createrepo_c", "modifyrepo_c"]), "native RPM repository tools required")
 class NativeRepository(unittest.TestCase):
+    def test_new_abi_can_publish_while_old_stream_keeps_its_provider(self):
+        layout = self.make_rpm('php-zts-runtime-layout', '1', 1)
+        old_library = self.make_rpm('php-zts-lib-zlib', '1.3.1', 1, ['php-zts-runtime-layout'], ['php-zts-lib-zlib-abi-1'])
+        old_cli = self.make_rpm('php-zts-cli', '8.4.27', 1, ['php-zts-lib-zlib-abi-1'])
+        self.promote(self.stage(layout, old_library, old_cli))
+        new_library = self.make_rpm('php-zts-lib-zlib', '2.0.0', 1, ['php-zts-runtime-layout'], ['php-zts-lib-zlib-abi-2'])
+        new_cli = self.make_rpm('php-zts-cli', '8.5.12', 1, ['php-zts-lib-zlib-abi-2'])
+        generation = self.stage(new_library, new_cli)
+        self.promote(generation)
+        packages = REPO['verify_generation'](generation)['packages']
+        for package in (old_library, new_library, old_cli, new_cli):
+            self.assertIn(package.name, packages)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="canonical-rpm-native-")
         self.addCleanup(self.temporary.cleanup)

@@ -1746,6 +1746,9 @@ def cohort(args):
         raise RuntimeError('Invalid shared-library plan')
     if plan.get('build_only'):
         raise RuntimeError('An unpublished subset is build/test-only; publication requires a complete migration cohort')
+    selected_streams = set(filter(None, getattr(args, 'php_streams', '').split(',')))
+    if selected_streams and not selected_streams <= {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages')}:
+        raise RuntimeError('Publication streams are not in the original build plan')
     known_baselines = plan.get('baseline_fingerprints', [plan['baseline_fingerprint']])
     current_baseline = manifest(args.baseline_manifest, False) if args.baseline_manifest else None
     baseline_changed = current_baseline is not None and fingerprint(current_baseline) not in known_baselines
@@ -1769,6 +1772,8 @@ def cohort(args):
             stream = consumer_version_stream(version)
         if name.startswith('php-zts-lib-') or name.removesuffix('-debuginfo') == 'php-zts-runtime-layout':
             stream = None
+        if selected_streams and stream is not None and stream not in selected_streams:
+            raise RuntimeError('Candidate belongs to an unselected PHP stream: ' + name)
         members.add(name)
         candidate_versions[(stream, name)] = package['evr'] if args.type == 'rpm' else version
         candidate_archives[(stream, name)] = file_sha256(path)
@@ -1809,9 +1814,9 @@ def cohort(args):
             streams.add(stream)
         files.append({'name': name, 'version': version, 'architecture': architecture, 'path': str(path), 'sha256': candidate_archives[(stream, name)]})
     missing = set(plan.get('expected_members', [])) - members
-    missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full')} - streams
+    missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') and (not selected_streams or stream in selected_streams)} - streams
     missing_consumers = {stream: sorted(set(names) - consumer_members[stream]) for stream, names in plan.get('expected_consumers', {}).items()
-                         if set(names) - consumer_members[stream]}
+                         if (not selected_streams or stream in selected_streams) and set(names) - consumer_members[stream]}
     if missing or missing_streams or missing_consumers:
         raise RuntimeError('Incomplete shared-library cohort; missing packages {}, full PHP streams {}, consumers {}'.format(', '.join(sorted(missing)), ', '.join(sorted(missing_streams)), json.dumps(missing_consumers, sort_keys=True)))
     if baseline_changed and not any(candidate_progress(current_baseline, previous, plan, candidate_versions, candidate_archives) for previous in plan.get('baseline_states', [])):
@@ -1897,6 +1902,7 @@ def main():
     command.add_argument('--artifacts', required=True)
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command.add_argument('--baseline-manifest')
+    command.add_argument('--php-streams', default='')
     command.add_argument('--output')
     args = parser.parse_args()
     if args.command == 'fingerprint':

@@ -106,23 +106,9 @@ class SharedGlibcEntrypoints(unittest.TestCase):
         data, _ = workflow('build-rpm-modular-packages.yml')
         publisher = data['jobs']['publish']['uses']
         steps = yaml.safe_load((ROOT / publisher).read_text())['jobs']['publish-glibc']['steps']
-        guard = next(step for step in steps if step.get('name') == 'Verify complete cohort and all upgrade guards')
-        second = next(step for step in steps if step.get('name') == 'Mirror cohort to secondary registry')
-        self.assertTrue(second['continue-on-error'])
-        failure = next(step for step in steps if step.get('name') == 'Report primary registry publication failure')
-        self.assertIn('steps.registry-1.outcome', failure['if'])
-        self.assertNotIn('registry-2', failure['if'])
-        cases = [('failure', False, 'deb', False), ('skipped', False, 'deb', False),
-                 ('success', False, 'deb', True), ('success', True, 'deb', False),
-                 ('success', False, 'rpm', False)]
-        for outcome, cancelled, kind, expected in cases:
-            with self.subTest(outcome=outcome, cancelled=cancelled, kind=kind):
-                expression = second['if'].strip().removeprefix('${{').removesuffix('}}').strip()
-                expression = expression.replace('cancelled()', repr(cancelled)).replace('env.TYPE', repr(kind))
-                expression = expression.replace('steps.' + guard['id'] + '.outcome', repr(outcome))
-                expression = expression.replace('&&', ' and ').replace('||', ' or ')
-                expression = re.sub(r'!(?!=)', 'not ', expression)
-                self.assertEqual(eval(expression, {'__builtins__': {}}, {}), expected)
+        publish = next(step for step in steps if step.get('name') == 'Publish each validated PHP stream independently')
+        self.assertTrue(publish['run'].endswith('publication.py publish-available'))
+        self.assertFalse(publish.get('continue-on-error', False))
 
     def test_apk_expressions_reference_declared_inputs_and_job_dependencies(self):
         data, events = workflow('build-apk-forgejo.yml')

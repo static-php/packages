@@ -246,6 +246,11 @@ class ForgejoPublication(unittest.TestCase):
             self.assertIn(library, paths)
             self.assertIn(layout, paths)
             self.assertEqual(cli in paths, owner == '85')
+        scoped = publisher['package_groups'](self.root, 'apk', owners, helper, ['85'])
+        self.assertEqual(set(scoped), {'85'})
+        self.assertEqual(set(scoped['85']), {library, layout, cli})
+        with self.assertRaisesRegex(RuntimeError, 'unselected PHP owner'):
+            publisher['package_groups'](self.root, 'apk', owners, helper, ['86'])
 
     def test_last_owner_preflight_failure_prevents_all_uploads(self):
         path = self.archive()

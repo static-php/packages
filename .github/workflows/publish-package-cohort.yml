@@ -107,45 +107,27 @@ jobs:
                 run: |
                     echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
                     docker pull "$IMAGE"
-            -   name: Download complete staged cohort
+            -   name: Select staged native package artifacts
+                if: inputs.artifact-ids == ''
+                id: selected-artifacts
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                    BUILD_RUN_ID: ${{ inputs.build-run-id || github.run_id }}
+                run: python3 .github/actions/shared-libraries/publication.py artifact-ids --run-id "$BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
+            -   name: Download staged native packages
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     github-token: ${{ github.token }}
                     run-id: ${{ inputs.build-run-id || github.run_id }}
-                    artifact-ids: ${{ inputs.artifact-ids }}
-                    pattern: ${{ inputs.artifact-ids == '' && format('shared-*-{0}-{1}*', env.TYPE, env.TARGET) || '' }}
+                    artifact-ids: ${{ inputs.artifact-ids || steps.selected-artifacts.outputs.ids }}
                     path: cohort
             -   name: Verify selected build target
                 run: python3 .github/actions/shared-libraries/publication.py verify-target --directory "cohort/shared-libs-$TYPE-$TARGET"
-            -   name: Assemble cohort packages
-                run: bash .github/actions/shared-libraries/run.sh assemble
-            -   name: Verify native ordinary upgrade receipts
-                run: python3 .github/actions/shared-libraries/workflow.py verify-upgrades --source cohort --library-artifact "cohort/shared-libs-$TYPE-$TARGET" --type "$TYPE"
-            -   name: Sign RPM packages
-                if: env.TYPE == 'rpm'
+            -   name: Publish each validated PHP stream independently
                 env:
                     RPM_SIGNING_KEY: ${{ secrets.DEB_GPG_PRIVATE_KEY }}
                     RPM_SIGNING_PASSWORD: ${{ secrets.DEB_GPG_PASSWORD }}
-                run: bash .github/actions/shared-libraries/sign-rpm.sh
-            -   name: Verify complete cohort and all upgrade guards
-                id: cohort-guard
-                run: bash .github/actions/shared-libraries/run.sh publish
-            -   name: Publish cohort to primary registry
-                id: registry-1
-                if: env.TYPE != 'rpm'
-                continue-on-error: true
-                run: bash .github/actions/shared-libraries/run.sh upload-1
-            -   name: Mirror cohort to secondary registry
-                id: registry-2
-                continue-on-error: true
-                if: ${{ !cancelled() && env.TYPE != 'rpm' && steps.cohort-guard.outcome == 'success' }}
-                run: bash .github/actions/shared-libraries/run.sh upload-2
-            -   name: Stage and promote canonical RPM generation
-                if: env.TYPE == 'rpm'
-                run: bash .github/actions/shared-libraries/run.sh publish-rpm
-            -   name: Report primary registry publication failure
-                if: ${{ !cancelled() && steps.registry-1.outcome == 'failure' }}
-                run: exit 1
+                run: python3 .github/actions/shared-libraries/publication.py publish-available
 
     publish-apk:
         name: Publish Alpine cohort

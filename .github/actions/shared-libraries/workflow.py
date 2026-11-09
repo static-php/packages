@@ -107,9 +107,17 @@ def matrix(plans, php_versions, succeeded=None):
     return includes, targets
 
 
-def assemble(source, destination, extension):
+def assemble(source, destination, extension, streams=None):
     destination.mkdir(parents=True, exist_ok=True)
-    for path in sorted(source.rglob("*." + extension)):
+    paths = []
+    for artifact in source.iterdir():
+        stream = re.search(r'-php(8\.[2-6])$', artifact.name)
+        if streams is not None and stream and stream.group(1) not in streams:
+            continue
+        paths.extend(artifact.glob('*.' + extension))
+        if artifact.name.startswith('shared-libs-'):
+            paths.extend((artifact / 'libraries').glob('*.' + extension))
+    for path in sorted(paths):
         target = destination / path.name
         if target.exists() and target.read_bytes() != path.read_bytes():
             raise RuntimeError("Conflicting cohort package: " + path.name)
@@ -178,15 +186,21 @@ def upgrade_receipt(report, plan, packages, kind, source_run_id, image, stream, 
     return receipt
 
 
-def verify_upgrades(source, library_artifact, kind):
+def verify_upgrades(source, library_artifact, kind, streams=None):
     target = json.loads((library_artifact / "target.json").read_text())
     plan_path = library_artifact / "shared-library-plan.json"
     plan = json.loads(plan_path.read_text())
     wanted = {stream for stream, request in plan.get("php_requests", {}).items() if request.get("full") or request.get("packages")}
+    if streams is not None:
+        if not streams or not set(streams) <= wanted:
+            raise RuntimeError('Publication streams are not in the original build plan')
+        wanted = set(streams)
     libraries_only = not wanted and bool(plan.get("libraries"))
     validated = set()
     for path in source.glob("*/shared-library-upgrade-receipt.json"):
         data = json.loads(path.read_text())
+        if streams is not None and data.get('probe_php_stream') not in streams:
+            continue
         scope = data.get("scope")
         stream = data.get("probe_php_stream")
         expected = upgrade_receipt(path.parent / "native-upgrade-receipt.json", plan_path, path.parent, kind,
@@ -235,6 +249,7 @@ def main():
     merge.add_argument("--source", type=Path, required=True)
     merge.add_argument("--destination", type=Path, required=True)
     merge.add_argument("--type", required=True)
+    merge.add_argument('--php-streams')
     receipt = sub.add_parser("receipt")
     receipt.add_argument("--plan", type=Path, required=True)
     receipt.add_argument("--source-run-id", required=True)
@@ -259,6 +274,7 @@ def main():
     verify_native.add_argument("--source", type=Path, required=True)
     verify_native.add_argument("--library-artifact", type=Path, required=True)
     verify_native.add_argument("--type", required=True)
+    verify_native.add_argument('--php-streams')
     prune = sub.add_parser("prune-consumers")
     prune.add_argument("--source", type=Path, required=True)
     prune.add_argument("--library-artifact", type=Path, required=True)
@@ -364,7 +380,7 @@ def main():
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
     elif args.command == "assemble":
-        assemble(args.source, args.destination, args.type)
+        assemble(args.source, args.destination, args.type, args.php_streams.split(',') if args.php_streams else None)
     elif args.command == "receipt":
         args.output.write_text(json.dumps(build_receipt(args.plan, args.source_run_id, args.image, args.kind, args.php_stream), sort_keys=True) + "\n")
     elif args.command == "upgrade-receipt":
@@ -377,7 +393,7 @@ def main():
             raise RuntimeError("Frozen baseline has no CLI identity")
         print("shared" if any(name.startswith("php-zts-lib-") for name in cli.get("requires", [])) else "static")
     elif args.command == "verify-upgrades":
-        verify_upgrades(args.source, args.library_artifact, args.type)
+        verify_upgrades(args.source, args.library_artifact, args.type, args.php_streams.split(',') if args.php_streams else None)
     elif args.command == "prune-consumers":
         prune_consumers(args.source, args.library_artifact)
 

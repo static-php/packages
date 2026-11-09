@@ -551,6 +551,34 @@ class SharedLibraryPlan(unittest.TestCase):
             planner['cohort'](args)
             self.assertEqual(json.loads(Path(args.output).read_text())['files'], [])
 
+    def test_scoped_cohort_keeps_guards_without_requiring_failed_streams(self):
+        with TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            artifacts = temporary / 'artifacts'
+            artifacts.mkdir()
+            package = artifacts / 'cli.apk'
+            metadata = b'pkgname = php-zts-cli\npkgver = 8.3.30-r2\narch = x86_64\n'
+            with gzip.open(package, 'wb') as compressed, tarfile.open(fileobj=compressed, mode='w|') as archive:
+                member = tarfile.TarInfo('.PKGINFO')
+                member.size = len(metadata)
+                archive.addfile(member, io.BytesIO(metadata))
+            plan = {'schema': 1, 'abi_break': True, 'baseline_fingerprint': 'original',
+                    'php_requests': {'8.2': {'full': True}, '8.3': {'full': True}},
+                    'expected_consumers': {'8.2': ['php-zts-cli'], '8.3': ['php-zts-cli']}}
+            (temporary / 'plan.json').write_text(json.dumps(plan))
+            args = argparse.Namespace(plan=str(temporary / 'plan.json'), baseline_manifest=None,
+                artifacts=str(artifacts), type='apk', output=str(temporary / 'result.json'), php_streams='8.3')
+            planner['cohort'](args)
+            receipt = json.loads(Path(args.output).read_text())
+            self.assertEqual(receipt['plan_fingerprint'], planner['digest'](plan))
+            self.assertEqual(len(receipt['files']), 1)
+            args.php_streams = ''
+            with self.assertRaisesRegex(RuntimeError, 'Incomplete shared-library cohort'):
+                planner['cohort'](args)
+            args.php_streams = '8.2'
+            with self.assertRaisesRegex(RuntimeError, 'unselected PHP stream'):
+                planner['cohort'](args)
+
     def test_published_consumer_versions_are_architecture_specific(self):
         packages = [{'name': 'php-zts-cli', 'version': '2'}, {'name': 'php-zts-cli', 'version': '1'},
                     {'name': 'php-zts-cli-debuginfo', 'version': '2'}]

@@ -238,7 +238,7 @@ def stage(args):
                 identity = tuple(package[field] for field in ("name", "architecture", "stream"))
                 previous_name = next((name for name, item in metadata.items()
                                       if identity == tuple(item[field] for field in ("name", "architecture", "stream"))), None)
-                if previous_name:
+                if previous_name and not package['name'].startswith('php-zts-lib-'):
                     order = native_compare("{epoch}:{version}-{release}".format(**package), "{epoch}:{version}-{release}".format(**metadata[previous_name]))
                     if order <= 0:
                         continue
@@ -259,6 +259,8 @@ def stage(args):
                 order = native_compare(new_evr, old_evr)
                 if order < 0 or (order == 0 and candidate["sha256"] != old["sha256"]):
                     raise RuntimeError("Candidate would downgrade or replace the same NEVRA: " + name)
+                if order > 0 and candidate['name'].startswith('php-zts-lib-'):
+                    continue
                 del sources[old_name]
                 del metadata[old_name]
             sources[name] = next(file for file in incoming if file.name == name)
@@ -432,7 +434,7 @@ def promote(args):
             for name, package in old["packages"].items():
                 replacement = [other for other in manifest["packages"].values()
                                if tuple(other[key] for key in ("name", "architecture", "stream")) == tuple(package[key] for key in ("name", "architecture", "stream"))]
-                if not replacement or any(native_compare("{epoch}:{version}-{release}".format(**other), "{epoch}:{version}-{release}".format(**package)) < 0 for other in replacement):
+                if not replacement or all(native_compare("{epoch}:{version}-{release}".format(**other), "{epoch}:{version}-{release}".format(**package)) < 0 for other in replacement):
                     raise RuntimeError("Staged generation is stale: " + name)
         for source in generation.rglob("*"):
             relative = source.relative_to(generation)

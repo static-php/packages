@@ -19,6 +19,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
+        -e PUBLICATION_PHP_STREAMS \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
 
@@ -181,15 +182,24 @@ REMOTE
         ;;
     assemble|publish)
         libs="cohort/shared-libs-$TYPE-$TARGET"
+        scope_args=()
+        if [[ -n "${PUBLICATION_PHP_STREAMS:-}" ]]; then scope_args+=(--php-streams "$PUBLICATION_PHP_STREAMS"); fi
         python3 .github/actions/shared-libraries/workflow.py prune-consumers --source cohort --library-artifact "$libs"
         if [[ ! -d "dist/$TYPE" ]]; then
-            python3 .github/actions/shared-libraries/workflow.py assemble --source cohort --destination "dist/$TYPE" --type "$TYPE"
+            python3 .github/actions/shared-libraries/workflow.py assemble --source cohort --destination "dist/$TYPE" --type "$TYPE" "${scope_args[@]}"
         fi
         if [[ "$command" == assemble ]]; then exit 0; fi
-        baseline current-baseline
+        if [[ ! -f current-baseline/shared-libraries.json ]]; then
+            python3 - <<'PY'
+import os, runpy
+from pathlib import Path
+helper = runpy.run_path('.github/actions/shared-libraries/glibc.py')
+helper['baseline'](os.environ['TYPE'], Path('current-baseline'))
+PY
+        fi
         baseline_args=()
         [[ -f current-baseline/shared-libraries.json ]] && baseline_args+=(--baseline-manifest current-baseline/shared-libraries.json)
-        python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" --output cohort-result.json
+        python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" "${scope_args[@]}" --output cohort-result.json
         if [[ "$TYPE" == rpm ]]; then
             python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --baseline-directory "${RPM_DIRECTORY%/el8}/el9" --baseline-directory "${RPM_DIRECTORY%/el8}/el10"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"
         else

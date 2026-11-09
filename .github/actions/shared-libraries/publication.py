@@ -6,10 +6,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
-from workflow import STREAMS, emit, image_digest
+from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, verify_upgrades
 
 
 WORKFLOWS = {
@@ -75,9 +77,16 @@ def publication_matrix(state, plans):
             raise RuntimeError('Unsupported PHP stream in build plan')
         required = ['shared-libs-' + kind + '-' + identity]
         if streams:
-            required += ['shared-consumers-' + kind + '-' + identity + '-php' + stream for stream in streams]
+            consumers = ['shared-consumers-' + kind + '-' + identity + '-php' + stream for stream in streams]
+            available = [name for name in consumers if name in state['artifacts']]
+            for missing in sorted(set(consumers) - set(available)):
+                print('::warning::Skipping unavailable stream: ' + missing, file=sys.stderr)
+            if not available:
+                continue
+            required += available
         elif selection.get('libraries'):
-            required += ['shared-validation-' + kind + '-' + identity + '-php8.4']
+            validations = ['shared-validation-' + kind + '-' + identity + '-php' + stream for stream in STREAMS]
+            required += [next((name for name in validations if name in state['artifacts']), validations[3])]
         else:
             continue
         missing = [name for name in required if name not in state['artifacts']]
@@ -109,6 +118,46 @@ def api(path, paginate=False):
     return json.loads(subprocess.check_output(command, text=True))
 
 
+def publish_available(source, kind, target):
+    library = source / f'shared-libs-{kind}-{target}'
+    plan = json.loads((library / 'shared-library-plan.json').read_text())
+    prune_consumers(source, library)
+    streams = sorted(stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
+    scopes = [[stream] for stream in streams] or [None]
+    results = []
+    with tempfile.TemporaryDirectory(prefix='spp-signed-rpms-') as signed:
+        for scope in scopes:
+            label = ','.join(scope) if scope else 'libraries'
+            environment = dict(os.environ, PUBLICATION_PHP_STREAMS=','.join(scope or []), SIGNED_RPM_CACHE=signed)
+            def run(*arguments):
+                subprocess.run(list(arguments), check=True, env=environment)
+            try:
+                verify_upgrades(source, library, kind, scope)
+                destination = Path('dist') / kind
+                if destination.exists():
+                    shutil.rmtree(destination)
+                assemble(source, destination, kind, scope)
+                if kind == 'rpm':
+                    run('bash', '.github/actions/shared-libraries/sign-rpm.sh')
+                run('bash', '.github/actions/shared-libraries/run.sh', 'publish')
+                run('bash', '.github/actions/shared-libraries/run.sh', 'publish-rpm' if kind == 'rpm' else 'upload-1')
+                results.append((label, 'published'))
+                if kind != 'rpm':
+                    try:
+                        run('bash', '.github/actions/shared-libraries/run.sh', 'upload-2')
+                    except subprocess.CalledProcessError:
+                        print(f'::warning::{kind} PHP {label}: primary published; secondary mirror failed', flush=True)
+            except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+                results.append((label, 'failed: ' + str(error)))
+                print(f'::error::{kind} PHP {label}: {error}; continuing with other streams', flush=True)
+    summary = '\n'.join(f'{kind.upper()} {target} PHP {stream}: {state}' for stream, state in results)
+    print(summary, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+            output.write(summary + '\n')
+    return all(state == 'published' for _, state in results)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -123,6 +172,9 @@ def main():
     matrix.add_argument('--plans', type=Path, required=True)
     verify = sub.add_parser('verify-target')
     verify.add_argument('--directory', type=Path, required=True)
+    sub.add_parser('publish-available')
+    artifacts = sub.add_parser('artifact-ids')
+    artifacts.add_argument('--run-id', required=True)
     args = parser.parse_args()
     if args.command == 'inspect':
         if not re.fullmatch('[0-9]+', args.run_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository or ''):
@@ -138,6 +190,17 @@ def main():
         includes = publication_matrix(state, args.plans)
         emit('matrix', {'include': includes})
         emit('any', 'true')
+    elif args.command == 'artifact-ids':
+        endpoint = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + args.run_id + '/artifacts?per_page=100'
+        pattern = r'shared-(?:libs|consumers|validation)-' + re.escape(os.environ['TYPE'] + '-' + os.environ['TARGET']) + r'(?:-php8\.[2-6])?'
+        ids = [str(item['id']) for page in api(endpoint, paginate=True) for item in page['artifacts']
+               if not item.get('expired') and re.fullmatch(pattern, item['name'])]
+        if not ids:
+            raise RuntimeError('No staged native packages available')
+        emit('ids', ','.join(ids))
+    elif args.command == 'publish-available':
+        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET']):
+            raise SystemExit(1)
     else:
         verify_target(args.directory, *(os.environ[name] for name in ['TYPE', 'TARGET', 'MATRIX_ARCH', 'IMAGE', 'SOURCE_RUN_ID']))
 

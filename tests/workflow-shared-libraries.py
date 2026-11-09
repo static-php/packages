@@ -592,9 +592,7 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertNotIn(' upload ', runs, name)
                 self.assertNotIn('rsync ', runs, name)
             publish = self.publication_steps(data)
-            preflight = next(index for index, step in enumerate(publish) if step['name'] in ['Verify complete cohort and all downgrade guards', 'Verify complete cohort and all upgrade guards'])
-            upload = next(index for index, step in enumerate(publish) if step['name'].startswith(('Publish cohort', 'Stage and promote')))
-            self.assertLess(preflight, upload)
+            self.assertTrue(any(step.get('run', '').endswith('publication.py publish-available') for step in publish))
             self.assertIn('!cancelled()', data['jobs']['publish']['if'])
 
     def test_uniquely_owned_staging_artifacts_can_be_replaced_on_rerun(self):
@@ -655,8 +653,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
         publish = self.publication_steps(data)
         names = [step['name'] for step in publish]
-        self.assertLess(names.index('Verify native ordinary upgrade receipts'), names.index('Sign RPM packages'))
-        self.assertLess(names.index('Verify complete cohort and all upgrade guards'), names.index('Stage and promote canonical RPM generation'))
+        self.assertLess(names.index('Verify selected build target'), names.index('Publish each validated PHP stream independently'))
+        self.assertTrue(any(step.get('run', '').endswith('publication.py publish-available') for step in self.publication_steps(data)))
 
     def test_alpine_keeps_actions_on_glibc_host(self):
         data = dict(self.workflows())['build-apk-forgejo.yml']
