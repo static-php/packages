@@ -262,6 +262,12 @@ class ForgejoPublication(unittest.TestCase):
             publisher['stage_mirror_dependencies'](cohort, destination, 'apk', mirrored_debug, ['85'])
         loader.assert_not_called()
         ssl.unlink()
+        missing_debug = dict(mirrored_debug, remote_package_archives=lambda *_: [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            failures = publisher['stage_mirror_dependencies'](cohort, destination, 'apk', missing_debug, ['85'])
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(ssl.is_file())
+        ssl.unlink()
         (baseline / libraries['ssl']['published_archive']).write_bytes(b'changed captured archive')
         with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
             publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper)

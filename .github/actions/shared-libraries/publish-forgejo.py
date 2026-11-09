@@ -116,6 +116,7 @@ def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=No
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
     present = {helper['package_metadata'](path, kind)[0] for path in directory.glob('*.' + package_type)}
     planner = None
+    failures = []
     for manifest in sorted(cohort.glob('shared-libs-*/baseline/shared-libraries.json')):
         baseline = json.loads(manifest.read_text())
         records = [('php-zts-lib-' + identifier, value, 'published_archive', 'published_archive_sha256')
@@ -139,24 +140,30 @@ def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=No
             present.add(name)
             debug = record.get('published_debug_archive')
             if debug and name + '-debuginfo' not in present:
-                password = os.environ.get(debug.get('password_env') or '', '')
-                archives = helper['remote_package_archives'](debug['host'], debug['owner'], password, kind,
-                    debug['name'], debug['package_version'], True)
-                matching = [item for item in archives if normalize(item['arch']) == normalize(arch)]
-                if len(matching) != 1:
-                    raise RuntimeError('Cannot identify retained primary debuginfo: ' + name)
-                if all(any(item.get('sha256') == matching[0]['sha256'] for item in
-                           helper['get_remote_package_files'](helper['host2'], owner, os.environ['FORGEJO_PASSWORD'],
-                               kind, debug['name'], debug['package_version'])) for owner in (owners or STREAM_OWNERS)):
-                    continue
-                if planner is None:
-                    planner = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
-                cache = cohort / '.mirror-dependencies' / normalize(arch)
-                cache.mkdir(parents=True, exist_ok=True)
-                copied = Path(planner['stage_debug_archive'](debug, cache)['path'])
-                shutil.copy2(copied, directory / copied.name)
-                present.add(name + '-debuginfo')
+                try:
+                    password = os.environ.get(debug.get('password_env') or '', '')
+                    archives = helper['remote_package_archives'](debug['host'], debug['owner'], password, kind,
+                        debug['name'], debug['package_version'], True)
+                    matching = [item for item in archives if normalize(item['arch']) == normalize(arch)]
+                    if len(matching) != 1:
+                        raise RuntimeError('Cannot identify retained primary debuginfo: ' + name)
+                    if all(any(item.get('sha256') == matching[0]['sha256'] for item in
+                               helper['get_remote_package_files'](helper['host2'], owner, os.environ['FORGEJO_PASSWORD'],
+                                   kind, debug['name'], debug['package_version'])) for owner in (owners or STREAM_OWNERS)):
+                        continue
+                    if planner is None:
+                        planner = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
+                    cache = cohort / '.mirror-dependencies' / normalize(arch)
+                    cache.mkdir(parents=True, exist_ok=True)
+                    copied = Path(planner['stage_debug_archive'](debug, cache)['path'])
+                    shutil.copy2(copied, directory / copied.name)
+                    present.add(name + '-debuginfo')
+                except Exception as error:
+                    failure = f'Retained primary debuginfo unavailable: {name}: {error}'
+                    failures.append(failure)
+                    print(failure + '; continuing with runtime packages', flush=True)
             print(f'Retained primary dependency for mirror: {name} {version} {arch}', flush=True)
+    return failures
 
 
 def publish(action, host, password, kind, groups, helper, bootstrap, mirror=False):
@@ -218,12 +225,15 @@ def main(argv=None):
     selected = [stream.replace('.', '') for stream in os.environ.get('PUBLICATION_PHP_STREAMS', '').split(',') if stream]
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
+    dependency_failures = []
     if args.host_number == '2':
-        stage_mirror_dependencies(cohort, args.directory, args.package_type, helper, selected)
+        dependency_failures = stage_mirror_dependencies(cohort, args.directory, args.package_type, helper, selected)
     groups = package_groups(args.directory, args.package_type, owners, helper, selected)
     bootstrap, _ = publication_mode(cohort, args.package_type, args.plan)
     publish(args.action, helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap,
             mirror=args.host_number == '2')
+    if dependency_failures:
+        raise RuntimeError('Runtime uploads completed, but retained debuginfo is incomplete: ' + ' | '.join(dependency_failures[:5]))
 
 
 if __name__ == "__main__":
