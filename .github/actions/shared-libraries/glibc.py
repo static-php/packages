@@ -459,15 +459,11 @@ def preflight_consumers(stream, package_type, packages):
                         '--stream', stream, '--output', candidates_path]
     if package_type == 'apk':
         source_arguments += ['--type=apk']
-    run(source_arguments)
     if packages:
-        names = {'frankenphp' if name == 'frankenphp' else 'pie-zts' if name == 'pie' else 'php-zts-' + name
-                 for name in packages.split(',')}
-        candidates = read(candidates_path)
-        candidates['candidates'] = [candidate for candidate in candidates['candidates'] if candidate['name'] in names]
-        if not candidates['candidates']:
-            raise RuntimeError('No immutable source version evidence for the requested PHP build')
-        write(candidates_path, candidates)
+        source_arguments += ['--packages', packages]
+    run(source_arguments)
+    if packages and not read(candidates_path)['candidates']:
+        raise RuntimeError('No immutable source version evidence for the requested PHP build')
     for kind in ('apk',) if package_type == 'apk' else FORMATS:
         directory = STAGE if kind == 'apk' else STAGE / kind
         arguments = ['php', 'bin/preflight-consumer-versions', '--type=' + kind,

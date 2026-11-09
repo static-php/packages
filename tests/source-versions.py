@@ -147,11 +147,23 @@ class SourceVersions(unittest.TestCase):
         self.assertEqual(logical, {entry['name']: entry for entry in versions.candidates(self.root, self.stream, 'rpm')['candidates']})
 
     def test_runtime_macro_aliases_resolve_without_using_release_template(self):
+        self.stream, self.php = '8.5', '8.5.12'
+        self.metadata['php_versions'] = {self.stream: self.php}
+        self.php_source()
         self.profile(['swoole'])
         self.archive('ext-swoole', {'swoole/include/php_swoole.h': '#define PHP_SWOOLE_VERSION SWOOLE_VERSION\n',
                                    'swoole/include/swoole_version.h': '#define SWOOLE_VERSION "6.2.4"\n',
                                    'swoole/tools/templates/version.tpl.h': '#define SWOOLE_VERSION "<?=$next->getVersion() ?>"\n'})
         self.assertEqual(self.result()['php-zts-swoole']['upstream_version'], '6.2.4')
+
+    def test_selected_preflight_does_not_require_unrelated_source_archives(self):
+        self.profile(['grpc', 'protobuf'])
+        self.archive('ext-grpc', {'grpc/version.h': '#define PHP_GRPC_VERSION "1.83.0"\n'})
+        self.save()
+        (self.downloads / 'frankenphp.tar.gz').unlink()
+        (self.downloads / 'pie.phar').unlink()
+        result = versions.candidates(self.root, self.stream, packages='grpc')['candidates']
+        self.assertEqual([(item['name'], item['upstream_version']) for item in result], [('php-zts-grpc', '1.83.0')])
 
     def test_unknown_external_extension_does_not_fall_back_to_php_release(self):
         self.profile(['missing'])

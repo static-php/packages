@@ -229,7 +229,7 @@ def php_source(root, metadata, reader, stream):
     return full, record, identity, index
 
 
-def candidates(root, stream, package_type=None):
+def candidates(root, stream, package_type=None, packages=''):
     root = Path(root)
     downloads = root / 'downloads'
     metadata = read(downloads / '.spc-meta.json')
@@ -244,8 +244,12 @@ def candidates(root, stream, package_type=None):
         raise RuntimeError('Missing frozen extension source profile for PHP ' + stream)
     overrides = overrides.get(stream, {})
     result = []
+    selected = set(filter(None, packages.split(',')))
+    names = {'frankenphp' if name == 'frankenphp' else 'pie-zts' if name == 'pie' else 'php-zts-' + name for name in selected}
 
     def add(name, version, evidence, component=None):
+        if names and name not in names:
+            return
         entry = {'php_stream': stream, 'name': name, 'upstream_version': version,
                  'php_version': php_version, 'evidence': evidence}
         if component is not None:
@@ -253,6 +257,8 @@ def candidates(root, stream, package_type=None):
         result.append(entry)
 
     for component in profile['shared']:
+        if selected and component not in selected:
+            continue
         if extension_metadata.get(component, {}).get('addon'):
             continue
         source = overrides.get('ext-' + component, cache.get('ext-' + component, {}).get('source'))
@@ -261,6 +267,8 @@ def candidates(root, stream, package_type=None):
         upstream, evidence = extension_version(reader, source or php_record, component, php_version, bundled=source is None)
         add('php-zts-' + component, upstream, evidence, component)
     for sapi in profile['sapis']:
+        if selected and sapi not in selected:
+            continue
         if sapi == 'frankenphp':
             source = cache.get('frankenphp', {}).get('source')
             _, evidence = reader.source(source, 'frankenphp')
@@ -273,6 +281,8 @@ def candidates(root, stream, package_type=None):
             add('php-zts-' + sapi, php_version, dict(php_identity, header_version=php_version))
     add('php-zts-devel', php_version, dict(php_identity, header_version=php_version))
     add('php-zts', php_version, dict(php_identity, header_version=php_version))
+    if selected and 'pie' not in selected:
+        return {'schema': 1, 'candidates': result}
     receipt = read(downloads / 'pie.json')
     phar = downloads / 'pie.phar'
     if phar.is_symlink() or not phar.is_file():
@@ -293,9 +303,10 @@ def main():
     parser.add_argument('--root', type=Path, default=Path('.'))
     parser.add_argument('--stream', required=True)
     parser.add_argument('--type', choices=['rpm', 'deb', 'apk'])
+    parser.add_argument('--packages', default='')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    value = candidates(args.root.resolve(), args.stream, args.type)
+    value = candidates(args.root.resolve(), args.stream, args.type, args.packages)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, filename = tempfile.mkstemp(prefix='.source-versions-', dir=args.output.parent)
     path = Path(filename)
