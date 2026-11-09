@@ -74,8 +74,11 @@ def publication_order(groups, helper, kind, bootstrap):
     ordered = []
     for owner, paths in groups.items():
         for path in paths:
-            name = helper['package_metadata'](path, kind)[0].removesuffix('-debuginfo')
-            if name == LAYOUT_PACKAGE:
+            package_name = helper['package_metadata'](path, kind)[0]
+            name = package_name.removesuffix('-debuginfo')
+            if package_name.endswith('-debuginfo'):
+                phase = 4
+            elif name == LAYOUT_PACKAGE:
                 phase = 0
             elif name.startswith('php-zts-lib-'):
                 phase = 1 if bootstrap else 3

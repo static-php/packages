@@ -549,12 +549,14 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual(len(completed), 6)
 
     def test_initial_and_breaking_update_order(self):
-        paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-intl', 'php-zts-lib-ssl', 'php-zts-runtime-layout')]
+        paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-intl', 'php-zts-lib-ssl',
+                 'php-zts-runtime-layout', 'php-zts-cli-debuginfo', 'php-zts-lib-ssl-debuginfo')]
         groups = {'86': paths}
         def names(bootstrap):
             return [helper['package_metadata'](path, 'alpine')[0] for _, _, path in publisher['publication_order'](groups, helper, 'alpine', bootstrap)]
-        self.assertEqual(names(True), ['php-zts-runtime-layout', 'php-zts-lib-ssl', 'php-zts-intl', 'php-zts-cli'])
-        self.assertEqual(names(False), ['php-zts-runtime-layout', 'php-zts-intl', 'php-zts-cli', 'php-zts-lib-ssl'])
+        debug = ['php-zts-cli-debuginfo', 'php-zts-lib-ssl-debuginfo']
+        self.assertEqual(names(True), ['php-zts-runtime-layout', 'php-zts-lib-ssl', 'php-zts-intl', 'php-zts-cli'] + debug)
+        self.assertEqual(names(False), ['php-zts-runtime-layout', 'php-zts-intl', 'php-zts-cli', 'php-zts-lib-ssl'] + debug)
 
     def test_archive_mutation_during_preflight_prevents_upload(self):
         path = self.archive()
