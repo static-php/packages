@@ -158,7 +158,7 @@ case "$command" in
         rsync -av --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$RPM_DIRECTORY/"
         arch="${RPM_DIRECTORY%/el8}"
         arch="${arch##*/}"
-        ssh "$RPM_HOST" "set -e; cd '$RPM_DIRECTORY'; python=python3; if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi; \"\$python\" - --platform el8 --arch '$arch'; createrepo_c --update .; modifyrepo_c --mdtype=modules modules.yaml repodata" < bin/createrepo_static
+        ssh "$RPM_HOST" "set -e; cd '$RPM_DIRECTORY'; python=python3; if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi; \"\$python\" - --platform el8 --arch '$arch'; createrepo_c --update --retain-old-md-by-age 2h .; modifyrepo_c --mdtype=modules modules.yaml repodata" < bin/createrepo_static
         ;;
     assemble|publish)
         libs="cohort/shared-libs-$TYPE-$TARGET"

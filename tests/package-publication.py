@@ -88,7 +88,7 @@ class Publication(unittest.TestCase):
             self.assertNotIn('--delete', commands[1])
             update = commands[2][-1]
             self.assertIn('"$python" - --platform el8 --arch', update)
-            self.assertIn('createrepo_c --update .; modifyrepo_c --mdtype=modules modules.yaml repodata', update)
+            self.assertIn('createrepo_c --update --retain-old-md-by-age 2h .; modifyrepo_c --mdtype=modules modules.yaml repodata', update)
             for forbidden in ('.php-zts', '/el9', '/el10', ' ln ', ' mv ', ' rm '):
                 self.assertNotIn(forbidden, json.dumps(commands))
             environment['RPM_DIRECTORY'] = '/mnt/data/rpm/aarch64/el9'
