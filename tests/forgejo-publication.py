@@ -194,14 +194,14 @@ class ForgejoPublication(unittest.TestCase):
                 helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
         self.assertEqual(get.call_count, 4)
 
-    def test_each_registry_file_endpoint_is_verified_even_with_the_same_digest(self):
+    def test_identical_registry_digests_reuse_headers_across_streams(self):
         data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'x86_64')
         file = {'id': 45, 'name': 'library.apk', 'sha256': hashlib.sha256(data).hexdigest()}
-        replies = [response(payload=[file]), response(data=data), response(payload=[dict(file, id=46)]), response(data=data), response(payload=[file]), response(data=data)]
+        replies = [response(payload=[file]), response(data=data), response(payload=[dict(file, id=46)]), response(payload=[file])]
         with patch.dict(helper_globals, {'read_consumer_sidecar': lambda *args: None}), patch.object(helper_globals['requests'], 'get', side_effect=replies) as get:
             for owner in ('85', '85', '86'):
                 helper['remote_package_archives']('https://example.com', owner, 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
-        self.assertEqual(get.call_count, 6)
+        self.assertEqual(get.call_count, 4)
 
     def test_cli_apk_retains_optional_cutoffs_during_download(self):
         cutoffs = {'schema': 1, 'php_stream': '8.6', 'architecture': 'x86_64', 'formats': {'apk': {'php-zts-intl': '8.6.0_rc4-r2'}}}
@@ -262,6 +262,18 @@ class ForgejoPublication(unittest.TestCase):
                 helper['archive_migration_cutoffs'](self.root / 'bad.deb', 'debian')
         process.terminate.assert_called_once()
         process.wait.assert_called_once()
+
+    def test_matching_local_digest_never_downloads_the_remote_archive(self):
+        path = self.archive()
+        digest = helper['archive_sha256'](path)
+        files = [{'id': 45, 'name': path.name, 'sha256': digest}]
+        with patch.dict(helper_globals, {'version_is_newer': lambda *args: False}), \
+                patch.object(helper_globals['requests'], 'get', return_value=response(payload=files)) as get:
+            allowed = helper['verify_upload_versions']('https://example.com', '85', 'test', 'alpine', [path],
+                [{'name': 'php-zts-lib-ssl', 'version': '3.6.0-r1'}])
+        self.assertEqual(allowed, [path])
+        self.assertEqual(get.call_count, 1)
+        self.assertTrue(get.call_args.args[0].endswith('/files'))
 
     def test_equal_version_different_bytes_is_rejected_before_upload(self):
         path = self.archive()

@@ -284,6 +284,16 @@ def publish_consumer_sidecar(host, owner, password, pkg_type, path):
     if read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest) != value:
         raise RuntimeError('Served consumer sidecar differs after upload')
 
+def remember_local_archive(path, pkg_type):
+    name, version, arch = package_metadata(path, pkg_type)
+    digest = archive_sha256(path)
+    key = (pkg_type, name, version, digest)
+    if key not in VERIFIED_ARCHIVE_IDENTITIES:
+        embedded = archive_embedded_metadata(path, pkg_type, name)
+        VERIFIED_ARCHIVE_IDENTITIES[key] = dict(name=name, version=version, arch=arch, sha256=digest,
+            native_metadata=apk_native_metadata(path) if pkg_type == 'alpine' else None, **embedded)
+
+
 def remote_package_archives(host, owner, password, pkg_type, name, version):
     if pkg_type not in ('debian', 'alpine'):
         raise RuntimeError('Archive identity is supported for DEB and APK')
@@ -295,10 +305,11 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
                 continue
             url = f"{host}/{quote(owner, safe='')}/-/packages/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files/{file['id']}"
             registry_digest = file.get('sha256')
-            cache_key = (url, registry_digest.lower()) if isinstance(registry_digest, str) and re.fullmatch(r'[a-fA-F0-9]{64}', registry_digest) else None
+            cache_key = (pkg_type, name, version, registry_digest.lower()) if isinstance(registry_digest, str) and re.fullmatch(r'[a-fA-F0-9]{64}', registry_digest) else None
             if cache_key in VERIFIED_ARCHIVE_IDENTITIES:
                 record = deepcopy(VERIFIED_ARCHIVE_IDENTITIES[cache_key])
-                record['filename'] = file['name']
+                consumer_metadata_identity(record.get('consumer_metadata'), name, record['arch'], owner)
+                record.update(filename=file['name'], file_id=file['id'], owner=owner, url=url)
                 records.append(record)
                 continue
             sidecar = read_consumer_sidecar(host, owner, password, pkg_type, name, version, file.get('sha256'))
@@ -397,6 +408,7 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
     skipped = {}
     for index, pkg_file in enumerate(files, 1):
         name, version, arch = package_metadata(pkg_file, pkg_type)
+        remember_local_archive(pkg_file, pkg_type)
         print(f"Checking {index}/{len(files)}: {host} {owner}/{name} {version} {arch}", flush=True)
         key = (re.sub(r'-debuginfo$', '', name), version, arch)
         candidates.append((pkg_file, key))
