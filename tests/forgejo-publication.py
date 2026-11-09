@@ -229,6 +229,43 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual([record['owner'] for record in records], list(publisher['STREAM_OWNERS']))
         self.assertEqual(listing.call_count, 5)
 
+    def test_mirror_includes_retained_primary_libraries_without_replacing_candidates(self):
+        cohort = self.root / 'cohort'
+        baseline = cohort / 'shared-libs-apk-x86_64/baseline'
+        baseline.mkdir(parents=True)
+        destination = self.root / 'mirror'
+        destination.mkdir()
+        libraries = {}
+        for identifier in ('ssl', 'zlib'):
+            archive = self.archive(name='php-zts-lib-' + identifier)
+            shutil.copy2(archive, baseline / archive.name)
+            libraries[identifier] = {'published_archive': archive.name, 'published_version': '3.6.0-r1',
+                                     'published_archive_sha256': helper['archive_sha256'](archive)}
+        manifest = baseline / 'shared-libraries.json'
+        manifest.write_text(json.dumps({'architecture': 'x86_64', 'libraries': libraries}))
+        candidate = self.archive(name='php-zts-lib-zlib', version='3.6.0-r2')
+        shutil.copy2(candidate, destination / candidate.name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper)
+        self.assertEqual({helper['package_metadata'](p, 'alpine')[:2] for p in destination.glob('*.apk')},
+                         {('php-zts-lib-ssl', '3.6.0-r1'), ('php-zts-lib-zlib', '3.6.0-r2')})
+        ssl = destination / libraries['ssl']['published_archive']
+        ssl.unlink()
+        libraries['ssl']['published_debug_archive'] = {'host': 'https://primary.test', 'owner': '85',
+            'name': 'php-zts-lib-ssl-debuginfo', 'package_version': '3.6.0-r1'}
+        manifest.write_text(json.dumps({'architecture': 'x86_64', 'libraries': libraries}))
+        mirrored_debug = dict(helper,
+            remote_package_archives=lambda *_: [{'arch': 'x86_64', 'sha256': 'a' * 64}],
+            get_remote_package_files=lambda *_: [{'sha256': 'a' * 64}])
+        with patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(publisher['stage_mirror_dependencies'].__globals__['runpy'], 'run_path') as loader:
+            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', mirrored_debug, ['85'])
+        loader.assert_not_called()
+        ssl.unlink()
+        (baseline / libraries['ssl']['published_archive']).write_bytes(b'changed captured archive')
+        with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
+            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper)
+
     def test_candidate_lookup_only_queries_unique_selected_names(self):
         first = self.archive(name='php-zts-cli')
         second = self.archive(name='php-zts-cli', arch='aarch64')

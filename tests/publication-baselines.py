@@ -378,6 +378,28 @@ class PublicationBaselines(unittest.TestCase):
                 planner['stage_debug_archive'](record, destination)
         self.assertEqual(list(destination.iterdir()), [])
 
+    def test_forgejo_debug_retry_reuses_verified_download_and_selects_native_architecture(self):
+        destination = self.root / 'debug'
+        destination.mkdir()
+        data = b'published ARM debug archive'
+        digest = hashlib.sha256(data).hexdigest()
+        record = {'type': 'apk', 'host': 'https://primary.test', 'owner': '85',
+                  'name': 'php-zts-lib-fixture-debuginfo', 'package_version': '1-r1', 'architecture': 'aarch64'}
+        archives = [{'arch': arch, 'filename': arch + '.apk', 'url': 'https://primary.test/' + arch,
+                     'sha256': digest} for arch in ('x86_64', 'aarch64')]
+        def download(method, url, read, **kwargs):
+            self.assertEqual(url, 'https://primary.test/aarch64')
+            read(Mock(iter_content=lambda *_: [data]))
+        request = Mock(side_effect=download)
+        helpers = {'remote_package_archives': lambda *_: archives, 'registry_request': request}
+        with patch.object(plan_globals['runpy'], 'run_path', return_value=helpers), \
+                patch.dict(plan_globals, {'archive_identity': lambda *_: (record['name'], record['package_version'], 'aarch64'),
+                                          'native_compare': lambda *_: 0}):
+            first = planner['stage_debug_archive'](record, destination)
+            self.assertEqual(planner['stage_debug_archive'](record, destination), first)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(Path(first['path']).read_bytes(), data)
+
     def test_strict_cohort_rejects_entire_upload_if_one_candidate_is_lower(self):
         directory = self.root / 'artifacts'
         directory.mkdir()

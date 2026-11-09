@@ -6,6 +6,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -107,6 +108,54 @@ def mirror_candidates(paths, remote, host, owner, password, kind, helper):
     return selected
 
 
+def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=None):
+    """Copy retained, already-published dependencies into an incomplete mirror."""
+    kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
+    present = {helper['package_metadata'](path, kind)[0] for path in directory.glob('*.' + package_type)}
+    planner = None
+    for manifest in sorted(cohort.glob('shared-libs-*/baseline/shared-libraries.json')):
+        baseline = json.loads(manifest.read_text())
+        records = [('php-zts-lib-' + identifier, value, 'published_archive', 'published_archive_sha256')
+                   for identifier, value in baseline.get('libraries', {}).items()]
+        if baseline.get('runtime_layout'):
+            records.append((LAYOUT_PACKAGE, baseline['runtime_layout'], 'archive', 'archive_sha256'))
+        for name, record, archive_key, digest_key in records:
+            relative = record.get(archive_key)
+            if name in present or not relative or not relative.endswith('.' + package_type):
+                continue
+            root = manifest.parent.resolve()
+            archive = (root / relative).resolve()
+            if root not in archive.parents or not archive.is_file() or helper['archive_sha256'](archive) != record.get(digest_key):
+                raise RuntimeError('Retained mirror dependency checksum/path mismatch: ' + name)
+            actual_name, version, arch = helper['package_metadata'](archive, kind)
+            normalize = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
+            if (actual_name != name or version != record.get('published_version', record.get('package_version'))
+                    or arch not in ('all', 'noarch') and normalize(arch) != normalize(baseline.get('architecture'))):
+                raise RuntimeError('Retained mirror dependency identity mismatch: ' + name)
+            shutil.copy2(archive, directory / archive.name)
+            present.add(name)
+            debug = record.get('published_debug_archive')
+            if debug and name + '-debuginfo' not in present:
+                password = os.environ.get(debug.get('password_env') or '', '')
+                archives = helper['remote_package_archives'](debug['host'], debug['owner'], password, kind,
+                    debug['name'], debug['package_version'], True)
+                matching = [item for item in archives if normalize(item['arch']) == normalize(arch)]
+                if len(matching) != 1:
+                    raise RuntimeError('Cannot identify retained primary debuginfo: ' + name)
+                if all(any(item.get('sha256') == matching[0]['sha256'] for item in
+                           helper['get_remote_package_files'](helper['host2'], owner, os.environ['FORGEJO_PASSWORD'],
+                               kind, debug['name'], debug['package_version'])) for owner in (owners or STREAM_OWNERS)):
+                    continue
+                if planner is None:
+                    planner = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
+                cache = cohort / '.mirror-dependencies' / normalize(arch)
+                cache.mkdir(parents=True, exist_ok=True)
+                copied = Path(planner['stage_debug_archive'](debug, cache)['path'])
+                shutil.copy2(copied, directory / copied.name)
+                present.add(name + '-debuginfo')
+            print(f'Retained primary dependency for mirror: {name} {version} {arch}', flush=True)
+
+
 def publish(action, host, password, kind, groups, helper, bootstrap, mirror=False):
     if action not in ('check', 'upload'):
         raise RuntimeError('Unknown publication action: ' + action)
@@ -166,6 +215,8 @@ def main(argv=None):
     selected = [stream.replace('.', '') for stream in os.environ.get('PUBLICATION_PHP_STREAMS', '').split(',') if stream]
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
+    if args.host_number == '2':
+        stage_mirror_dependencies(cohort, args.directory, args.package_type, helper, selected)
     groups = package_groups(args.directory, args.package_type, owners, helper, selected)
     bootstrap, _ = publication_mode(cohort, args.package_type, args.plan)
     publish(args.action, helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap,

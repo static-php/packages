@@ -1037,27 +1037,30 @@ def stage_debug_archive(record, destination):
                 rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
                 rpm['same_archive']({'name': record['name'], 'evr': record['package_version'], 'path': str(path)}, record)
         else:
-            import requests
             helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
             package_type = 'debian' if kind == 'deb' else 'alpine'
             password = os.environ.get(record.get('password_env') or '', '')
-            files = helper['get_remote_package_files'](record['host'], record['owner'], password, package_type, record['name'], record['package_version'])
-            for file in files:
-                if not file.get('name', '').endswith('.' + kind):
+            archives = helper['remote_package_archives'](record['host'], record['owner'], password, package_type,
+                                                        record['name'], record['package_version'], True)
+            for archive in archives:
+                if normalized_arch(archive['arch'], kind) != normalized_arch(record['architecture'], kind):
                     continue
-                url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(record['host'].rstrip('/'), quote(record['owner'], safe=''), package_type,
-                                                               quote(record['name'], safe=''), quote(record['package_version'], safe=''), file['id'])
-                with requests.get(url, auth=(record['owner'], password) if password else None, timeout=120, stream=True) as response:
+                filename = archive['filename']
+                if PurePosixPath(filename).name != filename:
+                    raise RuntimeError('Invalid published library debuginfo filename')
+                cached = Path(destination) / filename
+                if cached.is_file() and file_sha256(cached) == archive['sha256']:
+                    return {'path': str(cached), 'sha256': archive['sha256']}
+                def download(response):
                     response.raise_for_status()
                     with path.open('wb') as output:
                         for chunk in response.iter_content(1024 * 1024):
                             output.write(chunk)
-                actual = archive_identity(path, kind)
-                if actual[:2] != (record['name'], record['package_version']):
-                    raise RuntimeError('Matching library debuginfo headers differ from registry')
-                if normalized_arch(actual[2], kind) == normalized_arch(record['architecture'], kind):
-                    filename = file['name']
-                    break
+                helper['registry_request']('get', archive['url'], read=download,
+                    auth=(record['owner'], password) if password else None, timeout=120, stream=True)
+                if file_sha256(path) != archive['sha256']:
+                    raise RuntimeError('Matching library debuginfo differs from published checksum')
+                break
         if filename is None or PurePosixPath(filename).name != filename:
             raise RuntimeError('Cannot locate matching published library debuginfo')
         name, version, arch = archive_identity(path, kind)
