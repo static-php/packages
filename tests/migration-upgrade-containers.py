@@ -707,8 +707,9 @@ def inside(args):
         elf = runtime['assert_elf'](kind, managed_names)
         smokes = runtime['sapi_checks'](args.php, managed_names, kind)
         development = runtime['development_checks'](kind, managed_names)
+        before_upgrade = installed(kind)
         ordinary_upgrade(kind)
-        if installed(kind) != after:
+        if installed(kind) != before_upgrade:
             raise RuntimeError('Replacement unchanged upgrade was not a no-op')
         print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True,
               'coverage': 'fresh_replacement_after_broken_baseline',

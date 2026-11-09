@@ -28,6 +28,28 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_replacement_noop_check_excludes_tools_installed_by_phpize_smoke(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            packages = {'php-zts-cli': '8.2.35-r2', 'php-zts-devel': '8.2.35-r2'}
+            (root / 'inventory.json').write_text(json.dumps({'incoming': [{'name': name, 'version': version} for name, version in packages.items()]}))
+            (root / 'selected.json').write_text(json.dumps(list(packages)))
+            args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine', inside='replacement'))
+            def mapped(path):
+                return root / Path(path).name if str(path).startswith('/spp/') else Path(path)
+            def development(*_):
+                packages['gcc'] = '14.2.0-r4'
+                return {'phpize': 'passed'}
+            runtime = {'assert_elf': lambda *_: {}, 'sapi_checks': lambda *_: {}, 'development_checks': development}
+            with patch.dict(scope, {'Path': mapped, 'configure_client': lambda *_: None, 'run': lambda *_: None,
+                                   'installed': lambda *_: dict(packages), 'ordinary_upgrade': lambda *_: None}), \
+                    patch.object(scope['runpy'], 'run_path', return_value=runtime), patch('sys.stdout', new_callable=io.StringIO) as output:
+                harness['inside'](args)
+                self.assertTrue(json.loads(output.getvalue().split('SPP_MIGRATION_RESULT=')[-1])['ok'])
+                with patch.dict(scope, {'ordinary_upgrade': lambda *_: packages.update(gcc='14.2.0-r5')}):
+                    with self.assertRaisesRegex(RuntimeError, 'not a no-op'):
+                        harness['inside'](args)
+
     def test_broken_old_install_uses_clean_replacement_but_candidate_failures_still_block(self):
         for old_broken, candidate_broken, partial, tampered in [
                 (True, False, False, False), (True, True, False, False),
