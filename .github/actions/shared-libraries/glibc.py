@@ -531,6 +531,10 @@ def payload():
         if compile_requested:
             run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize'])
             preflight_consumers(stream, package_type, compile_packages)
+            if compile_packages and not (ROOT / 'source/php-src').is_dir():
+                release = read(STAGE / 'consumer-source-versions.json')['candidates'][0]['php_version']
+                run(['python3', '.github/actions/shared-libraries/php-source.py', '--root', '.', '--version', release, '--select'])
+                run(['php', 'vendor/bin/spc', 'extract', 'php-src', '--source-only'])
             flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + package_type, '--debuginfo']
             if compile_packages:
                 flags += ['--packages=' + compile_packages]
