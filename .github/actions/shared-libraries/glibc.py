@@ -353,8 +353,12 @@ def test_packages():
         raise RuntimeError('Fresh package validation requires an unpublished subset plan')
     candidates = STAGE / 'native-packages'
     candidates.mkdir(exist_ok=True)
+    outputs = ROOT / 'dist' / kind
+    candidate_layout = any(outputs.glob('php-zts-runtime-layout*.' + kind))
     for source in [ROOT / 'library-stage/test-dependencies' / kind, directory / 'test-dependencies' / kind, ROOT / 'dist' / kind]:
         for archive in source.glob('*.' + kind):
+            if source != outputs and candidate_layout and archive.name.startswith('php-zts-runtime-layout-'):
+                continue
             shutil.copy2(archive, candidates / archive.name)
     if not list(candidates.glob('php-zts-runtime-layout*.' + kind)):
         layout = read(directory / 'baseline/shared-libraries.json').get('runtime_layout', {})

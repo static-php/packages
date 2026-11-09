@@ -224,6 +224,23 @@ class Pipeline(unittest.TestCase):
             self.assertEqual({entry['arch'] for entry in matrix}, {'x86_64'})
             self.assertTrue(all(entry['image'] == 'producer' for entry in matrix))
 
+    def test_local_dependencies_never_shadow_the_candidate_runtime_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / 'stage'
+            glibc.write(stage / 'shared-library-plan.json', {'build_only': True})
+            outputs, fixtures = root / 'dist/apk', stage / 'test-dependencies/apk'
+            for directory, names in [(outputs, ['php-zts-runtime-layout-2-r0.apk', 'php-zts-curl-8.5.12-r3.apk']),
+                                     (fixtures, ['php-zts-runtime-layout-2-r1.apk', 'php-zts-lib-curl-8.16.0-r1.apk'])]:
+                directory.mkdir(parents=True)
+                for name in names:
+                    (directory / name).write_bytes(b'archive')
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run'), \
+                    patch.dict(os.environ, TYPE='apk', PHPV='8.5', MATRIX_ARCH='x86_64'):
+                glibc.test_packages()
+            self.assertEqual({path.name for path in (stage / 'native-packages').iterdir()},
+                             {'php-zts-runtime-layout-2-r0.apk', 'php-zts-curl-8.5.12-r3.apk', 'php-zts-lib-curl-8.16.0-r1.apk'})
+
     def test_single_stream_reuses_sdk_job_and_only_successful_producers_reach_packaging(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
