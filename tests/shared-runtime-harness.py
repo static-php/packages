@@ -142,7 +142,7 @@ class RuntimeHarness(unittest.TestCase):
             def mapped(value):
                 return root / str(value).lstrip('/') if str(value).startswith('/spp/') else Path(value)
             with patch.dict(scope, {'Path': mapped}), patch.dict(scope, {'build_fixtures': lambda *args: self.fail('Skipped fixtures were generated')}):
-                harness['inside'](SimpleNamespace(type='apk', inside='prepare', skip_fixtures=True))
+                harness['inside'](SimpleNamespace(type='apk', inside='prepare', skip_fixtures=True, local_archives=False))
             self.assertEqual((root / 'spp/package-names.json').read_text(), '[]')
 
     def test_installed_extensions_require_active_scanned_directives_and_registration(self):
@@ -258,9 +258,10 @@ class RuntimeHarness(unittest.TestCase):
                                     'install': lambda *args: None, 'installed': lambda *args: '1',
                                     'installed_packages': lambda *args: {'php-zts-curl'},
                                     'assert_elf': lambda *args: {}}):
-                args = SimpleNamespace(type='deb', inside='individual', package='php-zts-curl', php='8.4')
-                with self.assertRaisesRegex(RuntimeError, 'did not resolve php-zts-cli'):
-                    harness['inside'](args)
+                for local in (False, True):
+                    args = SimpleNamespace(type='deb', inside='individual', package='php-zts-curl', php='8.4', local_archives=local)
+                    with self.subTest(local_archives=local), self.assertRaisesRegex(RuntimeError, 'did not resolve php-zts-cli'):
+                        harness['inside'](args)
 
     def test_elf_dependency_queries_are_cached_only_within_one_validation(self):
         with TemporaryDirectory(prefix='spp-elf-dependencies-') as scratch:

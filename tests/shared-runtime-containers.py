@@ -811,7 +811,7 @@ def fixture_checks(kind):
 def inside(args):
     kind = args.type
     if args.inside == 'prepare':
-        if list(Path('/spp/repo').glob('*.' + kind)):
+        if not args.local_archives and list(Path('/spp/repo').glob('*.' + kind)):
             index_repo(kind, '/spp/repo')
         if not args.skip_fixtures:
             build_fixtures(kind)
@@ -832,8 +832,11 @@ def inside(args):
         names = json.loads(Path('/spp/package-names.json').read_text())
         if args.package:
             names = [args.package]
-        configure_repo(kind, '/spp/repo')
-        install(kind, names)
+        if args.local_archives:
+            install(kind, [str(path) for path in sorted(Path('/spp/repo').glob('*.' + kind))])
+        else:
+            configure_repo(kind, '/spp/repo')
+            install(kind, names)
         # Include dependencies in the ELF audit, not just the explicitly requested package.
         installed_names = installed_packages(kind)
         all_names = [name for name in json.loads(Path('/spp/package-names.json').read_text()) if name in installed_names]
@@ -875,7 +878,7 @@ class DockerRun:
     def exec(self, container, command):
         return run(['docker', 'exec', container, *command])
 
-    def prepare(self, image, kind, helper, fixtures=True):
+    def prepare(self, image, kind, helper, fixtures=True, reuse=False):
         name = self.container(image, 'helper' if helper else 'base')
         if kind == 'deb':
             command = ['sh', '-ec', "sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 binutils ca-certificates" + (' dpkg-dev' if helper else '') + (' gcc libc6-dev' if helper and fixtures else '')]
@@ -888,6 +891,8 @@ class DockerRun:
             self.exec(name, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'prepare', '--type', kind,
                              *([] if fixtures else ['--skip-fixtures'])])
             return None
+        if reuse:
+            return name
         tag = self.prefix + ':runtime'
         self.images.append(tag)
         run(['docker', 'commit', name, tag])
@@ -927,8 +932,13 @@ def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True,
             shutil.copy2(HERE / filename, directory / filename)
         if manifest:
             shutil.copy2(manifest, directory / 'manifest.json')
-        runtime = resources.prepare(image, kind, helper=False)
-        resources.prepare(runtime, kind, helper=True, fixtures=fixtures or fixtures_only)
+        local_archives = not individual and not fixtures and not fixtures_only
+        runtime = resources.prepare(image, kind, helper=False, reuse=local_archives)
+        if local_archives:
+            resources.exec(runtime, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'prepare',
+                                    '--type', kind, '--skip-fixtures', '--local-archives'])
+        else:
+            resources.prepare(runtime, kind, helper=True, fixtures=fixtures or fixtures_only)
         if fixtures_only:
             container = resources.container(runtime, 'fixtures')
             checked = resources.exec(container, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'fixtures', '--type', kind])
@@ -950,8 +960,9 @@ def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True,
                 resources.containers.remove(container)
                 result['individual_installs'].append(name)
         print(f'{os_name} PHP {php}: full installation and runtime checks', flush=True)
-        container = resources.container(runtime, 'full')
-        full = resources.exec(container, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'runtime', '--type', kind, '--php', php])
+        container = runtime if local_archives else resources.container(runtime, 'full')
+        full = resources.exec(container, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'runtime',
+                                         '--type', kind, '--php', php, *(['--local-archives'] if local_archives else [])])
         result.update(json.loads(full.stdout.split('SPP_RESULT=')[-1]))
         if fixtures:
             print(f'{os_name} PHP {php}: native upgrade transactions', flush=True)
@@ -985,6 +996,7 @@ def main():
     parser.add_argument('--fixtures-only', action='store_true', help='Exercise native package upgrade fixtures; --os defaults to all five runtime baselines')
     parser.add_argument('--inside', choices=('prepare', 'individual', 'runtime', 'fixtures'), help=argparse.SUPPRESS)
     parser.add_argument('--package', help=argparse.SUPPRESS)
+    parser.add_argument('--local-archives', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.inside:
         inside(args)
