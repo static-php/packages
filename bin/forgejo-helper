@@ -124,14 +124,15 @@ def get_remote_packages_for_owners(host, owners, password, pkg_type):
 
 def get_remote_candidates(host, owner, password, pkg_type, files):
     metadata = package_metadata if pkg_type in ('debian', 'alpine') else get_package_info
-    names = sorted({metadata(path, pkg_type)[0] for path in files})
-    def lookup(item):
-        index, name = item
-        print(f"Listing versions {index}/{len(names)}: {host} {owner}/{name}", flush=True)
-        return [package for package in get_remote_packages(host, owner, password, pkg_type, name)
-                if package['name'] == name]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        return [package for batch in pool.map(lookup, enumerate(names, 1)) for package in batch]
+    names = {metadata(path, pkg_type)[0] for path in files}
+    if not names:
+        return []
+    query = min(names)
+    while query and any(not name.startswith(query) for name in names):
+        query = query[:-1]
+    print(f"Listing versions for {len(names)} packages: {host} {owner} ({pkg_type})", flush=True)
+    return [package for package in get_remote_packages(host, owner, password, pkg_type, query or None)
+            if package['name'] in names]
 
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"

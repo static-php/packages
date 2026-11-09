@@ -127,3 +127,37 @@ try {
     unlink($baseline);
     rmdir($directory);
 }
+
+$bulk = new ReflectionProperty(CreatePackages::class, 'bulkPackageRevisions');
+$bulk->setValue(null, true);
+try {
+    foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $kind) {
+        $suffix = $type === 'apk' ? 'p83' : '+php83';
+        $release = $type === 'apk' ? '-r' : '-';
+        $url = "https://example.com/api/v1/packages/83?type={$kind}&limit=1000&page=";
+        $cache->setValue(null, [
+            $url . '1' => [200, json_encode([
+                ['name' => 'php-zts-amqp', 'version' => '2.2.1' . $suffix . $release . '3'],
+                ['name' => 'php-zts-amqp-debuginfo', 'version' => '2.2.1' . $suffix . $release . '9'],
+            ])],
+            $url . '2' => [200, json_encode([
+                ['name' => 'frankenphp', 'version' => '1.13.5' . $suffix . $release . '7'],
+                ['name' => 'php-zts-amqp', 'version' => '3.0.0' . $suffix . $release . '99'],
+                ['name' => 'unrelated', 'version' => '9.0.0' . $release . '999'],
+            ])],
+            $url . '3' => [200, '[]'],
+        ]);
+        $memo->setValue(null, []);
+        (new ReflectionProperty(CreatePackages::class, 'debuginfo'))->setValue(null, true);
+        foreach ([['php-zts-amqp', '2.2.1' . $suffix, '10'],
+                  ['php-zts-amqp-debuginfo', '2.2.1' . $suffix, '10'],
+                  ['frankenphp', '1.13.5' . $suffix, '8']] as [$name, $version, $expected]) {
+            if (CreatePackages::resolveIteration($name, $version, 'x86_64', $type) !== $expected) {
+                throw new RuntimeException('Bulk revision lookup lost a selected upstream or debug revision: ' . $name);
+            }
+        }
+    }
+} finally {
+    $bulk->setValue(null, false);
+}
+echo "Passed shared bulk inventories for PHP package revisions with later pages and orphaned debug counterparts.\n";

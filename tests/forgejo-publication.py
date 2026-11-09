@@ -302,16 +302,44 @@ class ForgejoPublication(unittest.TestCase):
                 publisher['publish_mirror']('upload', self.root, self.root, 'apk', {}, ['85'], helper, False)
         self.assertEqual(events, [['php-zts-lib-ssl'], 'fetch retained debug', ['php-zts-lib-ssl-debuginfo']])
 
-    def test_candidate_lookup_only_queries_unique_selected_names(self):
+    def test_candidate_lookup_batches_selected_names_and_excludes_unrelated_packages(self):
         first = self.archive(name='php-zts-cli')
         second = self.archive(name='php-zts-cli', arch='aarch64')
         third = self.archive(name='frankenphp')
-        listing = Mock(side_effect=lambda host, owner, password, kind, name:
-                       [{'name': name, 'version': '1'}, {'name': name + '-unrelated', 'version': '2'}])
+        listing = Mock(return_value=[{'name': 'frankenphp', 'version': '1'},
+                                     {'name': 'php-zts-cli', 'version': '2'},
+                                     {'name': 'php-zts-cli', 'version': '3'},
+                                     {'name': 'php-zts-cli-unrelated', 'version': '4'}])
         with patch.dict(helper_globals, {'get_remote_packages': listing}):
             records = helper['get_remote_candidates']('https://example.com', '85', 'test', 'alpine', [first, second, third])
-        self.assertEqual([call.args[-1] for call in listing.call_args_list], ['frankenphp', 'php-zts-cli'])
-        self.assertEqual([record['name'] for record in records], ['frankenphp', 'php-zts-cli'])
+        listing.assert_called_once_with('https://example.com', '85', 'test', 'alpine', None)
+        self.assertEqual([(record['name'], record['version']) for record in records],
+                         [('frankenphp', '1'), ('php-zts-cli', '2'), ('php-zts-cli', '3')])
+
+    def test_candidate_lookup_uses_a_shared_prefix_and_keeps_all_selected_versions(self):
+        first = self.archive(name='php-zts-cli')
+        second = self.archive(name='php-zts-curl')
+        listing = Mock(return_value=[{'name': 'php-zts-cli', 'version': '1'},
+                                     {'name': 'php-zts-cli', 'version': '2'},
+                                     {'name': 'php-zts-curl', 'version': '1'},
+                                     {'name': 'php-zts-cli-extra', 'version': '9'}])
+        with patch.dict(helper_globals, {'get_remote_packages': listing}):
+            records = helper['get_remote_candidates']('https://example.com', '85', 'test', 'alpine', [first, second])
+        listing.assert_called_once_with('https://example.com', '85', 'test', 'alpine', 'php-zts-c')
+        self.assertEqual(len(records), 3)
+
+    def test_bulk_candidate_pages_are_read_once_and_next_preflight_refreshes_them(self):
+        files = [self.archive(name='php-zts-cli'), self.archive(name='frankenphp')]
+        pages = [[{'name': 'php-zts-cli', 'version': '1'}, {'name': 'unrelated', 'version': '99'}],
+                 [{'name': 'frankenphp', 'version': '2'}], [],
+                 [{'name': 'php-zts-cli', 'version': '3'}], []]
+        with patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=page) for page in pages]) as listing:
+            first = helper['get_remote_candidates']('https://example.com', '85', 'test', 'alpine', files)
+            second = helper['get_remote_candidates']('https://example.com', '85', 'test', 'alpine', files)
+        self.assertEqual([(p['name'], p['version']) for p in first], [('php-zts-cli', '1'), ('frankenphp', '2')])
+        self.assertEqual(second, [{'name': 'php-zts-cli', 'version': '3'}])
+        self.assertEqual([call.kwargs['params']['page'] for call in listing.call_args_list], [1, 2, 3, 1, 2])
+        self.assertTrue(all('q' not in call.kwargs['params'] for call in listing.call_args_list))
 
     def test_signed_apk_header_and_sha_are_read_from_file_id(self):
         data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'aarch64', signed=True)
