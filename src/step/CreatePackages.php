@@ -2068,7 +2068,7 @@ class CreatePackages
         // Clean up config file
         @unlink($nfpmConfigFile);
         if ($reconcile && !self::isPhpIndependent($package) && !self::$bump && self::$iterationOverride === null) {
-            $decision = self::publishedApk($outputFile, $name, $phpVersion, $architecture, $iteration);
+            $decision = self::publishedApk($outputFile, $name, $phpVersion, $architecture, $iteration, self::$debuginfo);
             if ($decision['rebuild']) {
                 unlink($outputFile);
                 self::createApkWithNfpm($package, $name, $phpVersion, $architecture, $decision['revision'], $config, $isDebuginfo, false);
@@ -2076,9 +2076,12 @@ class CreatePackages
         }
     }
 
-    public static function publishedApk(string $archive, string $name, string $version, string $architecture, string $iteration): array
+    public static function publishedApk(string $archive, string $name, string $version, string $architecture, string $iteration, bool $withDebug = false): array
     {
         $arguments = ['python3', BASE_PATH . '/bin/apk-reuse-published', $archive];
+        if ($withDebug) {
+            $arguments[] = '--with-debug';
+        }
         foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $manifest) {
             $arguments = [...$arguments, '--baseline-manifest', $manifest];
         }

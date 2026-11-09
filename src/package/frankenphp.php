@@ -618,7 +618,7 @@ class frankenphp implements package
         @unlink($nfpmConfigFile);
 
         if ($iterationOverride === null && !$bump) {
-            $decision = CreatePackages::publishedApk($outputFile, $name, $apkVersion, $architecture, $iteration);
+            $decision = CreatePackages::publishedApk($outputFile, $name, $apkVersion, $architecture, $iteration, $debuginfo);
             if ($decision['rebuild']) {
                 unlink($outputFile);
                 $this->createApkPackage($architecture, $binaryDependencies, $decision['revision'], $debuginfo, false);

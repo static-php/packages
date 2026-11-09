@@ -80,6 +80,27 @@ class ReusePublished(unittest.TestCase):
         self.verification.return_value.returncode = 1
         self.assertEqual(self.select(), {'revision': 4})
 
+    def test_malformed_old_archive_cannot_veto_a_valid_candidate(self):
+        self.old.write_bytes(b'broken old gzip/tar')
+        archive(self.new)
+        self.baseline()
+        self.assertEqual(self.select(), {'revision': 4})
+
+    def test_missing_old_debug_archive_advances_just_its_runtime_pair(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        data = json.loads(self.manifest.read_text())
+        data['published_packages'] = [{'name': 'php-zts-cli-debuginfo', 'architecture': 'x86_64',
+            'version': '8.3.36-r3', 'publication_url': 'https://example.test/missing-debug.apk',
+            'published_checksum': {'algorithm': 'apk-control-sha1', 'value': 'Q1old'}}]
+        self.manifest.write_text(json.dumps(data))
+        def missing(*_):
+            raise RuntimeError('Old archive unavailable')
+        with patch.object(HELPER['select'].__globals__['runpy'], 'run_path',
+                          return_value={'download_package': missing, 'BaselineDownloadError': RuntimeError}):
+            self.assertEqual(HELPER['select'](self.new, [self.manifest], with_debug=True), {'revision': 4})
+
     def test_tampered_baseline_archive_is_rejected(self):
         archive(self.old, revision=3)
         archive(self.new)

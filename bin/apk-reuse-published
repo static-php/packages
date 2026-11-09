@@ -11,6 +11,7 @@ import runpy
 import subprocess
 import tarfile
 import tempfile
+import urllib.error
 
 
 def sha256(path):
@@ -61,9 +62,7 @@ def contents(path):
     return (name, version, arch), (files, {key: sorted(value) for key, value in fields.items()})
 
 
-def select(candidate, manifests):
-    (name, version, arch), fingerprint = contents(candidate)
-    stem = version.rsplit('-r', 1)[0]
+def published_records(manifests, name, stem, arch):
     matches = []
     for manifest in manifests:
         manifest = Path(manifest)
@@ -84,8 +83,12 @@ def select(candidate, manifests):
                 freezer = runpy.run_path(str(Path(__file__).with_name('freeze-migration-baseline.py')))
                 output = manifest.parent / 'reuse-published'
                 output.mkdir(exist_ok=True)
-                with tempfile.TemporaryDirectory(dir=output) as stage:
-                    downloaded = freezer['download_package'](package, 'apk', output, Path(stage))
+                try:
+                    with tempfile.TemporaryDirectory(dir=output) as stage:
+                        downloaded = freezer['download_package'](package, 'apk', output, Path(stage))
+                except (freezer['BaselineDownloadError'], urllib.error.URLError, TimeoutError):
+                    matches.append((int(published.rsplit('-r', 1)[1]), None, published))
+                    continue
                 relative = str(Path('reuse-published') / downloaded['path'])
                 checksum = downloaded['sha256']
             if not relative or not checksum:
@@ -94,19 +97,38 @@ def select(candidate, manifests):
             if not source.is_relative_to(manifest.parent.resolve()) or not source.is_file() or sha256(source) != checksum:
                 raise RuntimeError('Published archive checksum/path mismatch: ' + name)
             matches.append((int(published.rsplit('-r', 1)[1]), source, published))
+    return matches
+
+
+def valid_archive(source):
+    return source is not None and subprocess.run(['apk', 'verify', '--allow-untrusted', str(source)], capture_output=True).returncode == 0
+
+
+def select(candidate, manifests, with_debug=False):
+    (name, version, arch), fingerprint = contents(candidate)
+    stem = version.rsplit('-r', 1)[0]
+    matches = published_records(manifests, name, stem, arch)
     if not matches:
         return {'revision': int(version.rsplit('-r', 1)[1])}
     highest = max(item[0] for item in matches)
     if name.endswith('-debuginfo') and highest < int(version.rsplit('-r', 1)[1]):
         return {'revision': int(version.rsplit('-r', 1)[1])}
     for revision, source, published in matches:
-        if revision != highest:
+        if revision != highest or source is None:
             continue
-        identity, existing = contents(source)
+        try:
+            identity, existing = contents(source)
+        except (RuntimeError, ValueError, OSError, EOFError, tarfile.TarError):
+            continue
         if identity != (name, published, arch):
-            raise RuntimeError('Published archive identity mismatch: ' + name)
-        valid = subprocess.run(['apk', 'verify', '--allow-untrusted', str(source)], capture_output=True).returncode == 0
-        if existing == fingerprint and valid:
+            continue
+        if existing == fingerprint and valid_archive(source):
+            if with_debug and not name.endswith('-debuginfo'):
+                debug = published_records(manifests, name + '-debuginfo', stem, arch)
+                debug_revision = max((item[0] for item in debug), default=-1)
+                if debug_revision > revision or (debug_revision == revision and not any(valid_archive(item[1]) for item in debug if item[0] == revision)):
+                    highest = max(highest, debug_revision)
+                    continue
             return {'revision': revision, 'reuse': str(source)}
     return {'revision': max(highest + 1, int(version.rsplit('-r', 1)[1]))}
 
@@ -115,5 +137,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('candidate')
     parser.add_argument('--baseline-manifest', action='append', default=[])
+    parser.add_argument('--with-debug', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(select(args.candidate, args.baseline_manifest)))
+    print(json.dumps(select(args.candidate, args.baseline_manifest, args.with_debug)))
