@@ -156,7 +156,9 @@ def publish_available(source, kind, target, mirror=False):
                     with log.open('a') as output:
                         subprocess.run(list(arguments), check=True, env=environment, stdout=output, stderr=subprocess.STDOUT)
                 except subprocess.CalledProcessError as error:
-                    detail = ' | '.join(log.read_text(errors='replace').splitlines()[-4:])[-800:]
+                    lines = log.read_text(errors='replace').splitlines()
+                    reasons = [line for line in lines if 'Skipping upload of ' in line or line.startswith('::error::')]
+                    detail = ' | '.join(reasons[-8:] if reasons else lines[-4:])[:2400]
                     raise RuntimeError((detail or str(error)) + f' (details: {log})') from error
                 finally:
                     finished.set()

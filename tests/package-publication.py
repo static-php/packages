@@ -65,6 +65,10 @@ class Publication(unittest.TestCase):
                     stream = kwargs['env']['PUBLICATION_PHP_STREAMS']
                     phase = command[-1]
                     events.append((stream, phase))
+                    if stream == '8.4' and phase in ('upload-1', 'publish-rpm'):
+                        kwargs['stdout'].write('::warning::Skipping upload of example.apk: Cannot verify example: connection reset\n'
+                                               'Traceback:\n  caller\n  publisher\n  raise RuntimeError\nRuntimeError: cohort rejected\n')
+                        kwargs['stdout'].flush()
                     if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload-1', 'publish-rpm') or phase == 'upload-2':
                         raise subprocess.CalledProcessError(1, command)
                 previous = Path.cwd()
@@ -75,6 +79,7 @@ class Publication(unittest.TestCase):
                             patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(io.StringIO()):
                         self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
                         primary_summary = (root / 'summary').read_text()
+                        self.assertIn('Cannot verify example: connection reset', primary_summary)
                         self.assertFalse(any(phase == 'upload-2' for _, phase in events))
                         if kind != 'rpm':
                             self.assertTrue(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
