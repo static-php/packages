@@ -37,7 +37,7 @@ def expected_profile(root, stream):
     return result
 
 
-def extension_metadata(root):
+def extension_metadata(root, include_suggests=False):
     result = {}
     paths = []
     for directory in ['vendor/crazywhalecc/static-php-cli/config/pkg/ext', 'config/pkg/ext']:
@@ -63,7 +63,10 @@ def extension_metadata(root):
                 elif line.strip():
                     field = None
             dependencies = []
-            for key in ['depends', 'depends@unix', 'depends@linux']:
+            keys = ['depends', 'depends@unix', 'depends@linux']
+            if include_suggests:
+                keys += ['suggests', 'suggests@unix', 'suggests@linux']
+            for key in keys:
                 value = '\n'.join(fields.get(key, []))
                 dependencies += re.findall(r'^\s+-\s+ext-([A-Za-z0-9_-]+)\s*$', value, re.M)
                 if value.strip().startswith('['):
