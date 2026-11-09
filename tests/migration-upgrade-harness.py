@@ -130,6 +130,28 @@ class MigrationUpgradeHarness(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, 'architecture does not match'):
                             harness['inside'](args)
 
+    def test_complete_php_replacement_retains_unchanged_native_library_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_dir, new_dir = root / 'old', root / 'new'
+            old_dir.mkdir()
+            new_dir.mkdir()
+            old = []
+            for name in ['php-zts-lib-zlib', 'php-zts-runtime-layout', 'php-zts-lib-ngtcp2', 'php-zts-fpm', 'php-zts-cli']:
+                source = old_dir / (name + '.apk')
+                source.write_bytes(b'published ' + name.encode())
+                old.append({'name': name, 'architecture': 'x86_64', 'path': str(source)})
+            incoming = [{'name': 'php-zts-cli'}, {'name': 'php-zts-lib-ngtcp2'}]
+            for package in incoming:
+                (new_dir / (package['name'] + '.apk')).write_bytes(b'new replacement')
+            harness['retain_baseline_packages'](old, incoming, new_dir, False, 'x86_64')
+            self.assertEqual((new_dir / 'php-zts-lib-zlib.apk').read_bytes(), b'published php-zts-lib-zlib')
+            self.assertTrue((new_dir / 'php-zts-runtime-layout.apk').is_file())
+            self.assertEqual((new_dir / 'php-zts-lib-ngtcp2.apk').read_bytes(), b'new replacement')
+            self.assertFalse((new_dir / 'php-zts-fpm.apk').exists())
+            harness['retain_baseline_packages'](old, incoming, new_dir, True, 'x86_64')
+            self.assertTrue((new_dir / 'php-zts-fpm.apk').is_file())
+
     def test_partial_candidate_validation_does_not_require_a_parseable_old_version(self):
         for kind in ('rpm', 'deb', 'apk'):
             with self.subTest(kind=kind):

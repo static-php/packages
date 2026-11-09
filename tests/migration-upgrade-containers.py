@@ -505,6 +505,16 @@ def copy_historical(old, new):
                 os.link(source, destination)
 
 
+def retain_baseline_packages(old, incoming, directory, partial, arch):
+    incoming_names = {package['name'] for package in incoming}
+    for package in old:
+        retained_dependency = package['name'].startswith('php-zts-lib-') or package['name'] == 'php-zts-runtime-layout'
+        if (package['name'] not in incoming_names and (partial or retained_dependency)
+                and package['architecture'] in (architecture(arch), 'all')):
+            source = Path(package['path'])
+            shutil.copy2(source, Path(directory) / source.name)
+
+
 def stage_library_generation(kind, current, incoming, directory):
     directory = Path(directory)
     directory.mkdir()
@@ -747,12 +757,7 @@ def inside(args):
             incoming_changes = validate_partial_candidates(kind, frozen, incoming)
         make_keys(kind)
         old, baseline_index_failure = index_baseline(kind, args.php, args.arch, partial)
-        if partial:
-            incoming_names = {p['name'] for p in incoming}
-            for package in old:
-                if package['name'] not in incoming_names:
-                    source = Path(package['path'])
-                    shutil.copy2(source, Path('/spp/repository/generations/new') / source.name)
+        retain_baseline_packages(old, incoming, Path('/spp/repository/generations/new'), partial, args.arch)
         new = index_generation(kind, 'new', args.php, args.arch)
         for item in new:
             if item['architecture'] not in (architecture(args.arch), 'all'):
