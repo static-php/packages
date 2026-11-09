@@ -322,6 +322,14 @@ class MigrationUpgradeHarness(unittest.TestCase):
             harness['assert_upgrade'](before, {'php-zts-cli': '1-2'},
                                       {'php-zts-cli': {'version': '1-2'}}, ['php-zts-cli'])
 
+    def test_native_library_profile_has_no_artificial_php_dependency(self):
+        names = ['php-zts-lib-zlib', 'php-zts-runtime-layout']
+        baseline = {'selection': {'mode': 'affected'}, 'packages': [{'name': name} for name in names]}
+        profiles = harness['affected_profiles'](baseline)
+        self.assertEqual(profiles['profiles'], [{'id': 'libraries', 'packages': names}])
+        self.assertEqual(harness['profile_names'](','.join(names), require_php=False), names)
+        self.assertIn('php-zts-cli', harness['profile_names']('curl'))
+
     def test_library_only_update_advances_library_without_rebuilding_php(self):
         before = {'php-zts-cli': '8.6-9', 'php-zts-imagick': '3.8-4', 'php-zts-lib-openssl': '3.6-1'}
         incoming = {'php-zts-lib-openssl': {'version': '3.6-2'}}

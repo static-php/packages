@@ -44,11 +44,13 @@ def architecture():
     return 'aarch64' if os.environ['MATRIX_ARCH'] == 'arm64' else 'x86_64'
 
 
-def baseline(kind, directory, consumers=False, abi_libraries=()):
+def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None):
     args = ['python3', 'bin/shared-library-plan', 'baseline', '--type', kind,
             '--arch', os.environ['MATRIX_ARCH'], '--output', directory]
     args += ['--consumer-stream', '8.5'] if consumers else ['--skip-consumers']
     args += ['--abi-libraries', ','.join(sorted(abi_libraries))]
+    if libraries is not None:
+        args += ['--libraries', ','.join(sorted(libraries))]
     if kind == 'rpm':
         host = os.environ.get('RPM_BASE_URL', 'https://rpm.henderkes.com').rstrip('/')
         args += ['--base-url', host + '/' + architecture() + '/el8']
@@ -250,13 +252,17 @@ def classify():
              '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
+    scope = None
+    if os.environ.get('LIBRARIES') and not rebuilt:
+        graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+        scope = graph['dependency_closure'](os.environ['LIBRARIES'].split(','), graph['library_graph'](read(sdk / 'shared-libraries.json')))
     run(['php', 'tests/package-iterations.php'])
     run(['python3', 'tests/upgrade-guards.py'])
     if glibc:
         run(['python3', 'tests/forgejo-publication.py'])
     def read_baseline(kind):
         run(['php', 'tests/package-versions.php', '--type=' + kind])
-        baseline(kind, format_stage(kind) / 'baseline', consumers=bool(rebuilt) and kind == formats[-1], abi_libraries=rebuilt)
+        baseline(kind, format_stage(kind) / 'baseline', consumers=bool(rebuilt) and kind == formats[-1], abi_libraries=rebuilt, libraries=scope)
     with ThreadPoolExecutor(max_workers=len(formats)) as executor:
         list(executor.map(read_baseline, formats))
     if rebuilt and glibc:
@@ -301,6 +307,15 @@ def classify():
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
             for dependencies in read(selected_sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values():
                 reverse_roots.update(dependencies.values())
+        if scope is not None and any(plan.get('abi_break') for plan in plans.values()):
+            scope = None
+            for kind in formats:
+                directory = format_stage(kind) / 'baseline'
+                shutil.rmtree(directory)
+                baseline(kind, directory, consumers=kind == formats[-1], abi_libraries=reverse_roots)
+            if glibc:
+                share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
+            continue
         if reverse_roots:
             run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
                  '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(reverse_roots)),

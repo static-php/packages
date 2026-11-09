@@ -225,6 +225,25 @@ class SharedLibraryPlan(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '--bootstrap'):
                 planner['prepare'](args)
 
+    def test_scoped_library_baseline_preserves_unselected_cached_abi_epochs(self):
+        current = manifest({'fixture': library(), 'other': library(epoch=3, soname='libother.so.3')})
+        for entry in current['libraries'].values():
+            entry['abi_dump_hashes'] = {name: 'a' * 64 for name in entry['abi_dump']}
+            entry['abi_empty'] = []
+        current['libraries']['other']['package_versions'] = {'deb': '1.0-7'}
+        previous = manifest({'fixture': copy.deepcopy(current['libraries']['fixture'])})
+        previous['metadata_scope'] = ['fixture']
+        with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
+            annotated, result = planner['compare'](previous, current, Path('.'), Path('.'), rebuilt_libraries=set())
+        self.assertEqual(annotated['libraries']['other'], current['libraries']['other'])
+        self.assertEqual(result['libraries']['other']['status'], 'unchanged')
+        self.assertEqual(planner['source_changes'](previous, current), {})
+        with TemporaryDirectory() as temporary:
+            merged, _ = planner['merge_baselines']([(previous, temporary)], 'deb', temporary, set())
+            self.assertEqual(merged['metadata_scope'], ['fixture'])
+            with self.assertRaisesRegex(RuntimeError, 'different library metadata scopes'):
+                planner['merge_baselines']([(previous, temporary), (manifest(), temporary)], 'deb', temporary, set())
+
     def test_missing_debug_baseline_blocks_release(self):
         old = manifest()
         old['libraries']['fixture'].pop('abi_dump')

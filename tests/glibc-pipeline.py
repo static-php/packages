@@ -131,7 +131,7 @@ class Pipeline(unittest.TestCase):
                 calls, scans = [], []
                 formats = ('apk',) if kind == 'apk' else ('rpm', 'deb')
                 packaging = Barrier(len(formats))
-                def baseline(kind, destination, consumers=False, abi_libraries=()):
+                def baseline(kind, destination, consumers=False, abi_libraries=(), libraries=None):
                     scans.append((kind, consumers, set(abi_libraries)))
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
                 def execute(arguments, **kwargs):

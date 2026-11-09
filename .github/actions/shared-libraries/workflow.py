@@ -329,7 +329,7 @@ def main():
                 continue
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
             if json.loads(path.read_text()).get("libraries"):
-                includes.append(dict(target, **{"php-version": "8.4", "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
+                includes.append(dict(target, **{"php-version": "8.5", "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
         runtime_checks([entry for entry in includes if entry.get("type") == "apk"])
         includes = [value for value in includes if value.get("payload_stream") != value["php-version"]]
         emit("matrix", {"include": includes})
@@ -361,7 +361,7 @@ def main():
             for kind in ["rpm", "deb"]:
                 selection = plan.get("format_selection", {}).get(kind, plan)
                 if not any(request.get("full") or request.get("packages") for request in selection.get("php_requests", {}).values()) and selection.get("libraries"):
-                    includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": "8.4", "packages": "", "library-only": True}))
+                    includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": "8.5", "packages": "", "library-only": True}))
         runtime_checks(includes)
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())

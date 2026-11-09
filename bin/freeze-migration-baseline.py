@@ -211,7 +211,7 @@ def latest_packages(kind, inventory):
 
 
 def affected_profile(latest, packages, libraries):
-    names = {'php-zts-cli', 'php-zts-fpm', 'frankenphp'}
+    names = {'php-zts-cli', 'php-zts-fpm', 'frankenphp'} if packages else set()
     normalize = lambda name: name.removeprefix('php-zts-').replace('_', '-')
     requested = {normalize('pie-zts' if p == 'pie' else p) for p in packages}
     names.update(name for name in latest if normalize(name) in requested)
@@ -223,6 +223,8 @@ def affected_profile(latest, packages, libraries):
         affected = {name for name, package in latest.items() if name not in names
                     and not name.endswith(('-debuginfo', '-dbgsym'))
                     and capabilities.intersection(package.get('requires', []))}
+    if any(not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout' for name in names):
+        names.update({'php-zts-cli', 'php-zts-fpm', 'frankenphp'})
     return {normalize(name) for name in names}
 
 
@@ -302,7 +304,7 @@ def freeze(args):
     with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
         stage = Path(temporary)
         selected = select_packages(args.type, inventory, profile, args.include_debug, latest=latest)
-        if 'php-zts-cli' not in selected:
+        if 'php-zts-cli' not in selected and not library_plan:
             raise RuntimeError('Published baseline has no matching CLI package')
         for name, content in metadata.items():
             target = output / 'metadata' / name
@@ -324,9 +326,9 @@ def freeze(args):
                                 'include_debug': args.include_debug,
                                 'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},
                   'repository': {'publication_url': base, 'metadata': ['metadata/' + name for name in metadata]}}
-        cli = next(package for package in packages if package['name'] == 'php-zts-cli')
+        cli = next((package for package in packages if package['name'] == 'php-zts-cli'), None)
         planner = runpy.run_path(str(Path(__file__).resolve().parent / 'shared-library-plan'))
-        cutoffs = planner['archive_migration_cutoffs'](output / cli['path'], args.type)
+        cutoffs = planner['archive_migration_cutoffs'](output / cli['path'], args.type) if cli else None
         if cutoffs is not None:
             normalize_arch = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
             if (cutoffs.get('php_stream') != args.php

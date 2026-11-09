@@ -86,6 +86,12 @@ class BaselineCapture(unittest.TestCase):
         self.assertEqual(result['selection']['mode'], 'affected')
         self.assertFalse(result['selection']['complete'])
 
+    def test_library_update_does_not_download_static_php_hosts(self):
+        latest = {'php-zts-cli': {'requires': []}, 'frankenphp': {'requires': ['php-zts-cli']},
+                  'php-zts-lib-zlib': {'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib-abi-1']},
+                  'php-zts-lib-user': {'requires': ['php-zts-lib-zlib-abi-1'], 'provides': ['php-zts-lib-user-abi-1']}}
+        self.assertEqual(helper['affected_profile'](latest, [], ['zlib']), {'lib-zlib', 'lib-user'})
+
     def test_library_update_selects_reverse_consumers_without_unrelated_extensions(self):
         packages = [
             {'name': 'php-zts-cli', 'version': '1', 'requires': []},

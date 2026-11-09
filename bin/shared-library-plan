@@ -159,6 +159,8 @@ def source_changes(old, new):
     changes = {}
     environment_changed = any(old.get(key) != new.get(key) for key in ['architecture', 'libc', 'runtime_libdir'])
     for identifier in sorted(old['libraries'].keys() | new['libraries'].keys()):
+        if old.get('metadata_scope') is not None and identifier not in old['metadata_scope']:
+            continue
         previous = old['libraries'].get(identifier)
         current = new['libraries'].get(identifier)
         if previous is None:
@@ -481,6 +483,12 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
             raise RuntimeError('Unchanged library has no classified cached ABI: ' + identifier)
         else:
             reused += 1
+        if old.get('metadata_scope') is not None and identifier not in old['metadata_scope']:
+            if analyze:
+                raise RuntimeError('Rebuilt library requires a complete published ABI baseline: ' + identifier)
+            changes[identifier] = {'status': 'unchanged', 'abi_epoch': library.get('abi_epoch', 1),
+                                   'abi_capability': library.get('abi_capability')}
+            continue
         previous = old['libraries'].get(identifier)
         status = 'added' if previous is None else 'compatible'
         baseline = abi_baseline(previous)
@@ -609,6 +617,11 @@ def empty_manifest():
 
 def merge_baselines(baselines, kind, destination, abi_libraries=None):
     merged = empty_manifest()
+    scopes = {tuple(value['metadata_scope']) if value.get('metadata_scope') is not None else None for value, _ in baselines}
+    if len(scopes) > 1:
+        raise RuntimeError('Cannot merge baselines with different library metadata scopes')
+    if scopes and None not in scopes:
+        merged['metadata_scope'] = list(next(iter(scopes)))
     divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
     drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
     for value, _ in baselines:
@@ -753,6 +766,8 @@ def prepare(args):
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
         old, divergent = merge_baselines(baselines, args.type, temporary,
                                          None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
+        if old.get('metadata_scope') is not None and (not specified or rebuilt or set(specified) - set(old['metadata_scope'])):
+            raise RuntimeError('Scoped baselines require an unchanged explicit library selection')
         build_only = bool(getattr(args, 'build_only', False) and not old['libraries'])
         annotated, comparison = compare(old, current, temporary, args.root, bootstrap or build_only,
                                        None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
@@ -761,7 +776,7 @@ def prepare(args):
         versions = library.setdefault('package_versions', {})
         if published:
             versions[args.type] = published
-        else:
+        elif old.get('metadata_scope') is None or identifier in old['metadata_scope']:
             versions.pop(args.type, None)
     comparison['candidate_fingerprint'] = fingerprint(annotated)
     sources = sorted(rebuilt) if build_only else source_changes(old, current)
@@ -1228,6 +1243,8 @@ def baseline_single(args):
     consumer_stream = getattr(args, 'consumer_stream', '8.5')
     scan_consumers = not getattr(args, 'skip_consumers', False)
     abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
+    scope = getattr(args, 'libraries', None)
+    names_requested = None if scope is None else {'php-zts-runtime-layout', *('php-zts-lib-' + name for name in scope.split(',') if name)}
     with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
         temporary = Path(temporary)
         if args.type == 'rpm':
@@ -1252,6 +1269,8 @@ def baseline_single(args):
             for package in packages:
                 name = package['name']
                 if (not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout') or name.endswith('-debuginfo') or package['arch'] not in [architecture, 'noarch']:
+                    continue
+                if names_requested is not None and name not in names_requested:
                     continue
                 if name not in selected or native_compare('rpm', package['evr'], selected[name]['evr']) > 0:
                     selected[name] = package
@@ -1324,7 +1343,8 @@ def baseline_single(args):
             if scan_consumers:
                 packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
             else:
-                packages = [item for query in ['php-zts-lib-', 'php-zts-runtime-layout']
+                queries = sorted(names_requested) if names_requested is not None else ['php-zts-lib-', 'php-zts-runtime-layout']
+                packages = [item for query in queries
                             for item in helper['get_remote_packages'](args.host, args.owner, password, package_type, query)]
             consumer_streams = [consumer_stream] if scan_consumers else []
             if args.owner in [value.replace('.', '') for value in STREAMS]:
@@ -1343,6 +1363,8 @@ def baseline_single(args):
                 apk_packages = {(item['name'], item['version']): item for item in inventory}
                 packages = [item for item in packages if (item['name'], item['version']) in apk_packages]
             names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
+            if names_requested is not None:
+                names.intersection_update(names_requested)
             def fetch_package(name):
                 versions = [item for item in packages if item['name'] == name]
                 versions.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, a['version'], b['version'])), reverse=True)
@@ -1393,6 +1415,8 @@ def baseline_single(args):
                         raise RuntimeError('Published library has no ABI metadata: ' + name)
                     selected[name] = item
     aggregate = empty_manifest()
+    if scope is not None:
+        aggregate['metadata_scope'] = sorted(filter(None, scope.split(',')))
     aggregate['consumers'] = {stream: sorted(names) for stream, names in consumers.items()}
     aggregate['consumer_versions'] = consumer_versions
     aggregate['consumer_dependencies'] = dependencies
@@ -1771,6 +1795,7 @@ def main():
     command.add_argument('--consumer-stream', choices=STREAMS, default='8.5')
     command.add_argument('--skip-consumers', action='store_true')
     command.add_argument('--abi-libraries')
+    command.add_argument('--libraries', help='Download metadata only for these libraries and the runtime layout')
     command.add_argument('--output', required=True)
     command = commands.add_parser('migration-cutoffs')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])

@@ -103,12 +103,12 @@ def load_baseline(root, kind, stream, arch):
     return record
 
 
-def profile_names(profile):
+def profile_names(profile, require_php=True):
     values = [x.strip() for x in profile.split(',') if x.strip()]
     names = [x if x in ('php-zts', 'frankenphp') or x.startswith(('php-zts-', 'pie-zts')) else 'php-zts-' + x for x in values]
     if any(not NAME.fullmatch(x) for x in names):
         raise RuntimeError('Invalid package profile')
-    return sorted(set(['php-zts-cli'] + names))
+    return sorted(set((['php-zts-cli'] if require_php else []) + names))
 
 
 def managed(name):
@@ -157,6 +157,10 @@ def all_profiles(baseline):
 def affected_profiles(baseline):
     if baseline.get('selection', {}).get('mode') != 'affected':
         raise RuntimeError('Affected profiles require a baseline captured for the changed packages')
+    names = {p['name'] for p in baseline['packages']}
+    if names and all(name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout' for name in names):
+        return {'profiles': [{'id': 'libraries', 'packages': sorted(names)}], 'covered_packages': sorted(names),
+                'isolated_runtime_hook_packages': []}
     return package_profiles(baseline)
 
 
@@ -439,7 +443,7 @@ def stage_library_generation(kind, current, incoming, directory):
         shutil.copy2(source, directory / source.name)
 
 
-def configure_client(kind, stream, arch, runtime):
+def configure_client(kind, stream, arch, runtime, modules=True):
     if kind == 'rpm':
         el = runtime.replace('alma', 'el')
         url = 'http://repo:8080/{}/{}/'.format('aarch64' if arch == 'arm64' else 'x86_64', el)
@@ -447,7 +451,8 @@ def configure_client(kind, stream, arch, runtime):
             '[spp-migration]\nname=SPP signed migration mirror\nbaseurl={}\nenabled=1\n'
             'gpgcheck=1\nrepo_gpgcheck=1\ngpgkey=http://repo:8080/keys/repository.asc\nmetadata_expire=0\n'.format(url))
         run(['rpm', '--import', '/spp/keys/repository.asc'])
-        run(['dnf', 'module', 'enable', '-y', 'php-zts:static-' + stream])
+        if modules:
+            run(['dnf', 'module', 'enable', '-y', 'php-zts:static-' + stream])
         return '/etc/yum.repos.d/spp-migration.repo', '/spp/keys/repository.asc'
     if kind == 'deb':
         shutil.copy2('/spp/keys/repository.asc', '/etc/apt/trusted.gpg.d/spp-migration.asc')
@@ -598,6 +603,47 @@ def validate_partial_candidates(kind, old, incoming):
     return sorted(changed)
 
 
+def inside_libraries(args, names):
+    kind = args.type
+    state_path = Path('/spp/client-before.json')
+    runtime = runpy.run_path('/spp/shared-runtime-containers.py')
+    if args.inside == 'old':
+        config, key = configure_client(kind, args.php, args.arch, args.runtime, modules=False)
+        command = {'rpm': ['dnf', 'install', '-y'], 'deb': ['apt-get', 'install', '-y'], 'apk': ['apk', 'add']}[kind]
+        run(command + names)
+        state_path.write_text(json.dumps({'installed': installed(kind), 'probe': runtime['assert_elf'](kind, names),
+            'config': config, 'config_sha256': sha256(config), 'key': key, 'key_sha256': sha256(key),
+            'module_state': module_state(kind), 'php_ini_sha256': None}))
+        return
+    before = json.loads(state_path.read_text())
+    inventory = json.loads(Path('/spp/inventory.json').read_text())
+    incoming = {package['name']: package for package in inventory['incoming']}
+    changed = inventory['incoming_changes']
+    ordinary_upgrade(kind)
+    after = installed(kind)
+    updates = assert_partial_upgrade(before['installed'], after, incoming, changed, allow_unaffected=True)
+    libraries = assert_library_upgrade(before['installed'], after, {name: incoming[name] for name in changed}) if updates else []
+    probe = runtime['assert_elf'](kind, names)
+    for field in ('config', 'key'):
+        if sha256(before[field]) != before[field + '_sha256']:
+            raise RuntimeError('Library upgrade changed existing ' + field)
+    if module_state(kind) != before['module_state']:
+        raise RuntimeError('Library upgrade changed the module selection')
+    ordinary_upgrade(kind)
+    if installed(kind) != after:
+        raise RuntimeError('Second unchanged library upgrade was not a no-op')
+    if kind == 'rpm':
+        run(['dnf', 'check'])
+    elif kind == 'deb' and run(['dpkg', '--audit']).stdout.strip():
+        raise RuntimeError('Library upgrade left an incomplete dpkg transaction')
+    print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True, 'library_only': True,
+        'coverage': 'published_library_upgrade_without_php_consumers',
+        'actual_old_versions': {name: version for name, version in before['installed'].items() if managed(name)},
+        'new_versions': {name: version for name, version in after.items() if managed(name)},
+        'updated_libraries': libraries, 'updated_packages': updates, 'old_probe': before['probe'], 'new_probe': probe,
+        'repository_and_trust_unchanged': True, 'module_selection_unchanged': True, 'second_upgrade_noop': True}, sort_keys=True))
+
+
 def inside(args):
     kind = args.type
     if args.inside != 'index' and (os.environ.get('LD_LIBRARY_PATH') or os.environ.get('LD_PRELOAD')):
@@ -700,6 +746,9 @@ def inside(args):
               'repository_and_trust_unchanged': True, 'module_selection_unchanged': True,
               'new_probe': probe}, sort_keys=True))
         return
+    names = json.loads(Path('/spp/selected.json').read_text())
+    if args.library_only and names and all(name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout' for name in names):
+        return inside_libraries(args, names)
     state_path = Path('/spp/client-before.json')
     if args.inside == 'old':
         config, key = configure_client(kind, args.php, args.arch, args.runtime)
@@ -1104,7 +1153,7 @@ class PreparedMirror:
         args = options(args)
         scratch, resources, baseline = self.scratch, self.resources, self.baseline
         repository = scratch / 'repository'
-        names = resolve_profile(baseline, profile_names(args.profile))
+        names = resolve_profile(baseline, profile_names(args.profile, require_php=not args.library_only))
         result = {'schema': 1, 'ok': False, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'runtime': args.runtime, 'baseline_origin': baseline['origin'], 'profile': names,
                   'library_only': args.library_only, 'partial_consumers': args.partial_consumers,
@@ -1121,7 +1170,7 @@ class PreparedMirror:
             if missing:
                 raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
             if args.library_only:
-                expanded = library_old_profile(baseline, self.inventory['incoming_changes'], names,
+                expanded = library_old_profile(baseline, [package['name'] for package in self.inventory['incoming']], names,
                     expand_consumers=baseline.get('selection', {}).get('mode') != 'affected')
                 result['library_profile_expansion'] = sorted(set(expanded) - set(names))
                 names = expanded

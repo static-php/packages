@@ -82,6 +82,17 @@ class PublicationBaselines(unittest.TestCase):
                 result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
                 self.assertFalse(result['consumer_inventory_complete'])
 
+    def test_unchanged_selection_does_not_read_unrelated_package_archives(self):
+        args = self.baseline_args(type='deb', owner='85', skip_consumers=True, abi_libraries='', libraries='zlib')
+        helper = {'get_remote_packages': Mock(return_value=[{'name': 'php-zts-lib-other', 'version': '1-1'}])}
+        with patch.object(runpy, 'run_path', return_value=helper), patch.object(requests, 'get', side_effect=AssertionError('unrelated archive')):
+            planner['baseline_single'](args)
+        self.assertEqual([call.args[-1] for call in helper['get_remote_packages'].call_args_list],
+                         ['php-zts-lib-zlib', 'php-zts-runtime-layout'])
+        result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
+        self.assertEqual(result['metadata_scope'], ['zlib'])
+        self.assertEqual(result['libraries'], {})
+
     def test_no_rebuild_skips_rpm_consumer_inventory(self):
         args = self.baseline_args(type='rpm', base_url='https://fixture/el8', skip_consumers=True,
                                   abi_libraries='')
