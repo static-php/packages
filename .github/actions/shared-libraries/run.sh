@@ -159,9 +159,7 @@ case "$command" in
         SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for pattern in ["baseline/shared-libraries.json", "published-baseline/baseline.json"] for p in pathlib.Path("stage").glob(pattern)]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         php bin/spp package "${flags[@]}"
-        test_flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE")
-        [[ -n "$PACKAGES" ]] && test_flags+=(--packages="$PACKAGES")
-        php bin/spp test "${test_flags[@]}"
+        python3 .github/actions/shared-libraries/glibc.py test-dependencies
         python3 .github/actions/shared-libraries/workflow.py receipt --kind consumer --php-stream "$PHPV" \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \
             --output "dist/$TYPE/shared-library-build-receipt.json"

@@ -704,11 +704,11 @@ jobs:
                         -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
                         "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package
             -   name: Verify custom prefix extension update triggers
-                if: matrix.runtime-checks == true
+                if: matrix.runtime-checks == true && env.BUILD_ONLY != 'true'
                 run: python3 tests/runtime-consumer-triggers.py --type "$TYPE" --image "$PACKAGING_IMAGE" --output stage/consumer-trigger-native.json
-            -   name: Verify unpublished library installation
+            -   name: Verify unpublished package installation
                 if: env.BUILD_ONLY == 'true'
-                run: python3 .github/actions/shared-libraries/glibc.py test-libraries
+                run: python3 .github/actions/shared-libraries/glibc.py test-packages
             -   name: Verify ordinary static to shared upgrade
                 if: env.BUILD_ONLY != 'true'
                 env:

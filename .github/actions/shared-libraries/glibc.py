@@ -183,21 +183,32 @@ def package_libraries(kind):
     consumer_manifest = ROOT / 'dist' / kind / 'shared-library-consumers.json'
     if consumer_manifest.exists():
         shutil.copy2(consumer_manifest, packages / consumer_manifest.name)
-    test_library_dependencies(kind, selected_sdk, directory)
+    test_dependencies(kind, selected_sdk, directory)
 
 
-def test_library_dependencies(kind, sdk, directory):
+def test_dependencies(kind, sdk, directory, consumers=False):
     plan = read(directory / 'shared-library-plan.json')
     if not plan.get('build_only'):
         return
-    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+    environment = dict(os.environ, SPP_DIST_PATH=str(directory / 'test-dependencies'),
+                       SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]))
+    environment.pop('SPP_SHARED_LIBRARY_PLAN', None)
     selected = set(plan['libraries'])
-    closure = graph['dependency_closure'](selected, graph['library_graph'](read(sdk / 'shared-libraries.json')))
+    roots = set(selected)
+    if consumers:
+        hosts = {'cli', 'frankenphp'} - set(os.environ.get('PACKAGES', '').split(','))
+        if hosts:
+            run(['php', 'bin/spp', 'package', '--type=' + kind, '--phpv=' + os.environ['PHPV'],
+                 '--packages=' + ','.join(sorted(hosts)), '--iteration=1'], env=environment)
+        for location in [ROOT / 'dist', directory / 'test-dependencies']:
+            metadata = location / kind / 'shared-library-consumers.json'
+            if metadata.is_file():
+                for consumer in read(metadata).get('consumers', {}).values():
+                    roots.update(consumer['libraries'])
+    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+    closure = graph['dependency_closure'](roots, graph['library_graph'](read(sdk / 'shared-libraries.json')))
     needed = sorted(set(closure) - selected)
     if needed:
-        environment = dict(os.environ, SPP_DIST_PATH=str(directory / 'test-dependencies'),
-                           SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]))
-        environment.pop('SPP_SHARED_LIBRARY_PLAN', None)
         run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(sdk),
              '--libraries=' + ','.join(needed), '--iteration=1'], env=environment)
 
@@ -244,7 +255,7 @@ def classify():
                 args += ['--request', STAGE / 'effective-source-plan.json']
             old = directory / 'baseline/shared-libraries.json'
             request = read(STAGE / 'effective-source-plan.json')
-            if os.environ.get('LIBRARIES') and os.environ.get('PUBLISH') == 'false':
+            if (os.environ.get('LIBRARIES') or os.environ.get('PACKAGES')) and os.environ.get('PUBLISH') == 'false':
                 args += ['--build-only']
             if not os.environ.get('LIBRARIES') and (os.environ.get('MODE', 'full') == 'full' or
                     (not old.exists() or not read(old).get('libraries')) and
@@ -309,14 +320,14 @@ def classify():
             copy_tree(source, common / kind / 'baseline')
 
 
-def test_libraries():
+def test_packages():
     kind = os.environ['TYPE']
-    directory = STAGE if kind == 'apk' else ROOT / 'library-stage'
+    directory = format_stage(kind)
     if not read(directory / 'shared-library-plan.json').get('build_only'):
-        raise RuntimeError('Fresh library validation requires an unpublished subset plan')
-    candidates = STAGE / 'native-libraries'
+        raise RuntimeError('Fresh package validation requires an unpublished subset plan')
+    candidates = STAGE / 'native-packages'
     candidates.mkdir(exist_ok=True)
-    for source in [directory / 'test-dependencies' / kind, ROOT / 'dist' / kind]:
+    for source in [ROOT / 'library-stage/test-dependencies' / kind, directory / 'test-dependencies' / kind, ROOT / 'dist' / kind]:
         for archive in source.glob('*.' + kind):
             shutil.copy2(archive, candidates / archive.name)
     if not list(candidates.glob('php-zts-runtime-layout*.' + kind)):
@@ -487,12 +498,15 @@ def package():
          '--source-run-id', os.environ['SOURCE_RUN_ID'], '--image', provenance['producer_image'],
          '--output', ROOT / 'dist' / kind / 'shared-library-build-receipt.json'])
 
+    test_dependencies(kind, root, STAGE / kind, consumers=True)
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'test-libraries'])
+    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'test-packages', 'test-dependencies'])
     args = parser.parse_args()
-    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'test-libraries': test_libraries}[args.command]()
+    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'test-packages': test_packages,
+     'test-dependencies': lambda: test_dependencies(os.environ['TYPE'], ROOT / 'build' / os.environ['PHPV'], format_stage(os.environ['TYPE']), consumers=True)}[args.command]()
 
 
 if __name__ == '__main__':

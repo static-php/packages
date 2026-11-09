@@ -211,6 +211,13 @@ class SharedLibraryPlan(unittest.TestCase):
             self.assertFalse(any(item['full'] or item['packages'] for item in plan['php_requests'].values()))
             with self.assertRaisesRegex(RuntimeError, 'build/test-only'):
                 planner['cohort'](argparse.Namespace(plan=args.output))
+            args.libraries, args.packages, args.mode = None, 'curl', 'full'
+            with patch.dict(namespace, {'cached_abi': lambda *args: True}):
+                planner['prepare'](args)
+            plan = json.loads(Path(args.output).read_text())
+            self.assertEqual(plan['libraries'], [])
+            self.assertEqual(plan['php_requests']['8.5']['packages'], ['curl'])
+            self.assertFalse(any(item['full'] for item in plan['php_requests'].values()))
             args.build_only = False
             with self.assertRaisesRegex(RuntimeError, '--bootstrap'):
                 planner['prepare'](args)

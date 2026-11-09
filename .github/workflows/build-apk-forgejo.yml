@@ -479,11 +479,11 @@ jobs:
                     seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
                     path: php-payload-cache-ready.tar.zst
             -   name: Prepare real library revision for service validation
-                if: matrix.runtime-checks == true
+                if: matrix.runtime-checks == true && env.BUILD_ONLY != 'true'
                 run: bash .github/actions/shared-libraries/run.sh prepare-runtime
-            -   name: Verify unpublished library installation
+            -   name: Verify unpublished package installation
                 if: env.BUILD_ONLY == 'true'
-                run: python3 .github/actions/shared-libraries/glibc.py test-libraries
+                run: python3 .github/actions/shared-libraries/glibc.py test-packages
             -   name: Verify ordinary APK upgrade
                 if: env.BUILD_ONLY != 'true'
                 env:
