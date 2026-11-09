@@ -196,7 +196,7 @@ def test_dependencies(kind, sdk, directory, consumers=False):
     selected = set(plan['libraries'])
     roots = set(selected)
     if consumers:
-        hosts = {'cli', 'frankenphp'} - set(os.environ.get('PACKAGES', '').split(','))
+        hosts = {'cli', 'embed', 'frankenphp'} - set(os.environ.get('PACKAGES', '').split(','))
         if hosts:
             run(['php', 'bin/spp', 'package', '--type=' + kind, '--phpv=' + os.environ['PHPV'],
                  '--packages=' + ','.join(sorted(hosts)), '--iteration=1'], env=environment)
