@@ -19,6 +19,18 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_artifact_api_paginates_without_the_gh_executable(self):
+        requests = []
+        def response(request, timeout):
+            requests.append(request)
+            page = io.BytesIO(json.dumps({'artifacts': [{'id': len(requests)}]}).encode())
+            page.headers = {'Link': '<https://api.github.com/repos/test/packages/artifacts?page=2>; rel="next"'} if len(requests) == 1 else {}
+            return page
+        with patch.object(publication, 'urlopen', side_effect=response), patch.dict(os.environ, {'GH_TOKEN': 'test-token', 'GITHUB_API_URL': 'https://api.github.com'}):
+            self.assertEqual(publication.api('repos/test/packages/artifacts', paginate=True), [{'artifacts': [{'id': 1}]}, {'artifacts': [{'id': 2}]}])
+        self.assertEqual(requests[1].full_url, 'https://api.github.com/repos/test/packages/artifacts?page=2')
+        self.assertEqual(requests[0].get_header('Authorization'), 'Bearer test-token')
+
     def test_publication_output_is_live_and_saved_before_process_exits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -251,9 +263,15 @@ class Publication(unittest.TestCase):
         self.plan()
         for key, value in [('head_repository', {'full_name': 'other/packages'}), ('head_branch', 'feature'),
                            ('event', 'pull_request'), ('path', '.github/workflows/build-images.yml'),
-                           ('status', 'in_progress'), ('conclusion', 'cancelled'), ('head_sha', 'bad')]:
+                           ('status', 'in_progress'), ('conclusion', 'skipped'), ('head_sha', 'bad')]:
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 publication.inspect_run(dict(self.run, **{key: value}), self.artifacts, 'static-php/packages', 'master', 'rpm')
+
+    def test_cancelled_run_retains_its_completed_package_cohorts(self):
+        self.plan()
+        expected = publication.publication_matrix(self.state(), self.plans)
+        self.run['conclusion'] = 'cancelled'
+        self.assertEqual(publication.publication_matrix(self.state(), self.plans), expected)
 
     def test_duplicate_artifact_names_are_rejected(self):
         self.plan()

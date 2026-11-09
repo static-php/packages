@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from urllib.request import Request, urlopen
 
 from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, verify_upgrades
 
@@ -29,7 +30,7 @@ def inspect_run(run, artifacts, repository, branch, kind):
         raise RuntimeError('The selected run is not a supported ' + family + ' package build')
     if run.get('head_branch') != branch:
         raise RuntimeError('Only builds from the default branch can be published')
-    if run.get('status') != 'completed' or run.get('conclusion') not in ('success', 'failure'):
+    if run.get('status') != 'completed' or run.get('conclusion') not in ('success', 'failure', 'cancelled'):
         raise RuntimeError('Wait for the package build to finish before publishing')
     if not re.fullmatch(r'[a-f0-9]{40}', run.get('head_sha', '')):
         raise RuntimeError('Missing build commit identity')
@@ -113,10 +114,24 @@ def verify_target(directory, kind, target, arch, image, source_run):
 
 
 def api(path, paginate=False):
-    command = ['gh', 'api', path]
-    if paginate:
-        command += ['--paginate', '--slurp']
-    return json.loads(subprocess.check_output(command, text=True))
+    base = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/') + '/'
+    url = base + path.lstrip('/')
+    headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'static-php-packages'}
+    token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    pages = []
+    while url:
+        if not url.startswith(base):
+            raise RuntimeError('GitHub pagination left the API origin')
+        with urlopen(Request(url, headers=headers), timeout=60) as response:
+            page = json.load(response)
+            if not paginate:
+                return page
+            pages.append(page)
+            next_page = re.search(r'<([^>]+)>;\s*rel="next"', response.headers.get('Link', ''))
+            url = next_page.group(1) if next_page else None
+    return pages
 
 
 def run_logged(arguments, environment, log):
