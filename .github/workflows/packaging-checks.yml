@@ -54,6 +54,7 @@ jobs:
                         python3 tests/payload-profile.py
                         python3 tests/upgrade-guards.py
                         python3 tests/migration-upgrade-harness.py
+                        python3 tests/migration-baseline.py
                         python3 tests/forgejo-publication.py
                         python3 tests/abi-dump-cache.py
                         python3 tests/shared-library-plan.py
