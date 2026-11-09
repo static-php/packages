@@ -131,10 +131,12 @@ class Publication(unittest.TestCase):
                         self.assertIn('Cannot verify example: connection reset', primary_summary)
                         self.assertFalse(any(phase == 'upload-2' for _, phase in events))
                         if kind != 'rpm':
-                            self.assertTrue(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
+                            self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
                             mirrored = [stream for stream, phase in events if phase == 'upload-2']
                             self.assertEqual(mirrored, ['8.5', '8.6'])
                             self.assertLess(events.index(('8.6', 'upload-1')), events.index(('8.5', 'upload-2')))
+                            self.assertEqual(json.loads((root / 'log' / f'publication-{kind}-target.json').read_text()),
+                                             ['8.5', '8.6'])
                 finally:
                     os.chdir(previous)
                 upload = 'publish-rpm' if kind == 'rpm' else 'upload-1'

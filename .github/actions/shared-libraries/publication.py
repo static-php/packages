@@ -225,14 +225,13 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
                     outcomes.write_text(json.dumps([stream for stream, state in results if state == 'published']) + '\n')
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 results.append((label, 'failed: ' + str(error)))
-                level = 'warning' if mirror else 'error'
-                print(f'::{level}::{kind} PHP {label}: {error}; continuing with other streams', flush=True)
+                print(f'::error::{kind} PHP {label}: {error}; continuing with other streams', flush=True)
     summary = '\n'.join(f'{kind.upper()} {target} PHP {stream}: {state}' for stream, state in results)
     print(summary, flush=True)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
             output.write(summary + '\n')
-    return mirror or all(state == 'published' for _, state in results)
+    return all(state == ('mirrored' if mirror else 'published') for _, state in results)
 
 
 def main():
