@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Reuse an identical published APK; advance only changed same-version packages."""
+
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import tarfile
+import tempfile
+
+
+def sha256(path):
+    with Path(path).open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest() if hasattr(hashlib, 'file_digest') else stream_hash(source)
+
+
+def stream_hash(source):
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b''):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def contents(path):
+    files, fields = {}, {}
+    with gzip.open(path, 'rb') as source, tarfile.open(fileobj=source, mode='r|', ignore_zeros=True) as archive:
+        for member in archive:
+            name = member.name.removeprefix('./')
+            if name.startswith('.SIGN.'):
+                continue
+            if name == '.PKGINFO':
+                for line in archive.extractfile(member).read().decode().splitlines():
+                    match = re.fullmatch(r'(\w+)\s*=\s*(.*)', line)
+                    if match:
+                        fields.setdefault(match[1], []).append(match[2])
+                continue
+            record = [member.type.decode(), member.mode, member.uid, member.gid, member.linkname,
+                      {key: value for key, value in member.pax_headers.items() if key not in ('mtime', 'atime', 'ctime')}]
+            if member.isfile():
+                record.append(stream_hash(archive.extractfile(member)))
+            if name in files and files[name] != record:
+                raise RuntimeError('Conflicting archive members: ' + name)
+            files[name] = record
+    for key in ('pkgname', 'pkgver', 'arch'):
+        if len(fields.get(key, [])) != 1:
+            raise RuntimeError('Missing or ambiguous APK identity: ' + key)
+    name, version, arch = (fields[key][0] for key in ('pkgname', 'pkgver', 'arch'))
+    if not re.fullmatch(r'.+-r\d+', version):
+        raise RuntimeError('Invalid APK revision: ' + version)
+    base = re.sub(r'-debuginfo$', '', name)
+    for key in ('builddate', 'datahash'):
+        fields.pop(key, None)
+    fields['pkgver'] = [version.rsplit('-r', 1)[0]]
+    for key in ('depend', 'provides', 'replaces'):
+        fields[key] = sorted(re.sub(r'^(' + re.escape(base) + r'(?:-debuginfo)?[=<>~]+)' + re.escape(version) + r'$', r'\1SELF', value)
+                             for value in fields.get(key, []))
+    return (name, version, arch), (files, {key: sorted(value) for key, value in fields.items()})
+
+
+def select(candidate, manifests):
+    (name, version, arch), fingerprint = contents(candidate)
+    stem = version.rsplit('-r', 1)[0]
+    matches = []
+    for manifest in manifests:
+        manifest = Path(manifest)
+        data = json.loads(manifest.read_text())
+        if data.get('type', 'apk') != 'apk':
+            continue
+        packages = list(data.get('packages', []))
+        if name.endswith('-debuginfo') and not any(package.get('name') == name for package in packages):
+            packages += data.get('published_packages', [])
+        for package in packages:
+            published = package.get('version', '')
+            if (package.get('name') != name or package.get('architecture') != arch
+                    or not re.fullmatch(re.escape(stem) + r'-r\d+', published)):
+                continue
+            relative = package.get('path', package.get('archive'))
+            checksum = package.get('sha256', package.get('archive_sha256'))
+            if not relative and package.get('publication_url') and package.get('published_checksum'):
+                freezer = runpy.run_path(str(Path(__file__).with_name('freeze-migration-baseline.py')))
+                output = manifest.parent / 'reuse-published'
+                output.mkdir(exist_ok=True)
+                with tempfile.TemporaryDirectory(dir=output) as stage:
+                    downloaded = freezer['download_package'](package, 'apk', output, Path(stage))
+                relative = str(Path('reuse-published') / downloaded['path'])
+                checksum = downloaded['sha256']
+            if not relative or not checksum:
+                continue
+            source = (manifest.parent / relative).resolve()
+            if not source.is_relative_to(manifest.parent.resolve()) or not source.is_file() or sha256(source) != checksum:
+                raise RuntimeError('Published archive checksum/path mismatch: ' + name)
+            matches.append((int(published.rsplit('-r', 1)[1]), source, published))
+    if not matches:
+        return {'revision': int(version.rsplit('-r', 1)[1])}
+    highest = max(item[0] for item in matches)
+    if name.endswith('-debuginfo') and highest < int(version.rsplit('-r', 1)[1]):
+        return {'revision': int(version.rsplit('-r', 1)[1])}
+    for revision, source, published in matches:
+        if revision != highest:
+            continue
+        identity, existing = contents(source)
+        if identity != (name, published, arch):
+            raise RuntimeError('Published archive identity mismatch: ' + name)
+        valid = subprocess.run(['apk', 'verify', '--allow-untrusted', str(source)], capture_output=True).returncode == 0
+        if existing == fingerprint and valid:
+            return {'revision': revision, 'reuse': str(source)}
+    return {'revision': max(highest + 1, int(version.rsplit('-r', 1)[1]))}
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('candidate')
+    parser.add_argument('--baseline-manifest', action='append', default=[])
+    args = parser.parse_args()
+    print(json.dumps(select(args.candidate, args.baseline_manifest)))

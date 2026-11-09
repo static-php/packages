@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+
+import gzip
+import io
+import json
+from pathlib import Path
+import runpy
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+HELPER = runpy.run_path(str(ROOT / 'bin/apk-reuse-published'))
+
+
+def archive(path, revision=0, payload=b'working ELF', dependency='musl', script=b'exit 0', stamp=1, debug=False):
+    name = 'php-zts-cli' + ('-debuginfo' if debug else '')
+    metadata = f'pkgname = {name}\npkgver = 8.3.36-r{revision}\narch = x86_64\nbuilddate = {stamp}\ndatahash = ignored-{stamp}\n'
+    metadata += f'depend = {dependency}\n'
+    if debug:
+        metadata += f'depend = php-zts-cli=8.3.36-r{revision}\n'
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w') as target:
+        for name, data in [('.PKGINFO', metadata.encode()), ('.post-install', script), ('usr/bin/php-zts', payload)]:
+            entry = tarfile.TarInfo(name)
+            entry.mode = 0o755
+            entry.mtime = stamp
+            entry.size = len(data)
+            target.addfile(entry, io.BytesIO(data))
+    path.write_bytes(gzip.compress(buffer.getvalue(), mtime=stamp))
+
+
+class ReusePublished(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.old, self.new = self.root / 'old.apk', self.root / 'new.apk'
+        self.manifest = self.root / 'baseline.json'
+        self.native = patch('subprocess.run')
+        self.verification = self.native.start()
+        self.addCleanup(self.native.stop)
+        self.verification.return_value.returncode = 0
+
+    def baseline(self, debug=False):
+        self.manifest.write_text(json.dumps({'type': 'apk', 'packages': [{
+            'name': 'php-zts-cli' + ('-debuginfo' if debug else ''), 'architecture': 'x86_64',
+            'version': '8.3.36-r3', 'path': self.old.name, 'sha256': HELPER['sha256'](self.old)}]}))
+
+    def select(self):
+        return HELPER['select'](self.new, [self.manifest])
+
+    def test_unchanged_payload_reuses_original_archive_despite_build_times(self):
+        archive(self.old, revision=3)
+        archive(self.new, stamp=999)
+        self.baseline()
+        self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
+
+    def test_changed_payload_dependencies_or_scripts_advance_only_once(self):
+        archive(self.old, revision=3)
+        self.baseline()
+        for changes in [{'payload': b'fixed ELF'}, {'dependency': 'musl>=1.2'}, {'script': b'fixed script'}]:
+            with self.subTest(changes=changes):
+                archive(self.new, **changes)
+                self.assertEqual(self.select(), {'revision': 4})
+
+    def test_debug_reuses_matching_exact_runtime_identity(self):
+        archive(self.old, revision=3, debug=True)
+        archive(self.new, revision=3, debug=True, stamp=999)
+        self.baseline(debug=True)
+        self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
+        archive(self.new, revision=4, debug=True)
+        self.assertEqual(self.select(), {'revision': 4})
+
+    def test_invalid_old_archive_is_replaced_even_when_its_payload_matches(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        self.verification.return_value.returncode = 1
+        self.assertEqual(self.select(), {'revision': 4})
+
+    def test_tampered_baseline_archive_is_rejected(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        self.old.write_bytes(b'tampered')
+        with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
+            self.select()
+
+    def test_other_architecture_does_not_raise_revision(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        data = json.loads(self.manifest.read_text())
+        data['packages'][0]['architecture'] = 'aarch64'
+        self.manifest.write_text(json.dumps(data))
+        self.assertEqual(self.select(), {'revision': 0})
+
+
+if __name__ == '__main__':
+    unittest.main()

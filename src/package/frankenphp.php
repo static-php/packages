@@ -617,16 +617,25 @@ class frankenphp implements package
 
         @unlink($nfpmConfigFile);
 
+        if ($iterationOverride === null && !$bump) {
+            $decision = CreatePackages::publishedApk($outputFile, $name, $apkVersion, $architecture, $iteration);
+            if ($decision['rebuild']) {
+                unlink($outputFile);
+                $this->createApkPackage($architecture, $binaryDependencies, $decision['revision'], $debuginfo, false);
+                return;
+            }
+            $iteration = $decision['revision'];
+        }
         // Create FrankenPHP debuginfo package if debug file exists (only if --debuginfo flag set for APK)
         if ($debuginfo) {
             $frankenDbg = $this->debugBinary();
             if ($frankenDbg !== null && file_exists($frankenDbg)) {
-                $this->createApkDebuginfo($name, $apkVersion, $iteration, $architecture, $frankenDbg, $frankenphpSuffix);
+                $this->createApkDebuginfo($name, $apkVersion, $iteration, $architecture, $frankenDbg, $frankenphpSuffix, $iterationOverride === null && !$bump);
             }
         }
     }
 
-    private function createApkDebuginfo(string $name, string $version, string $iteration, string $architecture, string $frankenDbg, string $frankenphpSuffix): void
+    private function createApkDebuginfo(string $name, string $version, string $iteration, string $architecture, string $frankenDbg, string $frankenphpSuffix, bool $reusePublished = false): void
     {
         $dbgName = $name . '-debuginfo';
 
@@ -676,6 +685,9 @@ class frankenphp implements package
 
         @unlink($nfpmConfigFile);
 
+        if ($reusePublished) {
+            CreatePackages::publishedApk($outputFile, $dbgName, $version, $architecture, $iteration);
+        }
         echo "APK debuginfo package created: {$outputFile}\n";
     }
 

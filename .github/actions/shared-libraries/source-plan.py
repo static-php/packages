@@ -39,7 +39,7 @@ PACKAGE_PATTERNS = (
     "src/step/CreatePackages.php", "src/util/SharedLibraries.php", "src/util/BuildPayload.php",
     "src/util/**/*.php",
     "config/templates/phpmod.twig", "config/templates/pie-wrapper.twig", "config/static-php.repo",
-    "bin/apk-control-metadata", "bin/runtime-services", "bin/migration-cutoffs",
+    "bin/apk-control-metadata", "bin/apk-reuse-published", "bin/runtime-services", "bin/migration-cutoffs",
 )
 
 

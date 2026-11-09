@@ -1822,7 +1822,7 @@ class CreatePackages
         // Use nfpm instead of fpm for APK packages
         self::createApkWithNfpm($package, $name, $apkVersion, $architecture, $apkIteration, $config, $isDebuginfo);
     }
-    private static function createApkWithNfpm(package $package, string $name, string $phpVersion, string $architecture, string $iteration, array $config, bool $isDebuginfo): void
+    private static function createApkWithNfpm(package $package, string $name, string $phpVersion, string $architecture, string $iteration, array $config, bool $isDebuginfo, bool $reconcile = true): void
     {
         $fullVersion = "{$phpVersion}-r{$iteration}";
 
@@ -2067,6 +2067,42 @@ class CreatePackages
 
         // Clean up config file
         @unlink($nfpmConfigFile);
+        if ($reconcile && !self::isPhpIndependent($package) && !self::$bump && self::$iterationOverride === null) {
+            $decision = self::publishedApk($outputFile, $name, $phpVersion, $architecture, $iteration);
+            if ($decision['rebuild']) {
+                unlink($outputFile);
+                self::createApkWithNfpm($package, $name, $phpVersion, $architecture, $decision['revision'], $config, $isDebuginfo, false);
+            }
+        }
+    }
+
+    public static function publishedApk(string $archive, string $name, string $version, string $architecture, string $iteration): array
+    {
+        $arguments = ['python3', BASE_PATH . '/bin/apk-reuse-published', $archive];
+        foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $manifest) {
+            $arguments = [...$arguments, '--baseline-manifest', $manifest];
+        }
+        $process = new Process($arguments);
+        $process->setTimeout(null);
+        $process->mustRun();
+        $decision = json_decode(trim($process->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+        $revision = (string) $decision['revision'];
+        $base = preg_replace('/-debuginfo$/', '', $name);
+        if (str_ends_with($name, '-debuginfo') && $revision !== $iteration) {
+            throw new RuntimeException('Published APK runtime/debug revisions must remain paired: ' . $name);
+        }
+        self::$resolvedIterations["{$base}|{$version}|{$architecture}|apk"] = $revision;
+        if (isset($decision['reuse'])) {
+            $destination = DIST_APK_PATH . "/{$name}-{$version}-r{$revision}.{$architecture}.apk";
+            if (!copy($decision['reuse'], $destination)) {
+                throw new RuntimeException('Cannot reuse published APK: ' . $name);
+            }
+            if ($destination !== $archive) {
+                unlink($archive);
+            }
+            echo "Reused published {$name} {$version}-r{$revision}\n";
+        }
+        return ['revision' => $revision, 'rebuild' => !isset($decision['reuse']) && $revision !== $iteration];
     }
 
     /**
