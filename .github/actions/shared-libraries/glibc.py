@@ -80,6 +80,9 @@ def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None)
     else:
         args += ['--host', 'https://git.henderkes.com',
                  '--password-env', 'FORGEJO_PASSWORD', '--consumer-password-env', 'FORGEJO_PASSWORD']
+        if os.environ.get('LIBRARIES') and os.environ.get('PUBLISH') == 'true':
+            streams = set(filter(None, os.environ.get('PHP_VERSIONS', '').split(','))) or set(STREAMS)
+            args += ['--owners', ','.join(sorted({'85'} | {stream.replace('.', '') for stream in streams}))]
     run(args)
 
 

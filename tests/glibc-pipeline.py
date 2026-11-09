@@ -32,6 +32,22 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_library_publication_reads_each_selected_owner_after_partial_rollout(self):
+        with patch.dict(os.environ, LIBRARIES='openssl', PUBLISH='true', PHP_VERSIONS='8.4,8.6', MATRIX_ARCH='arm64'), \
+                patch.object(glibc, 'run') as run:
+            for kind in ('apk', 'deb'):
+                glibc.baseline(kind, Path('baseline'), libraries={'openssl', 'zlib'})
+                arguments = run.call_args.args[0]
+                self.assertEqual(arguments[arguments.index('--owners') + 1], '84,85,86')
+                self.assertEqual(arguments[arguments.index('--libraries') + 1], 'openssl,zlib')
+            with patch.dict(os.environ, PHP_VERSIONS=''):
+                glibc.baseline('apk', Path('baseline'))
+                arguments = run.call_args.args[0]
+                self.assertEqual(arguments[arguments.index('--owners') + 1], '82,83,84,85,86')
+            with patch.dict(os.environ, PUBLISH='false'):
+                glibc.baseline('apk', Path('baseline'))
+                self.assertNotIn('--owners', run.call_args.args[0])
+
     def test_explicit_iteration_cannot_silently_disable_bumping(self):
         with patch.dict(os.environ, ITERATION='5', BUMP='true'):
             with self.assertRaisesRegex(RuntimeError, 'Choose bump=true or an explicit iteration'):
