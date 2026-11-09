@@ -655,7 +655,7 @@ jobs:
                 run: echo "BUILD_ONLY=$(jq -r '.build_only // false' library-stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Copy matching library archives
                 run: |
-                    mkdir -p "dist/$TYPE"
+                    mkdir -p "dist/$TYPE" library-stage/libraries
                     find library-stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;
             -   name: Prepare native baseline comparison tools
                 if: env.BUILD_ONLY != 'true'

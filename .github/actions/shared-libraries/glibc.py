@@ -152,7 +152,7 @@ def format_sdk(kind):
 
 def shared_sdk_packaging():
     selected = set(filter(None, os.environ.get('LIBRARIES', '').split(',')))
-    if not selected:
+    if not selected and not os.environ.get('PACKAGES'):
         return False
     plan = read(STAGE / 'library-build-plan.json')
     if plan.get('full') or plan.get('rebuilt_libraries'):
@@ -166,6 +166,15 @@ def package_libraries(kind):
     directory = format_stage(kind)
     selected_sdk = format_sdk(kind)
     shared = kind != 'apk' and selected_sdk == ROOT / 'buildroot'
+    if shared:
+        graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+        selected = read(directory / 'shared-library-plan.json')['libraries']
+        closure = graph['dependency_closure'](selected, graph['library_graph'](read(selected_sdk / 'shared-libraries.json')))
+        if 'openssl' in closure:
+            selected_sdk = STAGE / ('sdk-' + kind)
+            copy_tree(ROOT / 'buildroot', selected_sdk)
+            run(variants('apply', selected_sdk) + ['--variants', ROOT / 'buildroot/openssl-variants', '--type', kind])
+            shared = False
     manifest = directory / 'shared-libraries.json' if shared else selected_sdk / 'shared-libraries.json'
     if not shared:
         shutil.copy2(directory / 'shared-libraries.json', manifest)

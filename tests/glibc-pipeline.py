@@ -107,7 +107,7 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True)]:
+        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer')]:
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
@@ -148,7 +148,7 @@ class Pipeline(unittest.TestCase):
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual else ''):
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else ''):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
                 self.assertCountEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
