@@ -99,6 +99,27 @@ class MigrationUpgradeHarness(unittest.TestCase):
         reason = harness['failure_reason']('Command failed: apk version -t 3.8.1p85-r1 3.8.1.0_p85-r5')
         self.assertIn('3.8.1p85-r1 3.8.1.0_p85-r5', reason)
 
+    def test_old_wrong_architecture_does_not_reject_a_native_replacement(self):
+        for new_arch in ('arm64', 'x86_64'):
+            with self.subTest(candidate=new_arch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'published-names.json').write_text('[]')
+                old = [{'name': 'php-zts-cli', 'architecture': 'x86_64'}]
+                incoming = [{'name': 'php-zts-cli', 'architecture': new_arch}]
+                args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine', inside='index'))
+                def mapped(path):
+                    return root / Path(path).name if str(path).startswith('/spp/') else Path(path)
+                with patch.dict(scope, {'Path': mapped, 'inspect_directory': lambda *_: incoming,
+                        'make_keys': lambda *_: None, 'index_baseline': lambda *_: (old, None),
+                        'index_generation': lambda *_: incoming, 'copy_historical': lambda *_: None}):
+                    if new_arch == 'arm64':
+                        harness['inside'](args)
+                        inventory = json.loads((root / 'inventory.json').read_text())
+                        self.assertIn('Published package architecture', inventory['baseline_index_failure'])
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'architecture does not match'):
+                            harness['inside'](args)
+
     def test_partial_candidate_validation_does_not_require_a_parseable_old_apk_version(self):
         old = [{'name': 'php-zts-imagick', 'version': '3.8.1p85-r1'}]
         incoming = [{'name': 'php-zts-imagick', 'version': '3.8.1.0_p85-r5'}]

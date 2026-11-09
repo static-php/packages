@@ -753,9 +753,11 @@ def inside(args):
                     source = Path(package['path'])
                     shutil.copy2(source, Path('/spp/repository/generations/new') / source.name)
         new = index_generation(kind, 'new', args.php, args.arch)
-        for item in old + new:
+        for item in new:
             if item['architecture'] not in (architecture(args.arch), 'all'):
                 raise RuntimeError('Package architecture does not match the native cell')
+        if any(item['architecture'] not in (architecture(args.arch), 'all') for item in old):
+            baseline_index_failure = 'Published package architecture does not match the native cell'
         library = None
         if args.library_artifacts:
             incoming_library = inspect_directory(kind, Path('/spp/library-input'))
