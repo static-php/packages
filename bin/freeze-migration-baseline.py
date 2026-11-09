@@ -184,18 +184,6 @@ def apk_control_checksum(data):
     raise RuntimeError('APK has no control member')
 
 
-def registered_apk_packages(inventory, owner):
-    registry = runpy.run_path(str(Path(__file__).resolve().parent / 'forgejo-helper'))
-    published = registry['get_remote_packages']('https://git.henderkes.com', owner,
-                                                os.environ.get('FORGEJO_PASSWORD', ''), 'alpine')
-    identities = {(package['name'], package['version']) for package in published}
-    available = [package for package in inventory if (package['name'], package['version']) in identities]
-    removed = len(inventory) - len(available)
-    if removed:
-        print(f'Ignoring {removed} stale APK index entries absent from the primary registry')
-    return available
-
-
 def newer(kind, candidate, previous):
     if kind == 'rpm':
         import rpm
@@ -303,8 +291,8 @@ def published_inventory(args):
         suffix = 'debian/' if args.type == 'deb' else 'alpine/main/php-zts/'
         base = (args.base_url or f'https://git.henderkes.com/api/packages/{owner}/' + suffix).rstrip('/') + '/'
         inventory, metadata, keys = (deb_index if args.type == 'deb' else apk_index)(base, architecture)
-        if args.type == 'apk' and not args.base_url:
-            inventory = registered_apk_packages(inventory, owner)
+        # Capture the repository that real package managers see. Missing archives
+        # are old-baseline failures; scanning the registry cannot repair its index.
     return base, inventory, metadata, keys
 
 

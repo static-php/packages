@@ -214,22 +214,18 @@ class BaselineCapture(unittest.TestCase):
                 else:
                     self.assertEqual(result['migration_cutoffs'], {'8.6': cutoffs['formats']['apk']})
 
-    def test_deleted_apk_versions_are_not_selected_from_stale_index(self):
-        stale = {'name': 'php-zts-igbinary', 'version': '3.2.17~rc1_84-r1'}
-        current = {'name': 'php-zts-igbinary', 'version': '3.2.17_rc1_p84-r0'}
-        cli = {'name': 'php-zts-cli', 'version': '8.4.27-r1'}
-        calls = []
-        def packages(*args):
-            calls.append(args)
-            return [current, cli]
-        scope = helper['registered_apk_packages'].__globals__
-        with patch.dict(scope, {'runpy': SimpleNamespace(run_path=lambda path: {'get_remote_packages': packages})}):
-            available = helper['registered_apk_packages']([stale, current, cli], '84')
-        self.assertEqual(available, [current, cli])
-        self.assertEqual(calls[0][:2], ('https://git.henderkes.com', '84'))
-        with patch.dict(scope, {'runpy': SimpleNamespace(run_path=lambda path: {'get_remote_packages': lambda *args: (_ for _ in ()).throw(RuntimeError('registry unavailable'))})}):
-            with self.assertRaisesRegex(RuntimeError, 'registry unavailable'):
-                helper['registered_apk_packages']([stale, current, cli], '84')
+    def test_apk_inventory_uses_native_index_without_registry_scan(self):
+        inventory = [{'name': 'php-zts-cli', 'version': '8.4.27-r1'}]
+        args = SimpleNamespace(type='apk', php='8.4', arch='arm64', base_url=None)
+        def index(base, arch):
+            self.assertEqual(base, 'https://git.henderkes.com/api/packages/84/alpine/main/php-zts/')
+            self.assertEqual(arch, 'aarch64')
+            return inventory, {'APKINDEX.tar.gz': b'index'}, []
+        scope = helper['published_inventory'].__globals__
+        with patch.dict(scope, {'apk_index': index, 'runpy': SimpleNamespace(run_path=lambda *_: self.fail('Registry scan'))}):
+            _, actual, metadata, _ = helper['published_inventory'](args)
+        self.assertEqual(actual, inventory)
+        self.assertEqual(metadata, {'APKINDEX.tar.gz': b'index'})
 
     def test_apk_checksum_is_control_member_not_signature_or_file_hash(self):
         signature = tar_member('.SIGN.RSA.example.rsa.pub', b'signature')
