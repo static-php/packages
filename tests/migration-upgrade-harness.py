@@ -120,18 +120,20 @@ class MigrationUpgradeHarness(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, 'architecture does not match'):
                             harness['inside'](args)
 
-    def test_partial_candidate_validation_does_not_require_a_parseable_old_apk_version(self):
-        old = [{'name': 'php-zts-imagick', 'version': '3.8.1p85-r1'}]
-        incoming = [{'name': 'php-zts-imagick', 'version': '3.8.1.0_p85-r5'}]
-        def compare(kind, before, after):
-            if before == '3.8.1p85-r1' or after == 'invalid-new-version':
-                raise RuntimeError('apk version rejected version')
-            return False
-        with patch.dict(scope, {'newer': compare}):
-            self.assertEqual(harness['validate_partial_candidates']('apk', old, incoming), ['php-zts-imagick'])
-            incoming[0]['version'] = 'invalid-new-version'
-            with self.assertRaisesRegex(RuntimeError, 'rejected version'):
-                harness['validate_partial_candidates']('apk', old, incoming)
+    def test_partial_candidate_validation_does_not_require_a_parseable_old_version(self):
+        for kind in ('rpm', 'deb', 'apk'):
+            with self.subTest(kind=kind):
+                old = [{'name': 'php-zts-imagick', 'version': 'invalid-old-version'}]
+                incoming = [{'name': 'php-zts-imagick', 'version': '3.8.1.0_p85-r6'}]
+                def compare(kind, before, after):
+                    if before == 'invalid-old-version' or after == 'invalid-new-version':
+                        raise RuntimeError('Native comparator rejected version')
+                    return False
+                with patch.dict(scope, {'newer': compare}):
+                    self.assertEqual(harness['validate_partial_candidates'](kind, old, incoming), ['php-zts-imagick'])
+                    incoming[0]['version'] = 'invalid-new-version'
+                    with self.assertRaisesRegex(RuntimeError, 'rejected version'):
+                        harness['validate_partial_candidates'](kind, old, incoming)
 
     def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
         error = ('Command failed: apk add php-zts\n' + 'Installing a package\n' * 2000

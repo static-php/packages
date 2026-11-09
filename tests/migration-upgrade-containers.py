@@ -393,7 +393,10 @@ def newer(kind, old, new):
             return epoch, version, release
         return rpm.labelCompare(evr(old), evr(new)) < 0
     if kind == 'deb':
-        return run(['dpkg', '--compare-versions', old, 'lt', new], check=False).returncode == 0
+        result = run(['dpkg', '--compare-versions', old, 'lt', new], check=False)
+        if result.returncode not in (0, 1):
+            raise RuntimeError('Cannot compare Debian package versions')
+        return result.returncode == 0
     return run(['apk', 'version', '-t', old, new]).stdout.strip() == '<'
 
 
@@ -676,9 +679,7 @@ def validate_partial_candidates(kind, old, incoming):
         else:
             try:
                 increased = newer(kind, previous['version'], package['version'])
-            except RuntimeError:
-                if kind != 'apk':
-                    raise
+            except (RuntimeError, ValueError):
                 newer(kind, package['version'], package['version'])
                 increased = True
             if not increased:
