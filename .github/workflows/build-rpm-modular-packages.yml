@@ -300,8 +300,12 @@ jobs:
             -   name: Build changed shared libraries
                 run: bash .github/actions/shared-libraries/run.sh libs
             -   name: Classify ABI and package shared libraries
-                run: bash .github/actions/shared-libraries/run.sh glibc-classify
+                id: classification
+                run: |
+                    bash .github/actions/shared-libraries/run.sh glibc-classify
+                    echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
             -   name: Pack buildroot
+                if: inputs.publish == true || steps.classification.outputs.php-required == 'true'
                 run: tar -cf - buildroot | zstd -f -o buildroot.tar.zst
             -   name: Save buildroot cache
                 if: inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
@@ -332,6 +336,7 @@ jobs:
                     path: stage/common
                     retention-days: 1
             -   name: Stage common SDK buildroot
+                if: steps.classification.outputs.php-required == 'true'
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true

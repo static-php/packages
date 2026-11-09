@@ -253,8 +253,12 @@ jobs:
             -   name: Build changed shared libraries
                 run: bash .github/actions/shared-libraries/run.sh libs
             -   name: Classify ABI and package shared libraries
-                run: bash .github/actions/shared-libraries/run.sh classify
+                id: classification
+                run: |
+                    bash .github/actions/shared-libraries/run.sh classify
+                    echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
             -   name: Pack buildroot
+                if: inputs.publish == true || steps.classification.outputs.php-required == 'true'
                 run: tar --zstd -cf buildroot.tar.zst buildroot
             -   name: Save buildroot cache
                 if: inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
@@ -278,6 +282,7 @@ jobs:
                         stage/target.json
                     retention-days: 7
             -   name: Stage common SDK buildroot
+                if: steps.classification.outputs.php-required == 'true'
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
@@ -386,6 +391,7 @@ jobs:
                 with:
                     persist-credentials: false
             -   name: Download pinned source snapshot
+                if: matrix.library-only != true
                 uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
                 with:
                     workflow: spc-download.yml
@@ -393,6 +399,7 @@ jobs:
                     search_artifacts: true
                     run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
             -   name: Extract source snapshot
+                if: matrix.library-only != true
                 run: |
                     mkdir -p downloads
                     tar --no-same-owner -xzf downloads.tar.gz -C downloads
@@ -409,17 +416,25 @@ jobs:
                 with:
                     name: shared-libs-apk-${{ matrix.target }}
                     path: stage
+            -   name: Copy matching library archives
+                run: |
+                    mkdir -p dist/apk
+                    find stage/libraries -maxdepth 1 -name '*.apk' -exec cp -a {} dist/apk/ \;
             -   name: Select native validation baseline
                 run: echo "BUILD_ONLY=$(jq -r '.build_only // false' stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Download exact common SDK
+                if: matrix.library-only != true
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     name: shared-sdk-buildroot-apk-${{ matrix.target }}
             -   name: Extract buildroot
+                if: matrix.library-only != true
                 run: tar --zstd -xf buildroot.tar.zst
             -   name: Prepare Composer cache
+                if: matrix.library-only != true
                 run: mkdir -p ~/.cache/composer
             -   name: Restore Composer downloads
+                if: matrix.library-only != true
                 id: composer-cache
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
@@ -451,6 +466,7 @@ jobs:
                 if: env.BUILD_ONLY != 'true'
                 run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Build and test PHP packages
+                if: matrix.library-only != true
                 env:
                     EXPORT_PAYLOAD_CACHE: ${{ inputs.publish == true && steps.payload-cache.outputs.cache-current != 'true' }}
                 run: bash .github/actions/shared-libraries/run.sh php
