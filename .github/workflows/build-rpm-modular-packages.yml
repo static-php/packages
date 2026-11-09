@@ -651,18 +651,6 @@ jobs:
                     REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                     ACTOR: ${{ github.actor }}
                 run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-            -   name: Download pinned source metadata
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            -   name: Extract source metadata
-                run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
             -   name: Download shared SDK metadata
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:

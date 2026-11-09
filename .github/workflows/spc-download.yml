@@ -189,6 +189,8 @@ jobs:
                             python3 .github/actions/shared-libraries/php-source.py --root . --version "$release" --capture
                         fi
                     done
+                    release=$(jq -er '.php_versions["8.5"]' downloads/.spc-meta.json)
+                    python3 .github/actions/shared-libraries/php-source.py --root . --version "$release" --select
 
             -   name: Save downloaded sources
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

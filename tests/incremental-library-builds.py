@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,7 +136,9 @@ class IncrementalLibraryTests(unittest.TestCase):
     def test_manual_unchanged_scope_never_invokes_builder_or_rewrites_sdk(self):
         plan = self.plan(libraries="base,consumer")
         before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in [self.sdk / incremental.STATE, self.sdk / "shared-libraries.json"]}
-        result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
+        with mock.patch.object(incremental, 'file_snapshot', side_effect=AssertionError('No build to compare')), \
+                mock.patch.object(incremental, 'compiler_runtime_scan', side_effect=AssertionError('Already inspected')):
+            result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
         self.assertFalse(result["built"])
         self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
 

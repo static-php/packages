@@ -333,6 +333,15 @@ def execute(root, buildroot, plan, package_type, command=None):
             owned = ownership.get("libraries", {}).get(name)
             if not isinstance(owned, dict) or owned.get("source_hash") != manifest["libraries"][name].get("source_hash"):
                 raise RuntimeError("Restored SDK ownership is incomplete or stale: " + name)
+    if not plan['full'] and not plan['selected']:
+        current = read(buildroot / 'shared-libraries.json')
+        validate_final(current)
+        write(buildroot / STATE, record_state(plan, current))
+        print('Unchanged SDK: compilation and repeat output/runtime scans skipped', flush=True)
+        return {'schema': 1, 'complete': True, 'full': False, 'manual': plan['manual'],
+                'selected': [], 'reused': plan['reused'], 'built': False,
+                'rebuilt_libraries': plan['rebuilt_libraries'], 'unchanged_output_count': 0, 'command': [],
+                'state_sha256': hashlib.sha256((buildroot / STATE).read_bytes()).hexdigest()}
     protected = file_snapshot(buildroot, manifest, plan["reused"]) if not plan["full"] else {}
     selected = plan["selected"]
     ran = bool(plan["full"] or selected)
