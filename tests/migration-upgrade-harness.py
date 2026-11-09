@@ -133,8 +133,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         self.assertEqual(plan['profiles'][0]['packages'], ['php-zts-cli', 'php-zts-imagick'])
         self.assertIn({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
                        'disabled_extension': 'imagick'}, plan['profiles'])
-        independent = harness['all_profiles'](baseline, individual=True)
-        self.assertIn('independent-php-zts-imagick', [p['id'] for p in independent['profiles']])
+        self.assertNotIn('independent-php-zts-imagick', [p['id'] for p in plan['profiles']])
 
     def test_representative_baseline_cannot_claim_full_profile_coverage(self):
         with self.assertRaisesRegex(RuntimeError, 'representative subset'):

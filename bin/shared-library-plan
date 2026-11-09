@@ -766,7 +766,7 @@ def prepare(args):
         if unexpected:
             raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
     else:
-        selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
+        selected = set(current['libraries']) if (mode == 'full' and not args.packages) or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
         selected.update(metadata_libraries)
         selected.update(old.get('publication_drift', []))
     selected.update(reverse_closure(current, abi_roots))

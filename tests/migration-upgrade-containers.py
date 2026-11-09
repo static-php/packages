@@ -147,11 +147,11 @@ def library_old_profile(baseline, incoming_changes, requested, expand_consumers=
     return sorted(selected)
 
 
-def all_profiles(baseline, individual=False):
+def all_profiles(baseline):
     selection = baseline.get('selection', {})
     if selection.get('profile') != 'all' or selection.get('complete') is not True:
         raise RuntimeError('--profile all requires a complete --profile all frozen baseline, not a representative subset')
-    return package_profiles(baseline, individual)
+    return package_profiles(baseline)
 
 
 def affected_profiles(baseline):
@@ -160,7 +160,7 @@ def affected_profiles(baseline):
     return package_profiles(baseline)
 
 
-def package_profiles(baseline, individual=False):
+def package_profiles(baseline):
     names = sorted({p['name'] for p in baseline['packages']
                     if managed(p['name']) and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))})
@@ -169,11 +169,9 @@ def package_profiles(baseline, individual=False):
     # Keep VM instrumentation profiles independent while testing ordinary modules together.
     isolated = {'php-zts-xdebug', 'php-zts-pcov', 'php-zts-spx', 'php-zts-xhprof'} & set(names)
     profiles = [{'id': 'common', 'packages': [name for name in names if name not in isolated]}]
-    core = {'php-zts', 'php-zts-cli', 'php-zts-cgi', 'php-zts-fpm', 'php-zts-embed', 'php-zts-devel', 'frankenphp'}
-    separate = set(names) - core if individual else isolated
     hosts = ({'php-zts-cli', 'php-zts-fpm', 'frankenphp'} & set(names)
              if baseline.get('selection', {}).get('mode') == 'affected' else {'php-zts-cli'})
-    for name in sorted(separate):
+    for name in sorted(isolated):
         profiles.append({'id': 'independent-' + name, 'packages': sorted(hosts | {name})})
     if 'php-zts-imagick' in names:
         profiles.append({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
@@ -184,8 +182,7 @@ def package_profiles(baseline, individual=False):
             profiles.append({'id': 'disabled-igbinary', 'packages': ['php-zts-cli', package],
                              'disabled_extension': 'igbinary'})
     return {'profiles': profiles, 'covered_packages': names,
-            'isolated_runtime_hook_packages': sorted(isolated),
-            'independent_all_extensions': individual}
+            'isolated_runtime_hook_packages': sorted(isolated)}
 
 
 def candidate_only_profiles(baseline, inventory):
@@ -1282,7 +1279,6 @@ def main():
     parser.add_argument('--runtime', choices=tuple(RUNTIMES))
     parser.add_argument('--profile', default='cli')
     parser.add_argument('--list-profiles', action='store_true', help='Print complete-baseline common/independent profile groups without Docker')
-    parser.add_argument('--individual-profiles', action='store_true', help='Also test every extension in an independent upgrade profile')
     parser.add_argument('--disabled-extension', help='Disable this old shared module using the installed phpmod convention before upgrading')
     parser.add_argument('--tls', action='store_true', help='Check native OpenSSL/cURL and Go TLS trust before removing the signed mirror')
     parser.add_argument('--services', action='store_true', help='Check real service lifecycle across core and compatible library updates')
@@ -1303,7 +1299,7 @@ def main():
     if args.list_profiles:
         if not args.baseline_dir:
             parser.error('--list-profiles requires --baseline-dir')
-        print(json.dumps(all_profiles(json.loads((args.baseline_dir / 'baseline.json').read_text()), args.individual_profiles), indent=2))
+        print(json.dumps(all_profiles(json.loads((args.baseline_dir / 'baseline.json').read_text())), indent=2))
         return 0
     if not args.artifacts or not args.baseline_dir or not args.report:
         parser.error('--artifacts, --baseline-dir and --report are required')
@@ -1315,7 +1311,7 @@ def main():
             baseline = load_baseline(args.baseline_dir, args.type, args.php, args.arch)
             profiles = (affected_profiles(baseline) if args.profile == 'auto' and
                         baseline.get('selection', {}).get('mode') == 'affected'
-                        else all_profiles(baseline, args.individual_profiles))
+                        else all_profiles(baseline))
             result = suite(args, baseline, profiles)
         else:
             result = cell(args)

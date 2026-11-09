@@ -261,6 +261,7 @@ class SharedLibraryPlan(unittest.TestCase):
             with patch.dict(namespace, {'compare': Mock(return_value=(manifest(), result))}):
                 planner['prepare'](args)
                 plan = json.loads(Path(args.output).read_text())
+                self.assertEqual(plan['libraries'], [])
                 self.assertEqual(plan['php_requests']['8.4'], {'full': False, 'packages': ['curl'], 'compile': True,
                                                              'reuse_payload': False, 'compile_full': False, 'compile_packages': ['curl']})
                 self.assertEqual(plan['php_requests']['8.5'], {'full': False, 'packages': [], 'compile': False,
