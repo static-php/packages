@@ -225,9 +225,15 @@ def classify():
              '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
-    for kind in formats:
+    run(['php', 'tests/package-iterations.php'])
+    run(['python3', 'tests/upgrade-guards.py'])
+    if glibc:
+        run(['python3', 'tests/forgejo-publication.py'])
+    def read_baseline(kind):
         run(['php', 'tests/package-versions.php', '--type=' + kind])
         baseline(kind, format_stage(kind) / 'baseline', consumers=bool(rebuilt) and kind == formats[-1], abi_libraries=rebuilt)
+    with ThreadPoolExecutor(max_workers=len(formats)) as executor:
+        list(executor.map(read_baseline, formats))
     if rebuilt and glibc:
         share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
     variants_ready = not glibc
@@ -484,11 +490,6 @@ def package():
     environment['SPP_SHARED_LIBRARY_PLAN'] = str(STAGE / kind / 'shared-library-plan.json')
     environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in [
         STAGE / kind / 'baseline/shared-libraries.json', STAGE / 'published-baseline/baseline.json'] if path.is_file()])
-    run(['php', 'tests/package-versions.php', '--type=' + kind])
-    run(['php', 'tests/package-iterations.php'])
-    run(['python3', 'tests/upgrade-guards.py'])
-    if kind == 'deb':
-        run(['python3', 'tests/forgejo-publication.py'])
     run(['php', 'bin/spp', 'package', *flags], env=environment)
     run(['php', 'bin/build-payload', 'verify', '--root', root])
     run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', root,

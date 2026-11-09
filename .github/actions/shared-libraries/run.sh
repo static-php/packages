@@ -51,30 +51,6 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
     trap 'rm -f "$python_tools/python3"; rmdir "$python_tools"' EXIT
 fi
 
-baseline() {
-    local output=$1
-    local args=(--type "$TYPE" --arch "$MATRIX_ARCH" --output "$output")
-    local rebuilt
-    rebuilt=$(python3 -c 'import json; from pathlib import Path; f=Path("stage/library-build-plan.json"); p=json.loads(f.read_text()) if f.is_file() else {}; print(",".join(json.load(open("buildroot/shared-libraries.json"))["libraries"] if p.get("full") else p.get("rebuilt_libraries", [])))')
-    args+=(--abi-libraries "$rebuilt")
-    if [[ -z "$rebuilt" ]]; then
-        args+=(--skip-consumers)
-    fi
-    args+=(--consumer-stream 8.5)
-    if [[ "$TYPE" == rpm ]]; then
-        if [[ "${GLIBC_PIPELINE:-}" == true ]]; then
-            local arch="$MATRIX_ARCH"
-            [[ "$arch" == arm64 ]] && arch=aarch64
-            args+=(--base-url "https://rpm.henderkes.com/$arch/el8"                 --baseline-url "https://rpm.henderkes.com/$arch/el9" --baseline-url "https://rpm.henderkes.com/$arch/el10")
-        else
-            args+=(--host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY")
-        fi
-    else
-        args+=(--host https://git.henderkes.com --password-env FORGEJO_PASSWORD --consumer-password-env FORGEJO_PASSWORD)
-    fi
-    python3 bin/shared-library-plan baseline "${args[@]}"
-}
-
 case "$command" in
     classify|glibc-classify|glibc-record|glibc-payload|glibc-package)
         git config --global --add safe.directory "$PWD"
@@ -146,9 +122,6 @@ case "$command" in
         flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE" --debuginfo)
         [[ -n "$PACKAGES" ]] && flags+=(--packages="$PACKAGES")
         if [[ -n "$ITERATION" ]]; then flags+=(--iteration="$ITERATION"); elif [[ "$BUMP" == true ]]; then flags+=(--bump); fi
-        php tests/package-versions.php --type="$TYPE"
-        php tests/package-iterations.php
-        python3 tests/upgrade-guards.py
         python3 .github/actions/shared-libraries/glibc.py payload
         if [[ "${EXPORT_PAYLOAD_CACHE:-false}" == true && -f stage/payload-cache-key ]]; then
             source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')

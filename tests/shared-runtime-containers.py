@@ -924,8 +924,8 @@ def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True,
             shutil.copy2(HERE / filename, directory / filename)
         if manifest:
             shutil.copy2(manifest, directory / 'manifest.json')
-        resources.prepare(image, kind, helper=True, fixtures=fixtures or fixtures_only)
         runtime = resources.prepare(image, kind, helper=False)
+        resources.prepare(runtime, kind, helper=True, fixtures=fixtures or fixtures_only)
         if fixtures_only:
             container = resources.container(runtime, 'fixtures')
             checked = resources.exec(container, ['python3', '/spp/shared-runtime-containers.py', '--inside', 'fixtures', '--type', kind])

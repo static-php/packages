@@ -152,7 +152,7 @@ class Pipeline(unittest.TestCase):
                         patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
-                self.assertEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
+                self.assertCountEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
                 self.assertTrue(any('seal' in call for call in calls))
