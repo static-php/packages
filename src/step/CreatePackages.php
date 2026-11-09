@@ -591,8 +591,10 @@ class CreatePackages
             }
         }
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        $plan = ($path = getenv('SPP_SHARED_LIBRARY_PLAN')) ? self::migrationBaseline($path) : [];
         foreach (self::$sharedLibraries->libraryIds() as $id) {
-            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null) {
+            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null
+                && (($plan['build_only'] ?? false) || in_array($id, $plan['libraries'] ?? [], true))) {
                 continue;
             }
             $source = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
