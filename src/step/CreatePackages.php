@@ -282,8 +282,22 @@ class CreatePackages
 
     private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
     {
-        if ($name === 'php-zts-runtime-layout' || str_starts_with($name, 'php-zts-lib-')) {
+        if ($name === 'php-zts-runtime-layout') {
             return $type === 'apk' ? 0 : 1;
+        }
+        if (str_starts_with($name, 'php-zts-lib-')) {
+            $minimum = $type === 'apk' ? 0 : 1;
+            $planPath = getenv('SPP_SHARED_LIBRARY_PLAN');
+            if (!$planPath) {
+                return $minimum;
+            }
+            $plan = self::migrationBaseline($planPath);
+            if (($plan['schema'] ?? null) !== 1 || ($plan['type'] ?? null) !== $type) {
+                throw new RuntimeException('Invalid shared-library package plan');
+            }
+            $published = preg_replace('/^\d+:/', '', $plan['published_versions'][substr($name, strlen('php-zts-lib-'))] ?? '');
+            $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
+            return preg_match($pattern, $published, $release) ? max($minimum, (int) $release[1] + 1) : $minimum;
         }
         $paths = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
         $minimum = $type === 'apk' ? 0 : 1;
