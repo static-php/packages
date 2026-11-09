@@ -88,7 +88,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 harness['inside'](args)
                 self.assertTrue(json.loads(output.getvalue().split('SPP_MIGRATION_RESULT=')[-1])['ok'])
                 with patch.dict(scope, {'ordinary_upgrade': lambda *_: packages.update(gcc='14.2.0-r5')}):
-                    with self.assertRaisesRegex(RuntimeError, 'not a no-op'):
+                    harness['inside'](args)
+                with patch.dict(scope, {'ordinary_upgrade': lambda *_: packages.update({'php-zts-cli': '8.2.35-r3'})}):
+                    with self.assertRaisesRegex(RuntimeError, 'changed managed packages.*php-zts-cli'):
                         harness['inside'](args)
 
     def test_broken_old_install_uses_clean_replacement_but_candidate_failures_still_block(self):
