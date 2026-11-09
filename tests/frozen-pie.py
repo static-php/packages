@@ -84,6 +84,18 @@ try {
         self.assertEqual(json.loads((self.downloads / '.spc-meta.json').read_text()), self.snapshot)
         self.assertEqual(list(self.downloads.glob('spp-pie-freeze-*')), [])
 
+    def test_unchanged_archive_uses_published_digest_before_downloading(self):
+        self.freeze()
+        with mock.patch.object(freezer, 'fetch', return_value=json.dumps(self.release).encode()) as fetch, \
+                mock.patch.object(freezer, 'probe', return_value='1.5.3'):
+            self.assertEqual(freezer.freeze(self.downloads)['sha256'], self.sha)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertTrue(fetch.call_args.kwargs['authenticated'])
+
+    def test_corrupt_cached_archive_is_downloaded_again(self):
+        (self.downloads / 'pie.phar').write_bytes(b'partial download')
+        self.assertEqual(self.freeze()['sha256'], self.sha)
+
     def test_normalized_version_still_resolves_its_exact_prefixed_tag(self):
         self.snapshot['pie_version'] = '1.5.3'
         (self.downloads / '.spc-meta.json').write_text(json.dumps(self.snapshot))

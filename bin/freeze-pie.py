@@ -68,9 +68,12 @@ def freeze(downloads, requested=None, php='php'):
     url = asset.get('browser_download_url', '')
     if not url.startswith('https://github.com/php/pie/releases/download/'):
         raise RuntimeError('Invalid frozen PIE asset URL')
-    content = fetch(url)
-    sha256 = hashlib.sha256(content).hexdigest()
     published_digest = asset.get('digest')
+    cached = downloads / 'pie.phar'
+    content = cached.read_bytes() if cached.is_file() else None
+    if content is None or published_digest != 'sha256:' + hashlib.sha256(content).hexdigest():
+        content = fetch(url)
+    sha256 = hashlib.sha256(content).hexdigest()
     if published_digest and published_digest != 'sha256:' + sha256:
         raise RuntimeError('Frozen PIE archive does not match its published SHA256')
     with tempfile.TemporaryDirectory(prefix='spp-pie-freeze-', dir=downloads) as temporary:

@@ -139,14 +139,14 @@ The shared glibc workflow, its DEB wrapper and the Alpine workflow accept these 
 - `architectures` — `x86_64,arm64`; the glibc workflow and DEB wrapper also accept `amd64` for x86_64. EL8 is the fixed glibc producer; there is no `alma_versions` input.
 - `packages` — passed through to `bin/spp` as `--packages=…`. Selective native upgrade baselines download only those consumers, CLI/FPM/FrankenPHP and their managed dependency closure; library-only updates add genuine reverse consumers from native repository metadata. Full requests retain complete baseline coverage. The full published version inventory remains metadata for revision and downgrade checks.
 - `iteration` — passed through as `--iteration=…` and overrides automatic bumping. `bump` defaults to false, including scheduled `spc-download` dispatches; only an explicit manual `bump=true` requests forced revision bumps. Forgejo revision queries paginate the full authenticated registry and cache each page.
-- `publish` — defaults to false: build/test only, without package publication or release-cache writes. Scheduled `spc-download` dispatches set it true.
+- `publish` — defaults to false: build/test only, without package publication or release-cache writes. Scheduled `spc-download` dispatches also keep it false; publication requires an explicit manual request.
 - `debug_tmate` — opens tmate on failure (only after build step; tmate binary is downloaded inline because Alma doesn't ship it).
 
 When the user asks to "rerun for X only", they mean these inputs.
 
 `RunSPC` resolves minor versions through the snapshot's `downloads/.spc-meta.json` and verifies the built binary before packaging. CI requires this metadata; explicit full-version requests remain explicit. Keep the PHP stream used for paths, package tags and Forgejo owners separate from the pinned source release.
 
-`spc-download` runs incremental requests daily. Only an explicit manual `force_full` requests every PHP stream; there is no automatic Monday full rebuild. Compatible library SDKs receive selective input/ABI checks. Automatic dispatch triggers the shared glibc workflow once plus Alpine, not a separate DEB compiler pipeline. Upload downgrade guards still apply.
+`spc-download` restores source archives, checks upstream identities with SPC `download --update`, and downloads only changed or invalid sources. Pinned PHP archives and PIE reuse their verified bytes. Source caches are independent of compiled release caches. `spc-download` runs incremental requests daily. Only an explicit manual `force_full` requests every PHP stream; there is no automatic Monday full rebuild. Compatible library SDKs receive selective input/ABI checks. Automatic dispatch triggers the shared glibc workflow once plus Alpine, not a separate DEB compiler pipeline. Upload downgrade guards still apply.
 
 ## Operational notes
 
