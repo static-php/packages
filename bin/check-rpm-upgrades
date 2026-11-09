@@ -34,7 +34,7 @@ def read_http_file(base_url, location, missing_ok=False):
             if missing_ok and error.code == 404:
                 return None
             if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
-                raise RuntimeError('Cannot read published RPM metadata: HTTP {}'.format(error.code)) from error
+                raise RuntimeError('Cannot read published RPM metadata {}: HTTP {}'.format(request.full_url, error.code)) from error
         except (OSError, http.client.IncompleteRead):
             if attempt == 2:
                 raise
@@ -69,15 +69,24 @@ def read_remote_file(host, directory, location, missing_ok=False):
 
 
 def published_packages(read_file):
-    data = read_file('repodata/repomd.xml', missing_ok=True)
-    if data is None:
-        return []
-    index = ET.fromstring(data)
-    location = index.find('{http://linux.duke.edu/metadata/repo}data[@type="primary"]/{http://linux.duke.edu/metadata/repo}location')
-    if location is None:
-        raise RuntimeError('Missing primary RPM metadata')
-    location = location.attrib['href']
-    data = read_file(location)
+    for attempt in range(3):
+        data = read_file('repodata/repomd.xml', missing_ok=True)
+        if data is None:
+            if attempt:
+                raise RuntimeError('Published RPM index disappeared during refresh')
+            return []
+        index = ET.fromstring(data)
+        location = index.find('{http://linux.duke.edu/metadata/repo}data[@type="primary"]/{http://linux.duke.edu/metadata/repo}location')
+        if location is None:
+            raise RuntimeError('Missing primary RPM metadata')
+        location = location.attrib['href']
+        data = read_file(location, missing_ok=True)
+        if data is not None:
+            break
+        if attempt == 2:
+            raise RuntimeError('Published RPM index references missing metadata after 3 reads: ' + location)
+        print('RPM metadata changed during publication; refreshing repomd.xml', file=sys.stderr, flush=True)
+        time.sleep(attempt + 1)
     if location.endswith('.gz'):
         data = gzip.decompress(data)
     elif location.endswith('.xz'):

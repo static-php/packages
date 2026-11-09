@@ -118,6 +118,19 @@ class UpgradeGuards(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Cannot read'):
                 rpm['read_remote_file']('example.com', '/rpm', 'repodata/repomd.xml', True)
 
+    def test_rpm_refreshes_index_when_publication_replaces_primary_metadata(self):
+        template = '<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/{}.xml.gz"/></data></repomd>'
+        old, new = (template.format(name).encode() for name in ('old', 'new'))
+        primary = b'<metadata xmlns="http://linux.duke.edu/metadata/common"><package><name>php-zts-cli</name><arch>x86_64</arch><version ver="8.6.0~rc5" rel="6"/></package></metadata>'
+        read = Mock(side_effect=[old, None, new, gzip.compress(primary)])
+        with patch.object(rpm_globals['time'], 'sleep'):
+            result = rpm['published_packages'](read)
+        self.assertEqual(result[0]['evr'], '0:8.6.0~rc5-6')
+        self.assertEqual([call.args[0] for call in read.call_args_list],
+                         ['repodata/repomd.xml', 'repodata/old.xml.gz', 'repodata/repomd.xml', 'repodata/new.xml.gz'])
+        with patch.object(rpm_globals['time'], 'sleep'), self.assertRaisesRegex(RuntimeError, 'after 3 reads'):
+            rpm['published_packages'](Mock(side_effect=[old, None] * 3))
+
     def test_rpm_refuses_lower_version(self):
         local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el10'}
         remote = dict(local, version='3.7.0_86.0+ext', evr='0:3.7.0_86.0+ext-1.el10')
