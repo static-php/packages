@@ -30,6 +30,10 @@ AGENT = 'APT-HTTP/1.3 (2.6.1)'
 DEFAULT_PROFILE = 'cli,cgi,fpm,embed,devel,curl,fileinfo,pdo,pdo_sqlite,sqlite3,pgsql,pdo_pgsql,imagick,intl,frankenphp'
 
 
+class BaselineDownloadError(RuntimeError):
+    pass
+
+
 def fetch(url):
     request = urllib.request.Request(url, headers={'User-Agent': AGENT})
     for attempt in range(3):
@@ -41,7 +45,7 @@ def fetch(url):
             if not retry:
                 raise
             if attempt == 2:
-                raise RuntimeError(f'Baseline download failed after 3 attempts: {url}: {error}') from error
+                raise BaselineDownloadError(f'Baseline download failed after 3 attempts: {url}: {error}') from error
             print(f'Baseline download retry {attempt + 1}/2: {url}: {error}', flush=True)
             time.sleep(attempt + 1)
 
@@ -304,6 +308,24 @@ def snapshot_inventory(args):
             'keys': [(name, base64.b64encode(content).decode()) for name, content in keys]}
 
 
+def unavailable_baseline(args, error):
+    architecture = 'aarch64' if args.arch == 'arm64' else 'x86_64'
+    base = (getattr(args, 'base_url', None) or
+            (f'https://rpm.henderkes.com/{architecture}/{getattr(args, "el", "el8")}/' if args.type == 'rpm' else
+             f'https://git.henderkes.com/api/packages/{args.php.replace(".", "")}/' +
+             ('debian/' if args.type == 'deb' else 'alpine/main/php-zts/')))
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
+              'origin': {'publication_url': base, 'real_published': True}, 'packages': [], 'published_packages': [],
+              'keys': [], 'defects': [{'error': str(error)}],
+              'selection': {'profile': args.profile, 'complete': False,
+                            'mode': 'affected' if getattr(args, 'packages', '') or getattr(args, 'library_plan', None) else 'full'},
+              'repository': {'publication_url': base, 'metadata': []}}
+    (output / 'baseline.json').write_text(json.dumps(result, indent=2) + '\n')
+    print('::warning::Published baseline unavailable; validating the replacement: ' + str(error), flush=True)
+
+
 def freeze(args):
     snapshot = getattr(args, 'inventory', None)
     if snapshot:
@@ -311,12 +333,15 @@ def freeze(args):
         if (captured.get('schema'), captured.get('type'), captured.get('php_stream'), captured.get('architecture')) != (1, args.type, args.php, args.arch):
             raise RuntimeError('Published inventory snapshot does not match this target')
         if captured.get('error'):
-            raise RuntimeError('Published inventory capture failed: ' + captured['error'])
+            return unavailable_baseline(args, captured['error'])
         base, inventory = captured['base'], captured['inventory']
         metadata = {name: base64.b64decode(content) for name, content in captured['metadata'].items()}
         keys = [(name, base64.b64decode(content)) for name, content in captured['keys']]
     else:
-        base, inventory, metadata, keys = published_inventory(args)
+        try:
+            base, inventory, metadata, keys = published_inventory(args)
+        except (RuntimeError, ValueError, ET.ParseError, urllib.error.URLError, TimeoutError) as error:
+            return unavailable_baseline(args, error)
     profile = {name.strip().removeprefix('php-zts-').replace('_', '-') for name in args.profile.split(',') if name.strip()}
     requested = {name.strip() for name in getattr(args, 'packages', '').split(',') if name.strip()}
     library_plan = getattr(args, 'library_plan', None)
@@ -335,7 +360,7 @@ def freeze(args):
         for defect in defects:
             print('::warning::Published baseline defect: ' + defect['package'] + ': ' + defect['error'])
         if 'php-zts-cli' not in selected and not library_plan:
-            raise RuntimeError('Published baseline has no matching CLI package')
+            return unavailable_baseline(args, 'Published baseline has no matching CLI package')
         for name, content in metadata.items():
             target = output / 'metadata' / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -347,8 +372,15 @@ def freeze(args):
             target.write_bytes(content)
             key_paths.append(str(target.relative_to(output)))
         (output / 'artifacts').mkdir(exist_ok=True)
+        def download_old(package):
+            try:
+                return download_package(package, args.type, output, stage)
+            except (BaselineDownloadError, urllib.error.URLError, TimeoutError) as error:
+                defects.append({'package': package['name'], 'error': str(error)})
+                print('::warning::Published archive unavailable: ' + package['name'] + ': ' + str(error), flush=True)
+                return None
         with ThreadPoolExecutor(max_workers=2) as downloads:
-            packages = list(downloads.map(lambda package: download_package(package, args.type, output, stage), selected.values()))
+            packages = [package for package in downloads.map(download_old, selected.values()) if package is not None]
         retained = {package['path'] for package in packages}
         for path in (output / 'artifacts').iterdir():
             if str(path.relative_to(output)) not in retained:
@@ -356,7 +388,7 @@ def freeze(args):
         result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'origin': {'publication_url': base, 'real_published': True},
                   'packages': packages, 'published_packages': inventory, 'keys': key_paths, 'defects': defects,
-                  'selection': {'profile': ','.join(sorted(profile)), 'complete': 'all' in profile,
+                  'selection': {'profile': ','.join(sorted(profile)), 'complete': 'all' in profile and not defects,
                                 'mode': 'affected' if requested or library_plan else 'full',
                                 'include_debug': args.include_debug,
                                 'scope': 'Latest managed packages for this PHP stream and architecture, with managed dependency closure'},

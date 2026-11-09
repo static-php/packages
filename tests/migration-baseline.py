@@ -44,6 +44,53 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_failed_old_inventory_allows_new_repository_validation(self):
+        for kind in ('rpm', 'deb', 'apk'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                snapshot = root / 'inventory.json'
+                snapshot.write_text(json.dumps({'schema': 1, 'type': kind, 'php_stream': '8.3',
+                    'architecture': 'x86_64', 'error': 'Old repository index is broken'}))
+                args = SimpleNamespace(type=kind, php='8.3', arch='x86_64', profile='all',
+                                       output=root / 'baseline', inventory=snapshot)
+                helper['freeze'](args)
+                result = json.loads((args.output / 'baseline.json').read_text())
+                self.assertEqual(result['packages'], [])
+                self.assertFalse(result['selection']['complete'])
+                self.assertTrue(result['origin']['real_published'])
+                args.library_plan = root / 'plan.json'
+                helper['freeze'](args)
+                self.assertEqual(json.loads((args.output / 'baseline.json').read_text())['selection']['mode'], 'affected')
+
+    def test_missing_old_archive_does_not_fail_replacement_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / 'inventory.json'
+            url = 'https://example.test/old-cli.apk'
+            package = {'name': 'php-zts-cli', 'version': '8.3.36-r3', 'architecture': 'x86_64',
+                       'publication_url': url, 'published_checksum': {'algorithm': 'apk-control-sha1', 'value': 'Q1missing'}}
+            snapshot.write_text(json.dumps({'schema': 1, 'type': 'apk', 'php_stream': '8.3', 'architecture': 'x86_64',
+                'base': 'https://example.test/', 'inventory': [package], 'metadata': {}, 'keys': []}))
+            args = SimpleNamespace(type='apk', php='8.3', arch='x86_64', profile='all', packages='',
+                                   include_debug=False, output=root / 'baseline', inventory=snapshot)
+            def missing(_):
+                raise urllib.error.HTTPError(url, 404, 'Old archive missing', {}, None)
+            with patch.dict(helper['freeze'].__globals__, {'fetch': missing}):
+                helper['freeze'](args)
+            result = json.loads((args.output / 'baseline.json').read_text())
+            self.assertEqual(result['packages'], [])
+            self.assertEqual(result['published_packages'], [package])
+            self.assertFalse(result['selection']['complete'])
+
+    def test_malformed_live_old_index_uses_replacement_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = SimpleNamespace(type='deb', php='8.3', arch='x86_64', profile='all', output=Path(temporary))
+            def broken(_):
+                raise ValueError('Malformed old metadata')
+            with patch.dict(helper['freeze'].__globals__, {'published_inventory': broken}):
+                helper['freeze'](args)
+            self.assertEqual(json.loads((args.output / 'baseline.json').read_text())['packages'], [])
+
     def test_snapshot_reuses_verified_archives_without_live_reads(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
