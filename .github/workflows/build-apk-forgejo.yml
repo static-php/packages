@@ -156,7 +156,7 @@ jobs:
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Compute source and toolchain fingerprint
                 id: fingerprint
@@ -257,7 +257,7 @@ jobs:
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: ${{ steps.composer-cache.outputs.cache-primary-key }}
 
     compute-build-matrix:
         needs: [setup-matrix, build-libs]
@@ -376,7 +376,7 @@ jobs:
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Build and validate native APK packages
                 uses: ./.github/actions/apk-packages
@@ -395,7 +395,7 @@ jobs:
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: ${{ steps.composer-cache.outputs.cache-primary-key }}
 
     publish:
         name: Publish (apk ${{ matrix.target }})
