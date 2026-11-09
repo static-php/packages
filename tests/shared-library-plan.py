@@ -448,9 +448,14 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertFalse(requests['8.5']['full'])
         self.assertEqual(requests['8.5']['packages'], [])
 
-    def test_manual_bump_rejects_unpublished_unselected_seed_changes(self):
+    def test_manual_bump_leaves_compatible_unselected_seed_changes_unpublished(self):
+        plan = self.manual_plan(changed=('other',))
+        self.assertEqual(plan['libraries'], ['fixture'])
+        self.assertFalse(plan['abi_break'])
+
+    def test_manual_bump_rejects_unselected_abi_breaks(self):
         with self.assertRaisesRegex(RuntimeError, 'outside the requested set: other'):
-            self.manual_plan(changed=('other',))
+            self.manual_plan(changed=('other',), breaking=('other',))
 
     def test_manual_bump_rejects_unknown_rebuilt_libraries(self):
         with self.assertRaisesRegex(RuntimeError, 'Unknown selected libraries: missing'):

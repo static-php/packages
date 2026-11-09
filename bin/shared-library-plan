@@ -772,7 +772,7 @@ def prepare(args):
     if specified:
         selected = set(specified) | rebuilt
         allowed = selected | set(reverse_closure(current, selected.intersection(abi_roots)))
-        unexpected = (set(sources) | abi_roots) - allowed
+        unexpected = abi_roots - allowed
         if unexpected:
             raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
     else:
@@ -1336,14 +1336,14 @@ def baseline_single(args):
                 consumers[stream].update(versions)
                 consumer_versions[stream].update(versions)
             apk_packages = {}
-            if args.type == 'apk':
+            if args.type == 'apk' and packages:
                 native = runpy.run_path(str(ROOT / 'freeze-migration-baseline.py'))
                 base = args.host.rstrip('/') + '/api/packages/' + args.owner + '/alpine/main/php-zts/'
                 inventory, _, _ = native['apk_index'](base, architecture)
                 apk_packages = {(item['name'], item['version']): item for item in inventory}
                 packages = [item for item in packages if (item['name'], item['version']) in apk_packages]
             names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
-            for name in sorted(names):
+            def fetch_package(name):
                 versions = [item for item in packages if item['name'] == name]
                 versions.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, a['version'], b['version'])), reverse=True)
                 for item in versions:
@@ -1355,12 +1355,11 @@ def baseline_single(args):
                         response = requests.get(url, auth=auth, timeout=30)
                         response.raise_for_status()
                         files = response.json()
-                    matched = False
                     for file in files:
                         if args.type == 'deb' and architecture not in file.get('name', '') and not file.get('name', '').endswith('_all.deb'):
                             continue
                         url = file['url'] if args.type == 'apk' else '{}/{}/-/packages/{}/{}/{}/files/{}'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'], file['id'])
-                        path = temporary / ('package.' + args.type)
+                        path = temporary / (hashlib.sha256(name.encode()).hexdigest() + '.' + args.type)
                         with requests.get(url, auth=auth, timeout=60, stream=True) as download:
                             download.raise_for_status()
                             with path.open('wb') as output:
@@ -1373,23 +1372,26 @@ def baseline_single(args):
                             raise RuntimeError('Published package headers do not match registry')
                         if actual_arch not in [architecture, 'all', 'noarch']:
                             continue
-                        item['archive'], item['archive_sha256'] = retain_archive(destination, path, file['name'])
-                        item['debug_required'] = any(package['name'] == name + '-debuginfo' for package in packages)
-                        if any(package['name'] == name + '-debuginfo' and package['version'] == item['version'] for package in packages):
-                            item['debug_archive'] = {'type': args.type, 'name': name + '-debuginfo', 'package_version': item['version'],
-                                                     'architecture': actual_arch, 'host': args.host, 'owner': args.owner, 'password_env': args.password_env}
-                        if name == 'php-zts-runtime-layout':
-                            layout_metadata = archive_runtime_json(path, args.type, 'usr/share/php-zts/runtime-layout.json')
-                            if layout_metadata is None:
-                                raise RuntimeError('Published runtime layout has no metadata')
-                            layout_metadata.update(package_version=item['version'], archive=item['archive'], archive_sha256=item['archive_sha256'], complete=True)
-                        elif not extract_metadata(path, args.type, destination, abi_libraries):
-                            raise RuntimeError('Published library has no ABI metadata: ' + name)
-                        selected[name] = item
-                        matched = True
-                        break
-                    if matched:
-                        break
+                        return name, item, path, file['name'], actual_arch
+                return None
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for result in pool.map(fetch_package, sorted(names)):
+                    if result is None:
+                        continue
+                    name, item, path, filename, actual_arch = result
+                    item['archive'], item['archive_sha256'] = retain_archive(destination, path, filename)
+                    item['debug_required'] = any(package['name'] == name + '-debuginfo' for package in packages)
+                    if any(package['name'] == name + '-debuginfo' and package['version'] == item['version'] for package in packages):
+                        item['debug_archive'] = {'type': args.type, 'name': name + '-debuginfo', 'package_version': item['version'],
+                                                 'architecture': actual_arch, 'host': args.host, 'owner': args.owner, 'password_env': args.password_env}
+                    if name == 'php-zts-runtime-layout':
+                        layout_metadata = archive_runtime_json(path, args.type, 'usr/share/php-zts/runtime-layout.json')
+                        if layout_metadata is None:
+                            raise RuntimeError('Published runtime layout has no metadata')
+                        layout_metadata.update(package_version=item['version'], archive=item['archive'], archive_sha256=item['archive_sha256'], complete=True)
+                    elif not extract_metadata(path, args.type, destination, abi_libraries):
+                        raise RuntimeError('Published library has no ABI metadata: ' + name)
+                    selected[name] = item
     aggregate = empty_manifest()
     aggregate['consumers'] = {stream: sorted(names) for stream, names in consumers.items()}
     aggregate['consumer_versions'] = consumer_versions
