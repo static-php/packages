@@ -70,8 +70,11 @@ def published_records(manifests, name, stem, arch):
         if data.get('type', 'apk') != 'apk':
             continue
         packages = list(data.get('packages', []))
-        if name.endswith('-debuginfo') and not any(package.get('name') == name for package in packages):
+        if not any(package.get('name') == name for package in packages):
             packages += data.get('published_packages', [])
+        for consumers in data.get('consumer_versions', {}).values():
+            if name in consumers:
+                packages.append({'name': name, 'version': consumers[name], 'architecture': data.get('architecture')})
         for package in packages:
             published = package.get('version', '')
             if (package.get('name') != name or package.get('architecture') != arch
@@ -79,7 +82,7 @@ def published_records(manifests, name, stem, arch):
                 continue
             relative = package.get('path', package.get('archive'))
             checksum = package.get('sha256', package.get('archive_sha256'))
-            if not relative and package.get('publication_url') and package.get('published_checksum'):
+            if not relative and name.endswith('-debuginfo') and package.get('publication_url') and package.get('published_checksum'):
                 freezer = runpy.run_path(str(Path(__file__).with_name('freeze-migration-baseline.py')))
                 output = manifest.parent / 'reuse-published'
                 output.mkdir(exist_ok=True)
@@ -92,6 +95,7 @@ def published_records(manifests, name, stem, arch):
                 relative = str(Path('reuse-published') / downloaded['path'])
                 checksum = downloaded['sha256']
             if not relative or not checksum:
+                matches.append((int(published.rsplit('-r', 1)[1]), None, published))
                 continue
             source = (manifest.parent / relative).resolve()
             if not source.is_relative_to(manifest.parent.resolve()) or not source.is_file() or sha256(source) != checksum:

@@ -101,6 +101,21 @@ class ReusePublished(unittest.TestCase):
                           return_value={'download_package': missing, 'BaselineDownloadError': RuntimeError}):
             self.assertEqual(HELPER['select'](self.new, [self.manifest], with_debug=True), {'revision': 4})
 
+    def test_missing_old_runtime_uses_published_version_without_requiring_old_installation(self):
+        archive(self.new)
+        self.manifest.write_text(json.dumps({'type': 'apk', 'architecture': 'x86_64',
+            'consumer_versions': {'8.3': {'php-zts-cli': '8.3.36-r3'}}}))
+        self.assertEqual(self.select(), {'revision': 4})
+
+    def test_metadata_does_not_force_bump_when_verified_archive_is_available(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        data = json.loads(self.manifest.read_text())
+        data.update(architecture='x86_64', consumer_versions={'8.3': {'php-zts-cli': '8.3.36-r3'}})
+        self.manifest.write_text(json.dumps(data))
+        self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
+
     def test_tampered_baseline_archive_is_rejected(self):
         archive(self.old, revision=3)
         archive(self.new)
