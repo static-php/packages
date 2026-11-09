@@ -408,7 +408,6 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
     skipped = {}
     for index, pkg_file in enumerate(files, 1):
         name, version, arch = package_metadata(pkg_file, pkg_type)
-        remember_local_archive(pkg_file, pkg_type)
         print(f"Checking {index}/{len(files)}: {host} {owner}/{name} {version} {arch}", flush=True)
         key = (re.sub(r'-debuginfo$', '', name), version, arch)
         candidates.append((pkg_file, key))
@@ -418,6 +417,7 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
             try:
                 if not version_is_newer(pkg_type, published['version'], version):
                     if not version_is_newer(pkg_type, version, published['version']):
+                        remember_local_archive(pkg_file, pkg_type)
                         archives = remote_package_archives(host, owner, password, pkg_type, name, published['version'])
                         if not archives:
                             raise RuntimeError(f"Cannot verify published archive headers for {name} {published['version']}")
@@ -535,6 +535,7 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
     path = Path(pkg_file)
     name, version, arch = package_metadata(path, pkg_type)
     digest = archive_sha256(path)
+    remember_local_archive(path, pkg_type)
     print(f"Publishing: {host} {owner}/{name} {version} {arch}", flush=True)
     packages = get_remote_packages(host, owner, password, pkg_type, name)
     allowed = verify_upload_versions(host, owner, password, pkg_type, [path], packages)
