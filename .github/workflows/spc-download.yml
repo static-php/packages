@@ -244,6 +244,16 @@ jobs:
                 if: steps.diff.outputs.any_change == 'true' || github.event_name == 'workflow_dispatch'
                 run: |
                     tar -czf downloads.tar.gz -C downloads .
+                    python3 .github/actions/shared-libraries/source-snapshot.py inputs
+
+            -   name: Upload frozen source inputs
+                if: steps.diff.outputs.any_change == 'true' || github.event_name == 'workflow_dispatch'
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: downloads-inputs
+                    path: downloads-inputs.tar.gz
+                    compression-level: 0
+                    retention-days: 14
 
             -   name: Upload downloads directory
                 if: steps.diff.outputs.any_change == 'true' || github.event_name == 'workflow_dispatch'

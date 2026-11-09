@@ -351,6 +351,7 @@ def execute(root, buildroot, plan, package_type, command=None):
             command.append("--libraries=" + ",".join(selected))
     try:
         if ran:
+            subprocess.run(['python3', str(Path(__file__).with_name('source-snapshot.py')), 'materialize', '--root', str(root)], check=True)
             spec = importlib.util.spec_from_file_location("pinned_library_source", Path(__file__).with_name("pinned-source.py"))
             pinned = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(pinned)

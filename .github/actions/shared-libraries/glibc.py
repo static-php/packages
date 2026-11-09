@@ -519,6 +519,7 @@ def payload():
             compile_packages = ''
         if compile_requested:
             preflight_consumers(stream, package_type, compile_packages)
+            run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize'])
             flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + package_type, '--debuginfo']
             if compile_packages:
                 flags += ['--packages=' + compile_packages]

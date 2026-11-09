@@ -628,7 +628,7 @@ class WorkflowContractTests(unittest.TestCase):
         for name, data in self.workflows():
             steps = data['jobs']['build-libs']['steps']
             names = [step['name'] for step in steps]
-            self.assertLess(names.index('Extract source snapshot'), names.index('Compute source and toolchain fingerprint'), name)
+            self.assertLess(names.index('Download pinned source snapshot'), names.index('Compute source and toolchain fingerprint'), name)
 
     def test_every_job_uses_the_same_resolved_source_snapshot(self):
         for name, data in self.workflows():
@@ -636,7 +636,8 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn('downloads-run-id', setup['outputs'])
             for job_name in (['build-libs', 'build-payload'] if 'rpm' in name else ['build-libs', 'build']):
                 step = next(step for step in data['jobs'][job_name]['steps'] if step['name'] == 'Download pinned source snapshot')
-                self.assertEqual(step['with']['run_id'], '${{ needs.setup-matrix.outputs.downloads-run-id }}', name)
+                self.assertIn('source-snapshot.py fetch', step['run'])
+                self.assertEqual(data['jobs'][job_name]['env']['SOURCE_RUN_ID'], '${{ needs.setup-matrix.outputs.downloads-run-id }}', name)
 
     def test_planned_full_build_overrides_manual_package_filter(self):
         for name, data in self.workflows():

@@ -202,17 +202,8 @@ jobs:
                 with:
                     persist-credentials: false
             -   name: Download pinned source snapshot
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            -   name: Extract source snapshot
                 run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
+                    python3 .github/actions/shared-libraries/source-snapshot.py fetch
                     python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
             -   name: Log in to GHCR and pull builder
                 env:
@@ -411,18 +402,8 @@ jobs:
                     persist-credentials: false
             -   name: Download pinned source snapshot
                 if: matrix.library-only != true
-                uses: dawidd6/action-download-artifact@ac66b43f0e6a346234dd65d4d0c8fbb31cb316e5 # v11
-                with:
-                    workflow: spc-download.yml
-                    name: downloads-tarball
-                    search_artifacts: true
-                    run_id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            -   name: Extract source snapshot
-                if: matrix.library-only != true
                 run: |
-                    mkdir -p downloads
-                    tar --no-same-owner -xzf downloads.tar.gz -C downloads
-                    rm downloads.tar.gz
+                    python3 .github/actions/shared-libraries/source-snapshot.py fetch
                     python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
             -   name: Log in to GHCR and pull builder
                 env:
