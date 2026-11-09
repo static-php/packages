@@ -45,6 +45,7 @@ permissions:
 concurrency:
     group: shared-publish-${{ inputs.format }}-${{ inputs.target }}
     cancel-in-progress: false
+    queue: max
 
 defaults:
     run:

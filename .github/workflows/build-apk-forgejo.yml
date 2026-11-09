@@ -48,6 +48,7 @@ permissions:
 concurrency:
     group: ${{ inputs.publish == true && 'shared-packages-apk' || format('shared-packages-apk-test-{0}', github.run_id) }}
     cancel-in-progress: false
+    queue: max
 
 jobs:
     setup-matrix:

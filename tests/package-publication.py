@@ -19,6 +19,12 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_publication_and_builds_queue_without_replacing_waiting_runs(self):
+        for name in ('publish-package-cohort.yml', 'build-rpm-modular-packages.yml', 'build-apk-forgejo.yml'):
+            workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
+            self.assertEqual(workflow['concurrency']['queue'], 'max')
+            self.assertFalse(workflow['concurrency']['cancel-in-progress'])
+
     def test_artifact_api_paginates_without_the_gh_executable(self):
         requests = []
         def response(request, timeout):
@@ -349,7 +355,7 @@ class WorkflowContracts(unittest.TestCase):
             if name != 'build-apk-forgejo.yml':
                 self.assertEqual(job['with']['package-image-digest'], '${{ matrix.package-image-digest }}')
         self.assertEqual(self.publisher['concurrency'], {
-            'group': 'shared-publish-${{ inputs.format }}-${{ inputs.target }}', 'cancel-in-progress': False})
+            'group': 'shared-publish-${{ inputs.format }}-${{ inputs.target }}', 'cancel-in-progress': False, 'queue': 'max'})
         self.assertNotIn('container', self.publisher['jobs']['publish-apk'])
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")
