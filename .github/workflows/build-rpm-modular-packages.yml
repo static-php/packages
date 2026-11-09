@@ -3,6 +3,11 @@ name: Build shared EL8 RPM and DEB packages
 on:
     workflow_dispatch:
         inputs:
+            formats:
+                description: "Package formats to validate and publish"
+                type: choice
+                options: ["rpm,deb", "rpm", "deb"]
+                default: "rpm,deb"
             mode:
                 description: "Full manual build or incremental source build plan"
                 type: choice
@@ -40,6 +45,10 @@ on:
                 default: false
     workflow_call:
         inputs:
+            formats:
+                type: string
+                required: false
+                default: "rpm,deb"
             mode:
                 type: string
                 required: false
@@ -360,15 +369,16 @@ jobs:
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                     PHP_VERSIONS: ${{ inputs.php_versions }}
+                    FORMATS: ${{ inputs.formats || 'rpm,deb' }}
                 run: |
                     set -euo pipefail
                     succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
                         --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last | select(test("^Build libs shared \\("))' \
                         | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
-                        --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
+                        --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
-                        --php-versions "$PHP_VERSIONS" --succeeded '' --sdk-succeeded "$succeeded" \
+                        --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded '' --sdk-succeeded "$succeeded" \
                         | sed -E 's/^(matrix|any)=/package-\1=/' >> "$GITHUB_OUTPUT"
 
     build-payload:
@@ -515,6 +525,7 @@ jobs:
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                     PHP_VERSIONS: ${{ inputs.php_versions }}
+                    FORMATS: ${{ inputs.formats || 'rpm,deb' }}
                 run: |
                     set -euo pipefail
                     jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
@@ -522,7 +533,7 @@ jobs:
                     succeeded=$(printf '%s\n' "$jobs" | sed -nE 's/^Build payload \(([^ ]+) php([^)]+)\)$/\1 \2/p' | sort -u)
                     sdks=$(printf '%s\n' "$jobs" | sed -nE 's/^Build libs shared \(([^)]+)\)$/\1/p' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
-                        --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" --sdk-succeeded "$sdks" >> "$GITHUB_OUTPUT"
+                        --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" --sdk-succeeded "$sdks" >> "$GITHUB_OUTPUT"
 
     package:
         name: Package and upgrade (${{ matrix.type }} ${{ matrix.target }} php${{ matrix.php-version }})

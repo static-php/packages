@@ -249,11 +249,13 @@ def main():
     mat.add_argument("--plans", type=Path, required=True)
     mat.add_argument("--php-versions", default="")
     mat.add_argument("--succeeded")
+    mat.add_argument("--formats", choices=("rpm,deb", "rpm", "deb"), default="rpm,deb")
     packages = sub.add_parser("packages")
     packages.add_argument("--plans", type=Path, required=True)
     packages.add_argument("--succeeded", required=True)
     packages.add_argument("--sdk-succeeded")
     packages.add_argument("--php-versions", default="")
+    packages.add_argument("--formats", choices=("rpm,deb", "rpm", "deb"), default="rpm,deb")
     merge = sub.add_parser("assemble")
     merge.add_argument("--source", type=Path, required=True)
     merge.add_argument("--destination", type=Path, required=True)
@@ -359,7 +361,7 @@ def main():
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
         publishing = [dict(target, type=kind, **{"package-image": target["package_images"][kind],
-                      "package-image-digest": image_digest(target["package_images"][kind])}) for target in targets for kind in ["rpm", "deb"]
+                      "package-image-digest": image_digest(target["package_images"][kind])}) for target in targets for kind in args.formats.split(',')
                       if kind not in target.get("format_selection", {}) or target["format_selection"][kind].get("libraries") or any(request.get("full") or request.get("packages") for request in target["format_selection"][kind].get("php_requests", {}).values())] if any("package_images" in target for target in targets) else targets
         emit("publish-matrix", {"include": publishing})
         emit("publish-any", str(bool(publishing)).lower())
@@ -372,7 +374,7 @@ def main():
             inline = sdk_succeeded is not None and value["target"] in sdk_succeeded and value.get("payload_stream") == value["php-version"]
             if not inline and value["target"] + " " + value["php-version"] not in succeeded:
                 continue
-            for kind in ["rpm", "deb"]:
+            for kind in args.formats.split(','):
                 selection = value.get("format_selection", {}).get(kind)
                 request = selection.get("php_requests", {}).get(value["php-version"]) if selection is not None else None
                 if selection is not None and not (request and (request.get("full") or request.get("packages"))):
@@ -383,7 +385,7 @@ def main():
         for target in target_values:
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
             plan = json.loads(path.read_text())
-            for kind in ["rpm", "deb"]:
+            for kind in args.formats.split(','):
                 selection = plan.get("format_selection", {}).get(kind, plan)
                 if not any(request.get("full") or request.get("packages") for request in selection.get("php_requests", {}).values()) and selection.get("libraries"):
                     includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": "8.5", "packages": "", "library-only": True}))

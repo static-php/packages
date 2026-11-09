@@ -48,7 +48,9 @@ def failure_reason(error):
         if not any(line.strip() for line in lines):
             lines = ['Command failed: ' + ' '.join(command[:5] if command[:3] == ['apk', 'version', '-t'] else command[:3])]
         else:
-            errors = [i for i, line in enumerate(lines) if re.match(r'^(?:ERROR:|Error:|E:)', line)]
+            errors = [i for i, line in enumerate(lines)
+                      if re.match(r'^(?:ERROR:|Error:|E:)', line)
+                      or re.search(r'\b(?:Depends|PreDepends|Conflicts|Breaks):', line)]
             lines = lines[errors[0]:] if errors else lines[-6:]
     return ' | '.join(line.strip() for line in lines if line.strip())[:800] or 'No error details recorded'
 

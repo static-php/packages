@@ -338,6 +338,29 @@ class BaselineCapture(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [packages[0]], {'frankenphp'})
 
+    def test_deb_index_preserves_embed_soname_dependency_and_provider(self):
+        for arch in ('amd64', 'arm64'):
+            with self.subTest(arch=arch):
+                records = [
+                    ('frankenphp', 'Depends: libphp-zts-85.so'),
+                    ('php-zts-embed', 'Provides: libphp-zts-85.so\nDepends: php-zts-cli'),
+                    ('php-zts-cli', 'Depends: libc6'),
+                ]
+                index = '\n\n'.join(
+                    f'Package: {name}\nVersion: 1-1\nArchitecture: {arch}\n{fields}\n'
+                    f'Filename: {name}.deb\nSHA256: checksum'
+                    for name, fields in records).encode()
+                base = 'https://example.test/'
+                replies = {base + f'dists/php-zts/main/binary-{arch}/Packages': index,
+                           base + 'dists/php-zts/main/binary-all/Packages': b'',
+                           base + 'repository.key': b'key'}
+                with patch.dict(helper['deb_index'].__globals__, {'fetch': replies.__getitem__}):
+                    packages, _, _ = helper['deb_index'](base, arch)
+                self.assertEqual(packages[0]['requires'], ['libphp-zts-85.so'])
+                self.assertEqual(packages[1]['provides'], ['libphp-zts-85.so'])
+                self.assertEqual(set(helper['select_packages']('deb', packages, {'frankenphp'})),
+                                 {'frankenphp', 'php-zts-embed', 'php-zts-cli'})
+
     def test_latest_selection_uses_native_comparator(self):
         packages = [{'name': 'php-zts-cli', 'version': version} for version in ['8.6.0~rc4-3', '8.6.0-1']]
         scope = helper['select_packages'].__globals__

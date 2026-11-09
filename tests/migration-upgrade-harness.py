@@ -182,6 +182,14 @@ class MigrationUpgradeHarness(unittest.TestCase):
         self.assertIn('missing-runtime (no such package)', reason)
         self.assertNotIn('Installing', reason)
 
+    def test_failure_reason_keeps_apt_dependency_before_generic_error(self):
+        error = ('Command failed: apt-get install frankenphp\n' + 'Reading package lists...\n' * 2000
+                 + ' frankenphp : Depends: libphp-zts-85.so but it is not installable\n'
+                 + 'E: Unable to correct problems, you have held broken packages.\n')
+        reason = harness['failure_reason'](error)
+        self.assertIn('frankenphp : Depends: libphp-zts-85.so but it is not installable', reason)
+        self.assertNotIn('Reading package lists', reason)
+
     def test_replacement_noop_check_excludes_tools_installed_by_phpize_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

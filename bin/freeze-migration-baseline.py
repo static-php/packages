@@ -141,7 +141,7 @@ def deb_index(base, architecture):
         for fields in paragraphs(data.decode()):
             if fields.get('Architecture') not in (architecture, 'all'):
                 continue
-            names = lambda value: re.findall(r'\b(?:php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
+            names = lambda value: re.findall(r'\b(?:(?:lib)?php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
             packages.append({'name': fields['Package'], 'version': fields['Version'],
                              'architecture': fields['Architecture'],
                              'requires': names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
