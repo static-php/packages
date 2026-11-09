@@ -120,7 +120,7 @@ case "$command" in
             cp -a stage/abi/. buildroot/usr/share/php-zts/libraries/abi/
         fi
         mkdir -p dist/"$TYPE"
-        if [[ -d stage/libraries ]]; then cp stage/libraries/*."$TYPE" dist/"$TYPE"/; fi
+        if [[ -d stage/libraries ]]; then find stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;; fi
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi
         flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE" --debuginfo)
         [[ -n "$PACKAGES" ]] && flags+=(--packages="$PACKAGES")
