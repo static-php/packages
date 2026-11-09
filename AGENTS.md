@@ -16,7 +16,7 @@ Builds RPM/DEB/APK packages (PHP toolchain, gcc) via GitHub Actions, using repro
   - `publish-packages.yml` — publishes one selected format (`rpm`, `deb` or `apk`) from a completed default-branch `build_run_id`, without compiling or repackaging. RPM and DEB use the same shared EL8 build run; APK uses its Alpine run.
   - `publish-package-cohort.yml` — reusable publisher called by both the build workflows and `publish-packages.yml` with `secrets: inherit`. It verifies receipts, signs packages and checks current repository upgrades. Its EL8/Debian container job and Alpine host job share publication steps through a YAML anchor.
   - `build-images.yml` — builds the EL8 and Alpine producer images and Debian packaging image.
-  - `spc-download.yml` — produces a small `downloads-inputs` artifact for planning/cache identity and the complete `downloads-tarball` for compilation. `source-snapshot.py` downloads inputs first from the pinned run; older runs fall back to their complete artifact. Actual compilation materializes that same full snapshot before source selection, preserving all existing source-byte checks.
+  - `spc-download.yml` — produces a small `downloads-inputs` artifact for planning/cache identity and the complete `downloads-tarball` for compilation. `source-snapshot.py` downloads inputs first from the pinned run; older runs fall back to their complete artifact. PHP and cold SDK compilation materialize that same full snapshot. Selective library compilation fetches only its recorded library sources and verifies their hashes; it does not fetch unused extension archives.
   - `zizmor.yml` — workflow security audit.
 
 ## Builder containers

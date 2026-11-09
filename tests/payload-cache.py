@@ -156,25 +156,33 @@ class PayloadCache(unittest.TestCase):
         self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
 
     def test_library_projection_keeps_sealed_bytes_without_php_consumers(self):
-        payload = self.root / 'sdk'
-        self.fixture(payload, 1, php=True)
-        cache.write(payload / 'shared-libraries.json', self.manifest)
-        original = cache.read(payload / 'build-payload.json')
-        record, manifest, excluded = cache.packaging_projection(payload, cache.read(payload / 'build-payload.json'),
-            cache.read(payload / 'shared-libraries.json'), set(), library_selection={'fixture'})
-        selected = self.root / 'selected'
-        def ignore(directory, names):
-            return [name for name in names if str((Path(directory) / name).relative_to(payload)) in excluded]
-        shutil.copytree(payload, selected, symlinks=True, ignore=ignore)
-        cache.write(selected / 'build-payload.json', record)
-        cache.write(selected / 'shared-libraries.json', manifest)
-        self.assertFalse((selected / 'bin/php').exists())
-        self.assertFalse((selected / 'modules/imagick-zts-86.so').exists())
-        self.assertEqual(record['prepared']['lib/libfixture.so.1'], original['prepared']['lib/libfixture.so.1'])
-        verify = ['php', ROOT / 'bin/build-payload', 'verify', '--root', selected]
-        subprocess.run(verify, check=True, stdout=subprocess.DEVNULL)
-        (selected / 'lib/libfixture.so.1').write_bytes(b'tampered library')
-        self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
+        for sealed in [True, False]:
+            payload = self.root / ('sdk-' + str(sealed))
+            self.fixture(payload, 1, php=True)
+            cache.write(payload / 'shared-libraries.json', self.manifest)
+            original = cache.read(payload / 'build-payload.json')
+            if not sealed:
+                unprepared = dict(original, state='recorded')
+                unprepared.pop('prepared', None)
+                cache.write(payload / 'build-payload.json', unprepared)
+            record, manifest, excluded = cache.packaging_projection(payload, cache.read(payload / 'build-payload.json'),
+                cache.read(payload / 'shared-libraries.json'), set(), library_selection={'fixture'})
+            selected = self.root / ('selected-' + str(sealed))
+            def ignore(directory, names):
+                return [name for name in names if str((Path(directory) / name).relative_to(payload)) in excluded]
+            shutil.copytree(payload, selected, symlinks=True, ignore=ignore)
+            cache.write(selected / 'build-payload.json', record)
+            cache.write(selected / 'shared-libraries.json', manifest)
+            self.assertFalse((selected / 'bin/php').exists())
+            self.assertFalse((selected / 'modules/imagick-zts-86.so').exists())
+            if sealed:
+                self.assertEqual(record['prepared']['lib/libfixture.so.1'], original['prepared']['lib/libfixture.so.1'])
+            else:
+                subprocess.run(['php', ROOT / 'bin/build-payload', 'seal', '--root', selected], check=True, stdout=subprocess.DEVNULL)
+            verify = ['php', ROOT / 'bin/build-payload', 'verify', '--root', selected]
+            subprocess.run(verify, check=True, stdout=subprocess.DEVNULL)
+            (selected / 'lib/libfixture.so.1').write_bytes(b'tampered library')
+            self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
     def test_unchanged_package_restore_is_small_but_changed_sources_keep_the_full_sdk(self):

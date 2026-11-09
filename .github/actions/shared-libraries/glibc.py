@@ -301,10 +301,10 @@ def classify():
     consumers_ready = False
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
-    if glibc and not shared and not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
-        run(variants('build', sdk))
-        variants_ready = True
     for phase in range(100):
+        if not variants_ready:
+            run(variants('build', sdk))
+            variants_ready = True
         plans, reverse_roots = {}, set()
         for kind in formats:
             directory = format_stage(kind)
@@ -366,15 +366,13 @@ def classify():
                 shared = False
                 variants_ready = not glibc
                 continue
-        if variants_ready:
-            break
-        run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
-        run(variants('build', sdk))
-        run(['php', 'bin/build-payload', 'seal', '--root', sdk])
-        variants_ready = True
+        break
     else:
         raise RuntimeError('Library ABI planning did not converge')
     run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
+    if glibc and not shared and (os.environ.get('PUBLISH') != 'false' or not os.environ.get('LIBRARIES')
+            or any(request.get('full') or request.get('packages') for plan in plans.values() for request in plan['php_requests'].values())):
+        run(['php', 'bin/build-payload', 'seal', '--root', sdk])
     with ThreadPoolExecutor(max_workers=len(formats)) as executor:
         list(executor.map(package_libraries, formats))
     if not glibc:

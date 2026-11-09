@@ -170,7 +170,7 @@ class Pipeline(unittest.TestCase):
                 self.assertFalse(any('record' in call for call in calls))
                 self.assertEqual(any('seal' in call for call in calls), not manual)
                 prepares = [call for call in calls if 'prepare' in call]
-                self.assertEqual(len(prepares), (1 if kind == 'apk' else 2 if cached_variants or manual else 4) + (len(formats) if rebuilt == 'breaking' else 0))
+                self.assertEqual(len(prepares), len(formats) * (2 if rebuilt == 'breaking' else 1))
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
                 self.assertEqual(packaging.n_waiting, 0)
                 archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]

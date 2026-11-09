@@ -523,8 +523,9 @@ def packaging_projection(payload, record, manifest, packages, library_selection=
             if name not in retained:
                 excluded.add(name)
                 excluded.update(value['path'] for value in prepared.values())
+        excluded.update(set(record['files']) - retained)
         for field in ('files', 'prepared'):
-            record[field] = {name: value for name, value in record[field].items() if name in retained}
+            record[field] = {name: value for name, value in record.get(field, {}).items() if name in retained}
         for field in ('library_files', 'library_abi', 'library_build_provenance'):
             record[field] = {name: value for name, value in record.get(field, {}).items() if name in libraries}
         record['packaging_selection'] = {'packages': sorted(packages), 'libraries': sorted(libraries),
