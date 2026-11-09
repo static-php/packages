@@ -156,6 +156,37 @@ class PayloadCache(unittest.TestCase):
         self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
+    def test_unchanged_package_restore_is_small_but_changed_sources_keep_the_full_sdk(self):
+        old = self.root / 'old'
+        self.fixture(old, 1, php=True)
+        state = self.state()
+        archive = self.root / 'cache.tar.zst'
+        cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
+                                        seed_key=state['seed-key'], source_run_id='1234', output=archive))
+        sdk = self.root / 'sdk'
+        self.fixture(sdk, 2)
+        original_sdk = (sdk / 'build-payload.json').read_bytes()
+        args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=self.root / 'selected',
+                                  compatibility=self.compiler, key=state['key'], seed_key=state['seed-key'],
+                                  archive=archive, compile_packages='imagick', package_selection='imagick')
+        cache.restore(args)
+        self.assertFalse((args.payload / 'lib/libfixture.so.1').exists())
+        self.assertTrue((args.payload / 'lib/libphp-zts-86.so').is_file())
+        self.assertEqual((args.payload / 'modules/imagick-zts-86.so').read_bytes(), (old / 'modules/imagick-zts-86.so').read_bytes())
+        self.assertEqual((sdk / 'build-payload.json').read_bytes(), original_sdk)
+        subprocess.run(['php', ROOT / 'bin/build-payload', 'verify', '--root', args.payload], check=True, stdout=subprocess.DEVNULL)
+        with self.assertRaisesRegex(RuntimeError, 'cannot replace the complete PHP cache'):
+            cache.export(argparse.Namespace(root=self.root, payload=args.payload))
+        self.request['payload_component_inputs']['8.6']['imagick'] = 'new'
+        self.save_request()
+        args.key = self.state()['key']
+        args.payload = self.root / 'changed'
+        cache.restore(args)
+        self.assertTrue((args.payload / 'lib/libfixture.so.1').exists())
+        self.assertNotIn('packaging_selection', cache.read(args.payload / 'build-payload.json'))
+        self.assertEqual(cache.read(args.payload / 'consumer-cache-seed.json')['rebuild_packages'], ['imagick'])
+
+    @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
     def test_native_graft_keeps_new_sdk_and_identical_cached_php(self):
         old = self.root / 'old'
         self.fixture(old, 1, php=True)

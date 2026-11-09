@@ -411,13 +411,30 @@ def restore_payload(args):
                      'retained_library_abi': {name: manifest['library_abi'][name] for name in sorted(retained_roots)},
                      'removed_files': sorted(removed_files), 'library_dependencies': graph,
                      'retained_dlopen_libraries': []}
-        shutil.copytree(sdk, args.payload, symlinks=True)
+        selection = set(filter(None, getattr(args, 'package_selection', '').split(',')))
+        projected = None
+        if selection and 'devel' not in selection and not packages and not incompatible:
+            current = read(sdk / 'build-payload.json')
+            combined = json.loads(json.dumps(manifest['build_payload']))
+            for field in ('files', 'prepared'):
+                combined[field] = {**{name: value for name, value in current.get(field, {}).items() if not php_file(name)},
+                                   **{name: value for name, value in combined.get(field, {}).items() if php_file(name)}}
+            projected, selected_sdk, excluded = packaging_projection(staged, combined, read(sdk / 'shared-libraries.json'), selection)
+            removed_files.update(excluded)
+            manifest['build_payload'] = projected
+            def ignore(directory, names):
+                return [name for name in names if str((Path(directory) / name).relative_to(sdk)) in excluded or name.endswith('.a')]
+            shutil.copytree(sdk, args.payload, symlinks=True, ignore=ignore)
+            write(args.payload / 'shared-libraries.json', selected_sdk)
+            write(args.payload / 'build-payload.json', projected)
+        else:
+            shutil.copytree(sdk, args.payload, symlinks=True)
         for path in sorted(args.payload.rglob('*'), reverse=True):
             name = str(path.relative_to(args.payload))
             if (path.is_file() or path.is_symlink()) and (php_file(name) or name == 'skipped-shared-extensions.json'):
                 path.unlink()
         for name in manifest['files']:
-            if name in removed_files:
+            if name in removed_files or projected is not None and name.endswith('.a'):
                 continue
             target = args.payload / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -436,6 +453,10 @@ def restore_payload(args):
             write(proof_path, proof)
             graft += ['--reuse-proof', str(proof_path)]
         subprocess.run(graft, check=True)
+        if projected is not None:
+            recorded = read(args.payload / 'build-payload.json')
+            recorded['packaging_selection'] = projected['packaging_selection']
+            write(args.payload / 'build-payload.json', recorded)
         receipt = {'schema': 1, 'state': 'verified', 'key': state['input_fingerprint'], 'seed_key': state['core_fingerprint'],
                    'cache_key': args.key, 'cache_seed_key': args.seed_key,
                    'php_stream': args.stream, 'rebuild_packages': sorted(packages), 'changed_components': sorted(changes),
@@ -450,7 +471,8 @@ def restore_payload(args):
                    'payload_source_run_id': manifest['source_run_id'],
                    'core_files': {name: entry for name, entry in manifest['files'].items() if core_file(name, manifest['build_payload'])}}
         write(args.payload / 'consumer-cache-seed.json', receipt)
-    print(json.dumps({'restored': True, 'compiled_source_run_id': manifest['source_run_id'], 'changed_components': sorted(changes)}))
+    print(json.dumps({'restored': True, 'compiled_source_run_id': manifest['source_run_id'], 'changed_components': sorted(changes),
+                      'packaging_selection': sorted(selection) if projected is not None else []}))
 
 
 def restore(args):
@@ -472,14 +494,7 @@ def validation_hosts(packages):
     return hosts - packages
 
 
-def package_archive(args):
-    payload = args.payload.resolve()
-    record = read(payload / 'build-payload.json')
-    if record.get('state') != 'sealed':
-        raise RuntimeError('Packaging artifacts require a sealed producer payload')
-    manifest = read(payload / 'shared-libraries.json')
-    packages = set(filter(None, args.packages.split(',')))
-    replacements = {}
+def packaging_projection(payload, record, manifest, packages):
     excluded = set()
     if packages and 'devel' not in packages:
         consumers = packages | validation_hosts(packages)
@@ -511,7 +526,18 @@ def package_archive(args):
         record['packaging_selection'] = {'packages': sorted(packages), 'libraries': sorted(libraries),
                                         'producer_manifest_sha256': hashlib.sha256((payload / 'build-payload.json').read_bytes()).hexdigest()}
         manifest['libraries'] = {name: value for name, value in manifest['libraries'].items() if name in libraries}
-        replacements = {'build-payload.json': record, 'shared-libraries.json': manifest}
+    return record, manifest, excluded
+
+
+def package_archive(args):
+    payload = args.payload.resolve()
+    record = read(payload / 'build-payload.json')
+    if record.get('state') != 'sealed':
+        raise RuntimeError('Packaging artifacts require a sealed producer payload')
+    manifest = read(payload / 'shared-libraries.json')
+    packages = set(filter(None, args.packages.split(',')))
+    record, manifest, excluded = packaging_projection(payload, record, manifest, packages)
+    replacements = {'build-payload.json': record, 'shared-libraries.json': manifest} if record.get('packaging_selection') else {}
     prefix = str(payload.relative_to(args.root))
     with subprocess.Popen(['zstd', '-T0', '-f', '-o', str(args.output)], stdin=subprocess.PIPE) as compressor:
         with tarfile.open(fileobj=compressor.stdin, mode='w|') as archive:
@@ -560,6 +586,7 @@ def main():
     restore_parser.add_argument('--archive', type=Path, required=True)
     restore_parser.add_argument('--sdk', type=Path, required=True)
     restore_parser.add_argument('--compile-packages', default='')
+    restore_parser.add_argument('--package-selection', default='', help='Restore only unchanged selected packages and their native test dependencies')
     restore_parser.add_argument('--abi-rebuild-libraries', default='', help='Permit changed SDK ABIs only when every bound PHP consumer is selected for rebuilding')
     restore_parser.add_argument('--allow-all-components', action='store_true', help='Derive affected shared targets from a verified unchanged core seed')
     args = parser.parse_args()

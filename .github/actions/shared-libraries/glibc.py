@@ -472,6 +472,8 @@ def payload():
                     '--compatibility', STAGE / 'library-compatibility',
                     '--key', (STAGE / 'payload-cache-key').read_text().strip(),
                     '--seed-key', (STAGE / 'payload-cache-seed-key').read_text().strip(), '--archive', cached]
+            if os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES'):
+                args += ['--package-selection', os.environ['PACKAGES']]
             allow_all_components = compile_requested and not compile_packages
             if compile_requested and compile_packages:
                 args += ['--compile-packages', compile_packages]
