@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -38,10 +39,20 @@ def _open(url, accept=None):
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if token:
             headers["Authorization"] = "Bearer " + token
-    try:
-        return urllib.request.build_opener(_Redirect()).open(urllib.request.Request(url, headers=headers), timeout=120)
-    except Exception:
-        raise SourceError("Cannot fetch the pinned source; its recorded upstream URL must remain available") from None
+    opener = urllib.request.build_opener(_Redirect())
+    attempt = 0
+    while True:
+        try:
+            return opener.open(urllib.request.Request(url, headers=headers), timeout=120)
+        except OSError as error:
+            status = getattr(error, 'code', None)
+            if status == 403 and 'Authorization' in headers:
+                headers.pop('Authorization')
+                continue
+            attempt += 1
+            if attempt == 3 or status is not None and status != 429 and not 500 <= status < 600:
+                raise SourceError('Cannot fetch the pinned source at ' + url + ': ' + str(error)) from None
+            time.sleep(attempt)
 
 
 def _json(url):

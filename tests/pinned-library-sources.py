@@ -11,6 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,35 @@ class PinnedSourceTests(unittest.TestCase):
         self.assertEqual(self.requests, ["/repos/org/lib/releases/tags/v1", "/old"])
         self.assertEqual(receipts[0]["source"], "download")
         self.assertEqual((self.root / "downloads/lib-1.tar.gz").read_bytes(), self.routes["/old"])
+
+    def test_github_forbidden_authenticated_request_retries_anonymously(self):
+        url = self.url + '/repos/confluentinc/librdkafka/releases/tags/v2.16.0'
+        response = object()
+        with patch.dict(os.environ, GITHUB_TOKEN='test-token'), patch.object(pinned.urllib.request, 'build_opener') as factory:
+            opener = factory.return_value
+            opener.open.side_effect = [HTTPError(url, 403, 'IP address is not permitted', {}, None), response]
+            self.assertIs(pinned._open(url), response)
+        requests = [call.args[0] for call in opener.open.call_args_list]
+        self.assertEqual([request.get_header('Authorization') for request in requests], ['Bearer test-token', None])
+        self.assertEqual([request.full_url for request in requests], [url, url])
+
+    def test_transient_pinned_source_failure_retries_and_reports_url(self):
+        url = self.url + '/lib-1.tar.gz'
+        with patch.object(pinned.urllib.request, 'build_opener') as factory, patch.object(pinned.time, 'sleep') as sleep:
+            factory.return_value.open.side_effect = URLError('connection closed')
+            with self.assertRaisesRegex(pinned.SourceError, url):
+                pinned._open(url)
+        self.assertEqual(factory.return_value.open.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_missing_pinned_release_fails_without_retry_or_changing_url(self):
+        url = self.url + '/missing'
+        with patch.object(pinned.urllib.request, 'build_opener') as factory, patch.object(pinned.time, 'sleep') as sleep:
+            factory.return_value.open.side_effect = HTTPError(url, 404, 'Not Found', {}, None)
+            with self.assertRaisesRegex(pinned.SourceError, '404'):
+                pinned._open(url)
+        self.assertEqual(factory.return_value.open.call_count, 1)
+        sleep.assert_not_called()
 
     def test_github_tarball_types_remain_at_recorded_tag(self):
         for method, path in (("ghtar", "/tarball-old"), ("ghtagtar", "/repos/org/lib/tarball/refs/tags/v1")):
