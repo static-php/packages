@@ -17,6 +17,18 @@ spec.loader.exec_module(source)
 
 
 class SourceIdentities(unittest.TestCase):
+    def test_test_package_destination_keeps_existing_compiled_cache_identity(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            launcher = root / 'bin/spp'
+            launcher.parent.mkdir()
+            launcher.write_text("const DIST_PATH = BASE_PATH . '/dist';\n")
+            previous = source.identity(root)
+            launcher.write_text("define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');\n")
+            self.assertEqual(source.identity(root), previous)
+            launcher.write_text(launcher.read_text() + "putenv('CFLAGS=-O0');\n")
+            self.assertNotEqual(source.identity(root), previous)
+
     def actor_template(self, root, shared):
         path = root / 'config/templates/craft.yml.twig'
         path.parent.mkdir(parents=True)

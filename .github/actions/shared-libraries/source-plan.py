@@ -214,6 +214,12 @@ def scoped_hook_inputs(root):
 
 def identity(root):
     files = file_identity(root, COMPILE_PATTERNS)
+    if 'bin/spp' in files:
+        # Packaging destinations do not change the compiler inputs of existing payloads.
+        launcher = (root / 'bin/spp').read_bytes().replace(
+            b"define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');",
+            b"const DIST_PATH = BASE_PATH . '/dist';")
+        files['bin/spp'] = hashlib.sha256(launcher).hexdigest()
     scoped = scoped_hook_inputs(root)
     files = {name: value for name, value in files.items()
              if name not in scoped
