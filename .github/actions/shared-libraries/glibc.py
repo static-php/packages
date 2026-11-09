@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import runpy
 import subprocess
 
 
@@ -189,17 +190,10 @@ def test_library_dependencies(kind, sdk, directory):
     plan = read(directory / 'shared-library-plan.json')
     if not plan.get('build_only'):
         return
-    libraries = read(sdk / 'shared-libraries.json')['libraries']
+    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
     selected = set(plan['libraries'])
-    closure = set(selected)
-    pending = list(selected)
-    while pending:
-        entry = libraries[pending.pop()]
-        for dependency in entry.get('depends', []) + entry.get('dlopen_dependencies', []):
-            if dependency in libraries and dependency not in closure:
-                closure.add(dependency)
-                pending.append(dependency)
-    needed = sorted(closure - selected)
+    closure = graph['dependency_closure'](selected, graph['library_graph'](read(sdk / 'shared-libraries.json')))
+    needed = sorted(set(closure) - selected)
     if needed:
         environment = dict(os.environ, SPP_DIST_PATH=str(directory / 'test-dependencies'),
                            SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]))
@@ -213,8 +207,11 @@ def classify():
     glibc = formats == FORMATS
     sdk = ROOT / 'buildroot'
     STAGE.mkdir(exist_ok=True)
-    run(['python3', '.github/actions/shared-libraries/source-plan.py', '--reconcile', '--root', '.',
-         '--output', STAGE / 'effective-source-plan.json'])
+    if os.environ.get('LIBRARIES'):
+        write(STAGE / 'effective-source-plan.json', {})
+    else:
+        run(['python3', '.github/actions/shared-libraries/source-plan.py', '--reconcile', '--root', '.',
+             '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
     for kind in formats:
