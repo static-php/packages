@@ -18,6 +18,23 @@ SPEC.loader.exec_module(variants)
 
 
 class VariantTests(unittest.TestCase):
+    def test_openssl4_requires_provider_path_without_removed_engine_command(self):
+        root = Path('/sdk')
+        runtime = '/usr/lib/php-zts/lib'
+        with patch.object(variants.subprocess, 'check_output', return_value='MODULESDIR: "' + runtime + '/ossl-modules"') as probe:
+            self.assertEqual(variants.compiled_plugin_directories(root, '4.1.0', runtime), {'module': runtime + '/ossl-modules'})
+        self.assertEqual([call.args[0][-1] for call in probe.call_args_list], ['-m'])
+
+    def test_openssl3_still_requires_both_private_plugin_paths(self):
+        runtime = '/usr/lib/php-zts/lib'
+        with patch.object(variants.subprocess, 'check_output', side_effect=[
+            'ENGINESDIR: "' + runtime + '/engines-3"', 'MODULESDIR: "' + runtime + '/ossl-modules"']):
+            self.assertEqual(variants.compiled_plugin_directories(Path('/sdk'), '3.6.5', runtime),
+                             {'engine': runtime + '/engines-3', 'module': runtime + '/ossl-modules'})
+        with patch.object(variants.subprocess, 'check_output', return_value='MODULESDIR: "/unexpected"'):
+            with self.assertRaisesRegex(RuntimeError, 'provenance'):
+                variants.compiled_plugin_directories(Path('/sdk'), '4.1.0', runtime)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="openssl-variant-tests-")
         self.addCleanup(temporary.cleanup)

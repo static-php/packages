@@ -86,12 +86,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/crazywhalecc/static-php-cli.git",
-                "reference": "67eebafd7943edc965efb2812bd1700aa21ae660"
+                "reference": "83dfbbdd4bf81d866684f9e68a1167705c3b2a6a"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/67eebafd7943edc965efb2812bd1700aa21ae660",
-                "reference": "67eebafd7943edc965efb2812bd1700aa21ae660",
+                "url": "https://api.github.com/repos/crazywhalecc/static-php-cli/zipball/83dfbbdd4bf81d866684f9e68a1167705c3b2a6a",
+                "reference": "83dfbbdd4bf81d866684f9e68a1167705c3b2a6a",
                 "shasum": ""
             },
             "require": {
@@ -151,8 +151,8 @@
                     "type": "other"
                 }
             ],
-            "time": "2026-11-09T01:36:51+00:00",
-            "published-time": "2026-11-09T01:36:55+00:00"
+            "time": "2026-11-09T15:09:47+00:00",
+            "published-time": "2026-11-09T15:09:52+00:00"
         },
         {
             "name": "doctrine/inflector",
@@ -2425,16 +2425,16 @@
         },
         {
             "name": "symfony/yaml",
-            "version": "v7.4.20",
+            "version": "v7.4.23",
             "source": {
                 "type": "git",
                 "url": "https://github.com/symfony/yaml.git",
-                "reference": "0222bf4dfaa1e3ceb8fff579635d655f2950d5a7"
+                "reference": "1e601207ffe627a2e621faa9d661f1d32dcf1cec"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/symfony/yaml/zipball/0222bf4dfaa1e3ceb8fff579635d655f2950d5a7",
-                "reference": "0222bf4dfaa1e3ceb8fff579635d655f2950d5a7",
+                "url": "https://api.github.com/repos/symfony/yaml/zipball/1e601207ffe627a2e621faa9d661f1d32dcf1cec",
+                "reference": "1e601207ffe627a2e621faa9d661f1d32dcf1cec",
                 "shasum": ""
             },
             "require": {
@@ -2477,7 +2477,7 @@
             "description": "Loads and dumps YAML files",
             "homepage": "https://symfony.com",
             "support": {
-                "source": "https://github.com/symfony/yaml/tree/v7.4.20"
+                "source": "https://github.com/symfony/yaml/tree/v7.4.23"
             },
             "funding": [
                 {
@@ -2497,7 +2497,8 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-09-26T06:31:10+00:00"
+            "time": "2026-11-04T08:27:22+00:00",
+            "published-time": "2026-11-04T11:28:41+00:00"
         },
         {
             "name": "twig/twig",

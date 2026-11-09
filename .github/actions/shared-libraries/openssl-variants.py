@@ -269,6 +269,24 @@ def compare_abi(common, variant, common_dumps, variant_dumps):
             raise RuntimeError("OpenSSL profile changed public type ABI: " + name + "\n" + (result.stdout + result.stderr)[-5000:])
 
 
+def compiled_plugin_directories(sdk, version, runtime):
+    major = re.match(r'^v?(\d+)\.', version)
+    if major is None:
+        raise RuntimeError('Cannot determine OpenSSL plugin interface version: ' + version)
+    probes = [("-m", "module", "ossl-modules")]
+    if int(major[1]) < 4:
+        probes.insert(0, ("-e", "engine", "engines-3"))
+    directories = {}
+    for flag, label, suffix in probes:
+        text = subprocess.check_output([str(sdk / "bin/openssl"), "version", flag], text=True,
+                                       env=dict(os.environ, LD_LIBRARY_PATH=str(sdk / "lib")))
+        matches = re.findall(r'"([^"]+)"', text)
+        if matches != [runtime + "/" + suffix]:
+            raise RuntimeError("Original compiled OpenSSL plugin directory differs from its provenance: " + text.strip())
+        directories[label] = matches[0]
+    return directories
+
+
 def probe_directory(sdk, expected):
     program = sdk / "bin/openssl"
     if not program.is_file():
@@ -451,14 +469,7 @@ def relocate(root, sdk, environment, compiled_environment, source, output):
             for name in entry_paths(manifest["libraries"].get("zlib", {})):
                 copy_file(rooted(sdk, name), rooted(target, name))
             probe_directory(target, PROFILES[profile])
-            private_directories = {}
-            for flag, label, suffix in [("-e", "engine", "engines-3"), ("-m", "module", "ossl-modules")]:
-                text = subprocess.check_output([str(target / "bin/openssl"), "version", flag], text=True,
-                                               env=dict(os.environ, LD_LIBRARY_PATH=str(target / "lib")))
-                matches = re.findall(r'"([^"]+)"', text)
-                if matches != [old_runtime + "/" + suffix]:
-                    raise RuntimeError("Original compiled OpenSSL plugin directory differs from its provenance: " + text.strip())
-                private_directories[label] = matches[0]
+            private_directories = compiled_plugin_directories(target, common['version'], old_runtime)
             abi, dumps = abi_inventory(target, entry, work / ("abi-" + profile))
             compare_abi(common_abi, abi, common_dumps, dumps)
             deployment_key = fingerprint(root, sdk, environment, common, profile)
@@ -470,7 +481,7 @@ def relocate(root, sdk, environment, compiled_environment, source, output):
             receipt["relocation"] = {"schema": 1, "source_receipt_sha256": file_hash(source / profile / "overlay.json"),
                                      "source_runtime_libdir": old_runtime, "target_runtime_libdir": new_runtime,
                                      "typed_abi_revalidated": True, "elf_identity": proof,
-                                     "compiled_engine_directory": private_directories["engine"],
+                                     "compiled_engine_directory": private_directories.get("engine"),
                                      "compiled_module_directory": private_directories["module"],
                                      "required_layout_alias": {"path": new_root, "target": old_root} if profile == "rpm" else {"path": old_root, "target": new_root}}
             write(output / profile / "overlay.json", receipt)
