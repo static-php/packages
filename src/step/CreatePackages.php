@@ -281,6 +281,34 @@ class CreatePackages
         }
     }
 
+    private static function migrationRevisionFloor(string $name, string $version, string $architecture, string $type): int
+    {
+        if (str_starts_with($name, 'php-zts-lib-') || str_starts_with($name, 'php-zts-runtime-layout')) {
+            return 0;
+        }
+        $name = preg_replace('/-debuginfo$/', '', $type === 'deb' ? str_replace('_', '-', $name) : $name);
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        $minimum = 0;
+        foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
+            $data = self::migrationBaseline($path);
+            if (isset($data['type']) && $data['type'] !== $type
+                || isset($data['architecture']) && $normalizeArch($data['architecture']) !== $normalizeArch($architecture)) {
+                continue;
+            }
+            foreach ($data['migration_cutoffs'] ?? [] as $cutoffs) {
+                $cutoff = preg_replace('/^\d+:/', '', $cutoffs[$name] ?? '');
+                if ($type === 'apk') {
+                    $cutoff = self::validApkPackageVersion($cutoff);
+                }
+                $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
+                if (preg_match($pattern, $cutoff, $release)) {
+                    $minimum = max($minimum, (int) $release[1]);
+                }
+            }
+        }
+        return $minimum;
+    }
+
     private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
     {
         if ($name === 'php-zts-runtime-layout') {
@@ -2390,7 +2418,7 @@ class CreatePackages
                     $next = max($next, self::getRemoteNextIteration($base . '-debuginfo', $version, $architecture, $packageType));
                 }
             } else {
-                $next = max(self::getNextIteration($base, $version, $architecture, $packageType), self::migrationNextIteration($base, $version, $architecture, $packageType));
+                $next = max(self::getNextIteration($base, $version, $architecture, $packageType), self::migrationNextIteration($base, $version, $architecture, $packageType), self::migrationRevisionFloor($base, $version, $architecture, $packageType));
             }
             self::$resolvedIterations[$key] = (string)$next;
         }
@@ -2433,11 +2461,12 @@ class CreatePackages
                     }
                 }
             }
-            return $maxIteration + 1;
+            return max($maxIteration + 1, self::migrationRevisionFloor($name, $version, $architecture, $packageType));
         }
 
         $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
-        return self::getForgejoNextIteration($name, $version, $packageType, $host);
+        return max(self::getForgejoNextIteration($name, $version, $packageType, $host),
+            self::migrationRevisionFloor($name, $version, $architecture, $packageType));
     }
 
     private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
