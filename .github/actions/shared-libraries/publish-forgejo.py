@@ -98,10 +98,13 @@ def publish(action, host, password, kind, groups, helper, bootstrap):
         raise RuntimeError('A cohort archive changed during publication preflight')
     if action == 'check':
         return
-    for _, owner, path in publication_order(groups, helper, kind, bootstrap):
+    ordered = publication_order(groups, helper, kind, bootstrap)
+    for index, (_, owner, path) in enumerate(ordered, 1):
+        print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         if helper['archive_sha256'](path) != digests[path]:
             raise RuntimeError('A cohort archive changed after publication preflight: ' + path.name)
         helper['upload_verified_archive'](host, owner, password, kind, path)
+        print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
 
 
 def main(argv=None):

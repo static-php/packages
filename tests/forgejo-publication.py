@@ -54,6 +54,88 @@ class ForgejoPublication(unittest.TestCase):
         path.write_bytes(apk_bytes(name, version, arch))
         return path
 
+    def test_disconnected_registry_listing_retries_the_same_page(self):
+        requests = helper_globals['requests']
+        with patch.object(requests, 'get', side_effect=[requests.ConnectionError('remote disconnected'),
+                          response(payload=[{'name': 'library'}]), response(payload=[])]) as get, \
+                patch.object(helper_globals['time'], 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as output:
+            records = helper['get_remote_packages']('https://example.com', '84', 'test', 'alpine', 'library')
+        self.assertEqual(records, [{'name': 'library'}])
+        self.assertEqual([call.kwargs['params']['page'] for call in get.call_args_list], [1, 1, 2])
+        sleep.assert_called_once_with(2)
+        self.assertIn('attempt 2/3', output.getvalue())
+
+    def test_upload_retries_rewind_the_complete_archive_and_verify_conflicts(self):
+        path = self.archive()
+        record = {'arch': 'x86_64', 'sha256': helper['archive_sha256'](path)}
+        sent = []
+        def put(url, **kwargs):
+            sent.append(kwargs['files']['file'].read())
+            if len(sent) == 1:
+                raise helper_globals['requests'].ConnectionError('response lost after upload')
+            return response(status=409)
+        with patch.dict(helper_globals, {'get_remote_packages': lambda *args: [],
+                        'remote_package_archives': Mock(side_effect=[[], [record]])}), \
+                patch.object(helper_globals['requests'], 'put', side_effect=put), \
+                patch.object(helper_globals['time'], 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            helper['upload_verified_archive']('https://example.com', '84', 'test', 'alpine', path)
+        self.assertEqual(sent, [path.read_bytes(), path.read_bytes()])
+
+    def test_interrupted_archive_download_restarts_and_checks_full_digest(self):
+        path = self.archive()
+        data = path.read_bytes()
+        broken = response()
+        def chunks(size):
+            yield data[:32]
+            raise helper_globals['requests'].exceptions.ChunkedEncodingError('interrupted body')
+        broken.iter_content.side_effect = chunks
+        files = [{'id': 45, 'name': path.name, 'sha256': helper['archive_sha256'](path)}]
+        with patch.dict(helper_globals, {'read_consumer_sidecar': lambda *args: None}), \
+                patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), broken, response(data=data)]) as get, \
+                patch.object(helper_globals['time'], 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            records = helper['remote_package_archives']('https://example.com', '84', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1')
+        self.assertEqual(records[0]['sha256'], helper['archive_sha256'](path))
+        self.assertEqual(get.call_count, 3)
+
+    def test_transient_http_errors_retry_but_authentication_errors_do_not(self):
+        requests = helper_globals['requests']
+        for status in (429, 500, 502, 503, 504, 401, 403):
+            failed = response(status=status)
+            failed.raise_for_status.side_effect = requests.HTTPError('HTTP ' + str(status))
+            with self.subTest(status=status), patch.object(requests, 'get', side_effect=[failed, response(payload=[])]) as get, \
+                    patch.object(helper_globals['time'], 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+                if status in (401, 403):
+                    with self.assertRaises(requests.HTTPError):
+                        helper['get_remote_packages']('https://example.com', '84', 'test', 'alpine')
+                    self.assertEqual(get.call_count, 1)
+                else:
+                    self.assertEqual(helper['get_remote_packages']('https://example.com', '84', 'test', 'alpine'), [])
+                    self.assertEqual(get.call_count, 2)
+
+    def test_exhausted_connections_fail_with_request_context(self):
+        with patch.object(helper_globals['requests'], 'get', side_effect=helper_globals['requests'].ConnectionError('disconnected')) as get, \
+                patch.object(helper_globals['time'], 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'GET https://example.com/api/v1/packages/84 failed after 3 attempts'):
+                helper['get_remote_packages']('https://example.com', '84', 'test', 'alpine')
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_package_progress_is_flushed_before_each_upload(self):
+        paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-lib-ssl')]
+        printed = io.StringIO()
+        seen = []
+        def upload(host, owner, password, kind, path):
+            seen.append((path, printed.getvalue()))
+        helpers = dict(helper, get_remote_candidates=lambda *args: [],
+                       verify_upload_versions=lambda host, owner, password, kind, paths, remote: paths,
+                       upload_verified_archive=upload)
+        with contextlib.redirect_stdout(printed):
+            publisher['publish']('upload', 'https://example.com', 'test', 'alpine', {'84': paths}, helpers, True)
+        for index, (path, output) in enumerate(seen, 1):
+            self.assertIn(f'Uploading {index}/2: https://example.com 84/{path.name}', output)
+            self.assertNotIn(f'Completed {index}/2:', output)
+        self.assertIn('Completed 2/2:', printed.getvalue())
+
     def test_owner_listing_records_owner_and_reads_every_stream(self):
         listing = Mock(side_effect=lambda host, owner, password, kind: [{'name': 'library', 'version': owner}])
         with patch.dict(helper_globals, {'get_remote_packages': listing}):

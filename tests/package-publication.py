@@ -19,6 +19,31 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_publication_output_is_live_and_saved_before_process_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            signal = root / 'continue'
+            log = root / 'publication.log'
+            class LiveOutput(io.StringIO):
+                def write(self, value):
+                    if 'Uploading 1/2' in value:
+                        self.saved_before_exit = 'Uploading 1/2' in log.read_text()
+                        signal.touch()
+                    return super().write(value)
+            output = LiveOutput()
+            script = ('import pathlib,sys,time\nprint("Uploading 1/2: first.apk", flush=True)\n'
+                      'deadline = time.monotonic() + 5\n'
+                      'while not pathlib.Path(sys.argv[1]).exists():\n'
+                      ' if time.monotonic() > deadline: sys.exit(2)\n'
+                      ' time.sleep(0.01)\n'
+                      'print("Uploading 2/2: second.apk", file=sys.stderr, flush=True)\nsys.exit(3)\n')
+            with contextlib.redirect_stdout(output), self.assertRaises(subprocess.CalledProcessError) as error:
+                publication.run_logged([sys.executable, '-c', script, str(signal)], os.environ.copy(), log)
+            self.assertEqual(error.exception.returncode, 3)
+            self.assertTrue(output.saved_before_exit)
+            self.assertEqual(output.getvalue(), log.read_text())
+            self.assertIn('Uploading 2/2: second.apk', output.getvalue())
+
     def test_rpm_upload_targets_only_real_el8_and_refreshes_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -61,21 +86,21 @@ class Publication(unittest.TestCase):
                     events.append((scope[0], 'verify'))
                     if scope == ['8.2']:
                         raise RuntimeError('missing native receipt')
-                def run(command, **kwargs):
-                    stream = kwargs['env']['PUBLICATION_PHP_STREAMS']
+                def run(command, environment, log):
+                    stream = environment['PUBLICATION_PHP_STREAMS']
                     phase = command[-1]
                     events.append((stream, phase))
                     if stream == '8.4' and phase in ('upload-1', 'publish-rpm'):
-                        kwargs['stdout'].write('::warning::Skipping upload of example.apk: Cannot verify example: connection reset\n'
-                                               'Traceback:\n  caller\n  publisher\n  raise RuntimeError\nRuntimeError: cohort rejected\n')
-                        kwargs['stdout'].flush()
+                        with log.open('a') as output:
+                            output.write('::warning::Skipping upload of example.apk: Cannot verify example: connection reset\n'
+                                         'Traceback:\n  caller\n  publisher\n  raise RuntimeError\nRuntimeError: cohort rejected\n')
                     if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload-1', 'publish-rpm') or phase == 'upload-2':
                         raise subprocess.CalledProcessError(1, command)
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
                     with patch.object(publication, 'prune_consumers'), patch.object(publication, 'verify_upgrades', side_effect=verify), \
-                            patch.object(publication, 'assemble'), patch.object(publication.subprocess, 'run', side_effect=run), \
+                            patch.object(publication, 'assemble'), patch.object(publication, 'run_logged', side_effect=run), \
                             patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(io.StringIO()):
                         self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
                         primary_summary = (root / 'summary').read_text()

@@ -119,6 +119,18 @@ def api(path, paginate=False):
     return json.loads(subprocess.check_output(command, text=True))
 
 
+def run_logged(arguments, environment, log):
+    with log.open('a') as output, subprocess.Popen(list(arguments), env=environment, stdout=subprocess.PIPE,
+                                                 stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1) as process:
+        for line in process.stdout:
+            output.write(line)
+            output.flush()
+            print(line, end='', flush=True)
+        process.stdout.close()
+        if process.wait():
+            raise subprocess.CalledProcessError(process.returncode, arguments)
+
+
 def publish_available(source, kind, target, mirror=False):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
@@ -153,8 +165,7 @@ def publish_available(source, kind, target, mirror=False):
                 monitor = threading.Thread(target=progress, daemon=True)
                 monitor.start()
                 try:
-                    with log.open('a') as output:
-                        subprocess.run(list(arguments), check=True, env=environment, stdout=output, stderr=subprocess.STDOUT)
+                    run_logged(arguments, environment, log)
                 except subprocess.CalledProcessError as error:
                     lines = log.read_text(errors='replace').splitlines()
                     reasons = [line for line in lines if 'Skipping upload of ' in line or line.startswith('::error::')]

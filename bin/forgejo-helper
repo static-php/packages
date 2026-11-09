@@ -9,6 +9,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 from fnmatch import fnmatch
@@ -28,6 +29,33 @@ STREAM_OWNERS = ('82', '83', '84', '85', '86')
 
 def registry_auth(owner, password):
     return (owner, password) if password else None
+
+
+def registry_request(method, url, read=None, **kwargs):
+    kwargs.setdefault('timeout', 30)
+    files = [(archive, archive.tell()) for archive in kwargs.get('files', {}).values()]
+    for attempt in range(1, 4):
+        response = None
+        try:
+            for archive, position in files:
+                archive.seek(position)
+            response = getattr(requests, method)(url, **kwargs)
+            if response.status_code in (429, 500, 502, 503, 504):
+                response.raise_for_status()
+            if read is None:
+                return response
+            with response:
+                return read(response)
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError, requests.exceptions.ChunkedEncodingError) as error:
+            if isinstance(error, requests.HTTPError) and (response is None or response.status_code not in (429, 500, 502, 503, 504)):
+                raise
+            if response is not None:
+                response.close()
+            if attempt == 3:
+                raise RuntimeError(f'{method.upper()} {url} failed after {attempt} attempts: {error}') from error
+            delay = 2 ** attempt
+            print(f'Retrying {method.upper()} {url}: attempt {attempt + 1}/3 in {delay}s ({error})', flush=True)
+            time.sleep(delay)
 
 
 def apk_native_metadata(path):
@@ -58,7 +86,7 @@ def get_remote_packages(host, owner, password, pkg_type, query=None):
         params = {"type": pkg_type, "limit": 1000, "page": page}
         if query is not None:
             params["q"] = query
-        response = requests.get(url, params=params, auth=registry_auth(owner, password), timeout=30)
+        response = registry_request('get', url, params=params, auth=registry_auth(owner, password), timeout=30)
         response.raise_for_status()
         batch = response.json()
         if not isinstance(batch, list):
@@ -87,7 +115,7 @@ def get_remote_candidates(host, owner, password, pkg_type, files):
 
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
-    response = requests.get(url, auth=registry_auth(owner, password), timeout=30)
+    response = registry_request('get', url, auth=registry_auth(owner, password), timeout=30)
     if response.status_code == 404:
         return []
     response.raise_for_status()
@@ -214,7 +242,7 @@ def read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest
     if not isinstance(digest, str) or not re.fullmatch(r'[a-fA-F0-9]{64}', digest):
         return None
     digest = digest.lower()
-    with requests.get(consumer_sidecar_url(host, owner, digest), auth=registry_auth(owner, password), timeout=30, stream=True) as response:
+    def read(response):
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -223,6 +251,11 @@ def read_consumer_sidecar(host, owner, password, pkg_type, name, version, digest
             content.extend(block)
             if len(content) > MAX_CONSUMER_METADATA_BYTES + MAX_MIGRATION_CUTOFF_BYTES:
                 raise RuntimeError('Oversized consumer sidecar')
+        return content
+    content = registry_request('get', consumer_sidecar_url(host, owner, digest), read=read,
+                               auth=registry_auth(owner, password), timeout=30, stream=True)
+    if content is None:
+        return None
     try:
         value = json.loads(content)
     except (ValueError, UnicodeDecodeError) as error:
@@ -244,7 +277,7 @@ def publish_consumer_sidecar(host, owner, password, pkg_type, path):
             raise RuntimeError('Conflicting immutable consumer sidecar')
         return
     content = (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()
-    response = requests.put(consumer_sidecar_url(host, owner, digest), data=content,
+    response = registry_request('put', consumer_sidecar_url(host, owner, digest), data=content,
                             headers={'Content-Type': 'application/json'}, auth=(owner, password), timeout=30)
     if response.status_code not in (201, 409):
         raise RuntimeError('Consumer metadata upload failed: HTTP ' + str(response.status_code))
@@ -274,17 +307,19 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
                                {'file_id': file['id'], 'filename': file['name'], 'owner': owner, 'url': url})
                 continue
             path = Path(temporary) / ('archive' + extension)
-            digest = hashlib.sha256()
             print(f"Reading archive: {host} {owner}/{name} {version} {file['name']}", flush=True)
-            with requests.get(url, auth=registry_auth(owner, password), timeout=60, stream=True) as response:
+            def read(response):
                 response.raise_for_status()
+                digest = hashlib.sha256()
                 with path.open('wb') as archive:
                     for block in response.iter_content(1024 * 1024):
                         if block:
                             digest.update(block)
                             archive.write(block)
+                return digest.hexdigest()
+            digest = registry_request('get', url, read=read, auth=registry_auth(owner, password), timeout=60, stream=True)
             actual_name, actual_version, arch = package_metadata(path, pkg_type)
-            if isinstance(file.get('sha256'), str) and re.fullmatch(r'[a-fA-F0-9]{64}', file['sha256']) and digest.hexdigest() != file['sha256'].lower():
+            if isinstance(file.get('sha256'), str) and re.fullmatch(r'[a-fA-F0-9]{64}', file['sha256']) and digest != file['sha256'].lower():
                 raise RuntimeError('Served package differs from registry file digest')
             if (actual_name, actual_version) != (name, version):
                 raise RuntimeError(f"Published archive header differs from its registry entry: {owner}/{name}/{version}")
@@ -298,7 +333,7 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
                 if (cutoffs.get('architecture') is not None and normalize_arch(cutoffs['architecture']) != normalize_arch(arch)
                         or cutoffs.get('php_stream') is not None and (stream is None or cutoffs['php_stream'] != stream.group(1))):
                     raise RuntimeError(f'Migration cutoff identity differs from CLI header: {owner}/{name}/{version}')
-            records.append({'name': name, 'version': version, 'arch': arch, 'sha256': digest.hexdigest(),
+            records.append({'name': name, 'version': version, 'arch': arch, 'sha256': digest,
                             'file_id': file['id'], 'filename': file['name'], 'owner': owner, 'url': url,
                             'migration_cutoffs': cutoffs, 'consumer_metadata': consumer, 'native_metadata': native})
             if cache_key is not None:
@@ -314,7 +349,7 @@ def get_remote_package_archs(host, owner, password, pkg_type, name, version, str
     if pkg_type in ('debian', 'alpine'):
         return {record['arch'] for record in remote_package_archives(host, owner, password, pkg_type, name, version)}
     url = f"{host}/api/v1/packages/{owner}/{pkg_type}/{name}/{version}/files"
-    resp = requests.get(url, auth=registry_auth(owner, password), timeout=30)
+    resp = registry_request('get', url, auth=registry_auth(owner, password), timeout=30)
     if strict:
         resp.raise_for_status()
     archs = set()
@@ -500,7 +535,7 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
     if not existing:
         url = f"{host}/api/packages/{owner}/debian/pool/php-zts/main/upload" if pkg_type == 'debian' else f"{host}/api/packages/{owner}/alpine/{branch}/{repo}"
         with path.open('rb') as archive:
-            response = requests.put(url, files={'file': archive}, auth=(owner, password), timeout=120)
+            response = registry_request('put', url, files={'file': archive}, auth=(owner, password), timeout=120)
         if response.status_code not in (201, 409):
             raise RuntimeError(f"Upload failed for {owner}/{path.name}: HTTP {response.status_code}")
     after = remote_package_archives(host, owner, password, pkg_type, name, version)
