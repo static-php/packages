@@ -473,6 +473,7 @@ class Pipeline(unittest.TestCase):
                 (stage / kind / 'shared-library-plan.json').write_text('{}')
                 (stage / kind / 'baseline').mkdir()
                 (stage / kind / 'baseline/shared-libraries.json').write_text('{}')
+            glibc.write(stage / 'consumer-source-versions.json', {'candidates': [{'name': 'php-zts-imagick'}]})
             calls = []
             def record(arguments, **kwargs):
                 calls.append([str(value) for value in arguments])
@@ -480,18 +481,44 @@ class Pipeline(unittest.TestCase):
                     (root / 'build/8.6').mkdir(parents=True)
             environment = {'PHPV': '8.6', 'COMPILE': 'true', 'COMPILE_PACKAGES': 'imagick', 'PACKAGES': 'imagick',
                            'SOURCE_RUN_ID': '42', 'TARGET': 'alma8-x86_64', 'IMAGE': 'producer', 'TYPE': 'rpm', 'MATRIX_ARCH': 'x86_64'}
-            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', record), patch.dict(os.environ, environment):
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', record), \
+                    patch.object(glibc, 'bind_library_sources'), patch.dict(os.environ, environment):
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
                     glibc.payload()
                     build = next(call for call in calls if call[:3] == ['php', 'bin/spp', 'build'])
                     self.assertFalse(any(value.startswith('--packages=') for value in build))
+                    preflight = next(call for call in calls if len(call) > 1 and call[1].endswith('/source-versions.py'))
+                    self.assertEqual(preflight[preflight.index('--packages') + 1], 'imagick')
                     os.environ['COMPILE'] = 'false'
                     with self.assertRaisesRegex(RuntimeError, 'requires its sealed PHP cache'):
                         glibc.payload()
                 finally:
                     os.chdir(previous)
+
+    def test_php_compilation_uses_verified_sdk_sources_without_changing_extension_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sdk, downloads = root / 'buildroot', root / 'downloads'
+            source = {'hash': 'compiled-hash', 'version': 'previous-library', 'config': {'type': 'ghtar'}}
+            manifest = {'libraries': {'libjxl': {'source_hash': source['hash']}, 'gcc-runtime': {}}}
+            state = {'libraries': {'libjxl': {'artifact': 'libjxl', 'sources': {'libjxl': {'source': source}}}}}
+            snapshot = {'libjxl': {'source': {'hash': 'new-snapshot-hash'}, 'binary': ['retained']},
+                        'ext-imagick': {'source': {'hash': 'selected-extension'}}, 'php-src': {'source': {'hash': 'pinned-php'}}}
+            glibc.write(sdk / 'shared-libraries.json', manifest)
+            glibc.write(sdk / 'shared-library-build-inputs.json', state)
+            glibc.write(downloads / '.cache.json', snapshot)
+            glibc.bind_library_sources(sdk, downloads)
+            actual = glibc.read(downloads / '.cache.json')
+            self.assertEqual(actual['libjxl'], {'source': source, 'binary': ['retained']})
+            self.assertEqual(actual['ext-imagick'], snapshot['ext-imagick'])
+            self.assertEqual(actual['php-src'], snapshot['php-src'])
+            state['libraries']['libjxl']['sources']['libjxl']['source']['hash'] = 'unverified'
+            glibc.write(sdk / 'shared-library-build-inputs.json', state)
+            with self.assertRaisesRegex(RuntimeError, 'source identity differs'):
+                glibc.bind_library_sources(sdk, downloads)
+            self.assertEqual(glibc.read(downloads / '.cache.json'), actual)
 
     def test_signing_preserves_exact_publication_retry_archives(self):
         with tempfile.TemporaryDirectory(prefix='spp-retry-signing-') as temporary:

@@ -179,6 +179,16 @@ class InstallerTransitionTests(unittest.TestCase):
             self.assertNotIn('libtransition-base-1.so.1', consumer_elf['needed'])
             run('reuse', 'consumer')
             self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base', 'consumer', 'peer'])
+            incremental.write(root / 'buildroot/shared-library-build-inputs.json', {'libraries': {
+                name: {'artifact': name, 'sources': {name: record}} for name, record in cache.items()}})
+            cache['transition-other']['source']['hash'] = 'new-unselected-snapshot-source'
+            save_cache()
+            self.assertIn('LIBRARY_REUSE invalid', run('reuse', 'other', success=False))
+            pipeline = incremental.helper_module('glibc.py', 'transition_pipeline')
+            pipeline.bind_library_sources(root / 'buildroot', root / 'downloads')
+            run('reuse', 'base,consumer,peer,other')
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base', 'consumer', 'peer'])
+            self.assertEqual(signature('lib/libtransition-other-1.so.1'), other)
             (root / 'check.c').write_text('extern int transition_consumer(void); int main(void) { return transition_consumer() == 2 ? 0 : 1; }')
             compiler = '/usr/bin/gcc' if Path('/usr/bin/gcc').is_file() else shutil.which('cc')
             subprocess.run([compiler, str(root / 'check.c'), '-L' + str(root / 'buildroot/lib'),

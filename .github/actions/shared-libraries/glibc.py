@@ -527,6 +527,24 @@ def preflight_consumers(stream, package_type, packages):
         run(arguments, env=environment)
 
 
+def bind_library_sources(sdk, downloads):
+    manifest = read(sdk / 'shared-libraries.json')
+    state = read(sdk / 'shared-library-build-inputs.json')
+    cache = read(downloads / '.cache.json')
+    for name, entry in manifest['libraries'].items():
+        recorded = state['libraries'].get(name, {})
+        artifact = recorded.get('artifact')
+        if artifact is None:
+            if name != 'gcc-runtime':
+                raise RuntimeError('SDK library has no recorded source artifact: ' + name)
+            continue
+        source = recorded.get('sources', {}).get(artifact, {}).get('source')
+        if not isinstance(source, dict) or source.get('hash') != entry.get('source_hash'):
+            raise RuntimeError('SDK library source identity differs from its compiled record: ' + name)
+        cache[artifact] = dict(cache.get(artifact, {}), source=source)
+    write(downloads / '.cache.json', cache)
+
+
 def payload():
     stream = os.environ['PHPV']
     formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
@@ -579,7 +597,7 @@ def payload():
             compile_packages = ''
         if compile_requested:
             run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize', '--php'])
-            preflight_consumers(stream, package_type, compile_packages)
+            preflight_consumers(stream, package_type, os.environ.get('PACKAGES') or compile_packages)
             if compile_packages and not (ROOT / 'source/php-src').is_dir():
                 release = read(STAGE / 'consumer-source-versions.json')['candidates'][0]['php_version']
                 run(['python3', '.github/actions/shared-libraries/php-source.py', '--root', '.', '--version', release, '--select'])
@@ -588,6 +606,7 @@ def payload():
             if compile_packages:
                 flags += ['--packages=' + compile_packages]
             environment = dict(os.environ, SPP_PACKAGING_SELECTION=os.environ.get('PACKAGES', '') if os.environ.get('PUBLISH') == 'false' else '')
+            bind_library_sources(ROOT / 'buildroot', ROOT / 'downloads')
             run(['php', 'bin/spp', 'build', *flags], env=environment)
             compiled_source = os.environ['SOURCE_RUN_ID']
         elif not restored:
