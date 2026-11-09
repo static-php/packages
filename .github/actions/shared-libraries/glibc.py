@@ -168,6 +168,10 @@ def shared_sdk_packaging():
 
 def package_libraries(kind):
     directory = format_stage(kind)
+    if (os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES')
+            and not read(directory / 'shared-library-plan.json')['libraries']):
+        (directory / 'libraries').mkdir(exist_ok=True)
+        return
     selected_sdk = format_sdk(kind)
     shared = kind != 'apk' and selected_sdk == ROOT / 'buildroot'
     if shared:

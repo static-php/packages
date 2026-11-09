@@ -235,6 +235,20 @@ class Pipeline(unittest.TestCase):
             self.assertEqual({entry['arch'] for entry in matrix}, {'x86_64'})
             self.assertTrue(all(entry['image'] == 'producer' for entry in matrix))
 
+    def test_php_only_build_test_does_not_package_or_reseal_the_sdk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            with patch.object(glibc, 'STAGE', stage), patch.dict(os.environ, {'PUBLISH': 'false', 'PACKAGES': 'fpm'}), \
+                    patch.object(glibc, 'run', side_effect=AssertionError('unnecessary SDK work')):
+                for kind in ['rpm', 'deb', 'apk']:
+                    directory = glibc.format_stage(kind)
+                    glibc.write(directory / 'shared-library-plan.json', {'libraries': []})
+                    glibc.write(directory / 'shared-libraries.json', {'libraries': {'fixture': {'version': '1.0'}}})
+                    original = (directory / 'shared-libraries.json').read_bytes()
+                    glibc.package_libraries(kind)
+                    self.assertEqual((directory / 'shared-libraries.json').read_bytes(), original)
+                    self.assertEqual(list((directory / 'libraries').iterdir()), [])
+
     def test_local_dependencies_never_shadow_the_candidate_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
