@@ -204,6 +204,24 @@ class ForgejoPublication(unittest.TestCase):
             self.assertNotIn(f'Completed {index}/2:', output)
         self.assertIn('Completed 2/2:', printed.getvalue())
 
+    def test_failed_debug_upload_does_not_cancel_remaining_packages_or_phases(self):
+        paths = [self.archive(name=name) for name in (
+            'php-zts-runtime-layout', 'php-zts-lib-grpc-debuginfo', 'php-zts-lib-zlib',
+            'frankenphp', 'php-zts-cli')]
+        for mirror in (False, True):
+            attempted = []
+            def upload(host, owner, password, kind, path):
+                attempted.append(path)
+                if 'grpc-debuginfo' in path.name:
+                    raise RuntimeError('connection closed during upload')
+            helpers = dict(helper, get_remote_candidates=lambda *args: [],
+                           verify_upload_versions=lambda host, owner, password, kind, paths, remote: paths,
+                           upload_verified_archive=upload)
+            with self.subTest(mirror=mirror), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, '1 package uploads failed; remaining packages were attempted'):
+                    publisher['publish']('upload', 'https://example.com', 'test', 'alpine', {'84': paths}, helpers, True, mirror=mirror)
+            self.assertCountEqual(attempted, paths)
+
     def test_owner_listing_records_owner_and_reads_every_stream(self):
         listing = Mock(side_effect=lambda host, owner, password, kind: [{'name': 'library', 'version': owner}])
         with patch.dict(helper_globals, {'get_remote_packages': listing}):

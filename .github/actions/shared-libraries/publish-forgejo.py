@@ -134,13 +134,19 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
         try:
             helper['upload_verified_archive'](host, owner, password, kind, path)
         except Exception as error:
-            raise RuntimeError(f'Upload failed for {host} {owner}/{path.name}: {error}') from error
+            failure = f'Upload failed for {host} {owner}/{path.name}: {error}'
+            print(failure + '; continuing with remaining packages', flush=True)
+            return failure
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
     # Limit contention while recovering the secondary registry's HTTP 500 failures.
     # Primary publication keeps its parallel uploads.
+    failures = []
     with ThreadPoolExecutor(max_workers=1 if mirror else 4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
-            list(pool.map(upload, phase))
+            failures.extend(error for error in pool.map(upload, phase) if error)
+    if failures:
+        raise RuntimeError(f'{len(failures)} package uploads failed; remaining packages were attempted: '
+                           + ' | '.join(failures[:5]))
 
 
 def main(argv=None):
