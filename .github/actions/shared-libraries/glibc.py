@@ -147,20 +147,36 @@ def format_stage(kind):
 
 
 def format_sdk(kind):
-    return ROOT / 'buildroot' if kind == 'apk' else STAGE / ('sdk-' + kind)
+    return ROOT / 'buildroot' if kind == 'apk' or shared_sdk_packaging() else STAGE / ('sdk-' + kind)
+
+
+def shared_sdk_packaging():
+    selected = set(filter(None, os.environ.get('LIBRARIES', '').split(',')))
+    if not selected:
+        return False
+    plan = read(STAGE / 'library-build-plan.json')
+    if plan.get('full') or plan.get('rebuilt_libraries'):
+        return False
+    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+    closure = graph['dependency_closure'](selected, graph['library_graph'](read(ROOT / 'buildroot/shared-libraries.json')))
+    return 'openssl' not in closure
 
 
 def package_libraries(kind):
     directory = format_stage(kind)
     selected_sdk = format_sdk(kind)
-    shutil.copy2(directory / 'shared-libraries.json', selected_sdk / 'shared-libraries.json')
-    run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
+    shared = kind != 'apk' and selected_sdk == ROOT / 'buildroot'
+    manifest = directory / 'shared-libraries.json' if shared else selected_sdk / 'shared-libraries.json'
+    if not shared:
+        shutil.copy2(directory / 'shared-libraries.json', manifest)
+        run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
+    manifest_option = ['--library-manifest=' + str(manifest)] if shared else []
     abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
     if abi.exists():
         copy_tree(abi, directory / 'abi')
     retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
                   '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
-                  '--manifest', selected_sdk / 'shared-libraries.json', '--manifest-output', selected_sdk / 'shared-libraries.json',
+                  '--manifest', manifest, '--manifest-output', manifest,
                   '--output', directory / 'publication-retries.json']
     for baseline_path in directory.glob('baseline/shared-libraries.json'):
         retry_args += ['--baseline-manifest', baseline_path]
@@ -170,12 +186,12 @@ def package_libraries(kind):
         environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
         selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
         run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(selected_sdk),
-             *selection, '--debuginfo', *revision_flags()], env=environment)
+             *manifest_option, *selection, '--debuginfo', *revision_flags()], env=environment)
     if kind in FORMATS and list((ROOT / 'dist' / kind).glob('*.' + kind)):
         run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', selected_sdk,
              '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', directory / 'payload-archive-receipt.json'])
     run(['php', 'bin/build-payload', 'manifest', '--root', selected_sdk, '--type', kind,
-         '--output', directory / 'shared-libraries.json'])
+         *manifest_option, '--output', directory / 'shared-libraries.json'])
     packages = directory / 'libraries'
     packages.mkdir(exist_ok=True)
     for archive in (ROOT / 'dist' / kind).glob('*.' + kind):
@@ -236,8 +252,9 @@ def classify():
         list(executor.map(read_baseline, formats))
     if rebuilt and glibc:
         share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
-    variants_ready = not glibc
-    if glibc and not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
+    shared = glibc and shared_sdk_packaging()
+    variants_ready = not glibc or shared
+    if glibc and not shared and not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
         run(variants('build', sdk))
         variants_ready = True
     for phase in range(100):
@@ -247,9 +264,9 @@ def classify():
             selected_sdk = format_sdk(kind)
             if selected_sdk != sdk:
                 copy_tree(sdk, selected_sdk)
-            if glibc and variants_ready:
+            if glibc and not shared and variants_ready:
                 run(variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
-            if glibc:
+            if glibc and not shared:
                 seed_abi_cache(selected_sdk, kind)
             args = ['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
                     '--manifest', selected_sdk / 'shared-libraries.json', '--root', selected_sdk,
@@ -268,7 +285,7 @@ def classify():
                     all(request.get('requests', {}).get(stream, {}).get('full') for stream in STREAMS)):
                 args += ['--bootstrap']
             run(args)
-            if glibc:
+            if glibc and not shared:
                 save_abi_cache(selected_sdk, kind)
             plan = read(directory / 'shared-library-plan.json')
             plans[kind] = plan
@@ -285,6 +302,7 @@ def classify():
                 rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
                 shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
                 (STAGE / 'sdk-rebuilt').touch()
+                shared = False
                 variants_ready = not glibc
                 continue
         if variants_ready:
@@ -304,8 +322,10 @@ def classify():
     format_manifests = {kind: read(STAGE / kind / 'shared-libraries.json') for kind in FORMATS}
     for kind, entry in merge_library_abi(sdk_manifest, format_manifests):
         for relative in entry.get('abi_dump', {}).values():
-            source = STAGE / ('sdk-' + kind) / relative
+            source = format_sdk(kind) / relative
             destination = sdk / relative
+            if source == destination:
+                continue
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
             proof = source.with_suffix(source.suffix + '.inputs.json')

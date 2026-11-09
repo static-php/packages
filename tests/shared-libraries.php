@@ -152,6 +152,16 @@ try {
     expect($reloaded->get('base')['source_hash'] === $manifest['libraries']['base']['source_hash'], 'Persisting package versions lost source identity');
     expect($reloaded->get('base')['abi_dump'] === $manifest['libraries']['base']['abi_dump'], 'Persisting package versions lost ABI metadata');
     expect(glob($temporary . '/.shared-libraries-*') === [], 'Atomic manifest temporary files were left behind');
+    $format = $manifest;
+    $format['libraries']['base']['package_versions']['deb'] = '1.0-10';
+    $formatPath = $temporary . '/format-libraries.json';
+    file_put_contents($formatPath, json_encode($format, JSON_THROW_ON_ERROR));
+    $formatLibraries = SharedLibraries::load($temporary, true, $runtime, $formatPath);
+    expect($formatLibraries->getPackageVersion('base', 'deb') === '1.0-10', 'Format manifest did not isolate package versions');
+    $formatLibraries->setPackageVersion('base', 'deb', '1.0-11');
+    $formatLibraries->persist();
+    expect(SharedLibraries::load($temporary)->getPackageVersion('base', 'deb') === '1.0-3', 'Format package versions leaked into the common SDK');
+    expect(hash_file('sha256', $temporary . '/shared-libraries.json') === $manifestBeforePersist, 'Format metadata mutated the common SDK');
     rejected(static fn () => $libraries->setPackageVersion('base', 'deb', '1.0-3 >= malicious'), 'Invalid resolved');
     rejected(static fn () => $libraries->setPackageVersion('base', 'deb', '1.0'), 'Invalid resolved');
     rejected(static fn () => $libraries->setPackageVersion('base', 'apk', '1.0-3'), 'Invalid resolved');

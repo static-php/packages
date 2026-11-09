@@ -37,7 +37,7 @@ class CreatePackages
     private static ?SharedLibraries $sharedLibraries = null;
     private static array $consumerManifest = [];
 
-    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null, bool $libsOnly = false, ?array $libraries = null, ?string $buildroot = null): true
+    public static function run($packageNames = null, ?string $iteration = null, ?bool $debuginfo = null, ?bool $bump = null, bool $libsOnly = false, ?array $libraries = null, ?string $buildroot = null, ?string $libraryManifest = null): true
     {
         self::$prefix = defined('SPP_PREFIX') ? SPP_PREFIX : '-zts';
         self::$packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
@@ -50,9 +50,12 @@ class CreatePackages
         if ($buildroot !== null && (!$libsOnly || !is_file($buildroot . '/shared-libraries.json'))) {
             throw new \InvalidArgumentException('--buildroot requires --libs-only and a shared library SDK manifest.');
         }
+        if ($libraryManifest !== null && !$libsOnly) {
+            throw new \InvalidArgumentException('--library-manifest requires --libs-only.');
+        }
         $manifestRoot = $buildroot ?? ($libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH);
         $shared = CraftConfig::getInstance()->getRawConfig()['build-options']['with-shared-libs'] ?? false;
-        self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, self::runtimeLibdir());
+        self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, self::runtimeLibdir(), $libraryManifest);
         if (self::$sharedLibraries !== null && ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN'))) {
             $plan = self::migrationBaseline($planPath);
             if (($plan['build_only'] ?? false) === true) {
@@ -72,6 +75,7 @@ class CreatePackages
         }
         if ($payload !== null && self::$packageType !== 'apk' && self::$sharedLibraries !== null
             && in_array('openssl', self::$sharedLibraries->libraryIds(), true)
+            && (!$libsOnly || ($libraries === null && $packageNames !== ['runtime_layout'] && $packageNames !== 'runtime_layout') || in_array('openssl', $libraries ?? [], true))
             && ($payload->metadata()['openssl_variant']['profile'] ?? null) !== self::$packageType) {
             throw new RuntimeException('Select and seal the matching OpenSSL package profile before packaging.');
         }

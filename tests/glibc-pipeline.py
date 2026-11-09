@@ -107,7 +107,7 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for kind, rebuilt, cached_variants in [('rpm', False, False), ('rpm', False, True), ('rpm', True, False), ('apk', False, False), ('apk', True, False)]:
+        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True)]:
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
@@ -139,7 +139,7 @@ class Pipeline(unittest.TestCase):
                     elif args[:2] == ['php', 'bin/spp']:
                         kind = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--type='))
                         selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
-                        self.assertEqual(Path(selected), sdk if kind == 'apk' else stage / ('sdk-' + kind))
+                        self.assertEqual(Path(selected), sdk if kind == 'apk' or manual else stage / ('sdk-' + kind))
                         self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
                         archives = root / 'dist' / kind
                         archives.mkdir(parents=True, exist_ok=True)
@@ -148,15 +148,15 @@ class Pipeline(unittest.TestCase):
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind):
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual else ''):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
                 self.assertCountEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
-                self.assertTrue(any('seal' in call for call in calls))
+                self.assertEqual(any('seal' in call for call in calls), not manual)
                 prepares = [call for call in calls if 'prepare' in call]
-                self.assertEqual(len(prepares), 1 if kind == 'apk' else 2 if cached_variants else 4)
+                self.assertEqual(len(prepares), 1 if kind == 'apk' else 2 if cached_variants or manual else 4)
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
                 self.assertEqual(packaging.n_waiting, 0)
                 archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]

@@ -15,14 +15,14 @@ final class SharedLibraries
     private array $elf = [];
     private string $manifestHash;
 
-    public function __construct(string $root, ?string $expectedRuntimeLibdir = null)
+    public function __construct(string $root, ?string $expectedRuntimeLibdir = null, ?string $manifestPath = null)
     {
         $resolved = realpath($root);
         if ($resolved === false || !is_dir($resolved)) {
             throw new RuntimeException("Missing shared-library buildroot: {$root}");
         }
         $this->root = $resolved;
-        $path = $resolved . '/shared-libraries.json';
+        $path = $manifestPath ?? $resolved . '/shared-libraries.json';
         try {
             $this->manifest = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
         } catch (\Throwable $error) {
@@ -167,12 +167,12 @@ final class SharedLibraries
         }
     }
 
-    public static function load(string $root, bool $required = true, ?string $expectedRuntimeLibdir = null): ?self
+    public static function load(string $root, bool $required = true, ?string $expectedRuntimeLibdir = null, ?string $manifestPath = null): ?self
     {
-        if (!$required && !is_file(rtrim($root, '/') . '/shared-libraries.json')) {
+        if (!$required && !is_file($manifestPath ?? rtrim($root, '/') . '/shared-libraries.json')) {
             return null;
         }
-        return new self($root, $expectedRuntimeLibdir);
+        return new self($root, $expectedRuntimeLibdir, $manifestPath);
     }
 
     public function libraryIds(): array

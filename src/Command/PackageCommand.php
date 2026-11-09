@@ -23,6 +23,7 @@ class PackageCommand extends BaseCommand
             ->addOption('bump', null, InputOption::VALUE_NONE, 'Bump each package iteration to (latest published on the remote repo) + 1')
             ->addOption('libs-only', null, InputOption::VALUE_NONE, 'Package shared libraries without requiring a PHP binary')
             ->addOption('buildroot', null, InputOption::VALUE_REQUIRED, 'Shared library SDK directory (requires --libs-only)')
+            ->addOption('library-manifest', null, InputOption::VALUE_REQUIRED, 'Classified library metadata for the SDK (requires --libs-only)')
             ->addOption('libraries', null, InputOption::VALUE_REQUIRED, 'Select shared libraries (comma-separated; requires --libs-only)');
     }
 
@@ -55,7 +56,7 @@ class PackageCommand extends BaseCommand
         }
 
         // All parameters now come from constants set by BaseCommand::initialize()
-        $result = CreatePackages::run($packageNames, $iteration, $debuginfo, $bump, $libsOnly, $libraries, $buildroot);
+        $result = CreatePackages::run($packageNames, $iteration, $debuginfo, $bump, $libsOnly, $libraries, $buildroot, $input->getOption('library-manifest'));
 
         if ($result) {
             $output->writeln("Package creation completed successfully.");

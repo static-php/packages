@@ -20,7 +20,7 @@ for ($i = 2; $i < count($argv); ++$i) {
     if (!preg_match('/^--([a-z-]+)(?:=(.*))?$/D', $argv[$i], $match)) {
         throw new RuntimeException('Unexpected payload argument: ' . $argv[$i]);
     }
-    if (!in_array($match[1], ['root', 'type', 'config', 'php-version', 'arch', 'source-version', 'kind', 'metadata', 'reuse-proof', 'output', 'downloads'], true)) {
+    if (!in_array($match[1], ['root', 'type', 'config', 'php-version', 'arch', 'source-version', 'kind', 'metadata', 'reuse-proof', 'output', 'downloads', 'library-manifest'], true)) {
         throw new RuntimeException('Unknown payload option: ' . $match[1]);
     }
     $options[$match[1]] = $match[2] ?? ($argv[++$i] ?? throw new RuntimeException('Missing option value'));
@@ -103,7 +103,7 @@ if ($command === 'record' || $command === 'checkpoint') {
     $payload = BuildPayload::refreshAssets($root, $options['downloads'] ?? BASE_PATH . '/downloads');
     echo json_encode(['state' => 'sealed', 'asset_updates' => $payload->metadata()['asset_updates']]), "\n";
 } elseif ($command === 'manifest') {
-    SharedLibraries::load($root, true)->exportManifest($options['output'] ?? throw new RuntimeException('Specify --output'));
+    SharedLibraries::load($root, true, null, $options['library-manifest'] ?? null)->exportManifest($options['output'] ?? throw new RuntimeException('Specify --output'));
 } else {
     throw new RuntimeException('Usage: build-payload record|checkpoint|seal|verify|graft|refresh-assets|manifest --root PATH [--metadata FILE --config FILE --php-version VERSION --arch ARCH --type rpm|deb|apk --output FILE]');
 }
