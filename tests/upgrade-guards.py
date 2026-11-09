@@ -40,7 +40,7 @@ class UpgradeGuards(unittest.TestCase):
         url = 'https://example.com/repodata/repomd.xml'
         for status in (429, 500, 520, 522, 525, 526):
             with self.subTest(status=status):
-                error = rpm_globals['urllib'].error.HTTPError(url, status, 'unavailable', {}, None)
+                error = rpm_globals['urllib'].error.HTTPError(url, status, 'unavailable', {}, io.BytesIO())
                 response = contextlib.nullcontext(io.BytesIO(b'verified metadata'))
                 with patch.object(rpm_globals['urllib'].request, 'urlopen', side_effect=[error, response]) as request, \
                         patch.object(rpm_globals['time'], 'sleep'):
