@@ -273,18 +273,13 @@ def export(args):
 
 
 def extract(archive, destination):
-    with tempfile.TemporaryDirectory(prefix='spp-payload-read-') as temporary:
-        tar_path = Path(temporary) / 'payload.tar'
-        with tar_path.open('wb') as decoded:
-            subprocess.run(['zstd', '-q', '-dc', str(archive)], stdout=decoded, check=True)
-        with tarfile.open(tar_path, 'r:') as source:
-            members = source.getmembers()
-            if len({item.name for item in members}) != len(members):
-                raise RuntimeError('Duplicate PHP cache archive path')
-            metadata = source.extractfile('cache.json')
-            if metadata is None:
-                raise RuntimeError('Missing PHP cache metadata')
-            manifest = json.load(metadata)
+    process = subprocess.Popen(['zstd', '-q', '-dc', str(archive)], stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=process.stdout, mode='r|') as source:
+            first = source.next()
+            if first is None or first.name != 'cache.json' or not first.isfile():
+                raise RuntimeError('Missing initial PHP cache metadata')
+            manifest = json.load(source.extractfile(first))
             allowed = {name for name in manifest.get('files', {}) if php_file(name) or name == 'skipped-shared-extensions.json'}
             for name, prepared in manifest.get('build_payload', {}).get('prepared', {}).items():
                 if not php_file(name):
@@ -298,11 +293,18 @@ def extract(archive, destination):
             if set(manifest.get('files', {})) - allowed:
                 raise RuntimeError('PHP cache must not replace current SDK library files')
             expected = {'cache.json', *('files/' + safe(name) for name in manifest.get('files', {}))}
-            if {item.name for item in members} != expected:
-                raise RuntimeError('PHP cache archive inventory mismatch')
-            for name, recorded in manifest['files'].items():
+            seen = {'cache.json'}
+            for member in source:
+                if member is first:
+                    continue
+                if member.name in seen:
+                    raise RuntimeError('Duplicate PHP cache archive path')
+                seen.add(member.name)
+                if member.name not in expected:
+                    raise RuntimeError('PHP cache archive inventory mismatch')
+                name = member.name.removeprefix('files/')
+                recorded = manifest['files'][name]
                 target = destination / safe(name)
-                member = source.getmember('files/' + name)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if member.issym():
                     link = member.linkname
@@ -317,6 +319,15 @@ def extract(archive, destination):
                     raise RuntimeError('Unexpected PHP cache archive member')
                 if identity(target) != recorded:
                     raise RuntimeError('PHP cache content mismatch: ' + name)
+            if seen != expected:
+                raise RuntimeError('PHP cache archive inventory mismatch')
+            while process.stdout.read(1024 * 1024):
+                pass
+    finally:
+        process.stdout.close()
+        process.wait()
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args)
     return manifest
 
 
@@ -336,7 +347,8 @@ def restore_payload(args):
     shared = profile_helper().expected_profile(args.root, args.stream)['shared']
     packages = {next((item for item in shared if item.replace('_', '-') == name.replace('_', '-')), name) for name in packages}
     requested_packages = set(packages)
-    with tempfile.TemporaryDirectory(prefix='spp-payload-restore-') as temporary:
+    args.payload.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='spp-payload-restore-', dir=args.payload.parent) as temporary:
         staged = Path(temporary) / 'files'
         staged.mkdir()
         manifest = extract(args.archive, staged)
@@ -440,10 +452,7 @@ def restore_payload(args):
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_file() or target.is_symlink():
                 target.unlink()
-            if (staged / name).is_symlink():
-                target.symlink_to(os.readlink(staged / name))
-            else:
-                shutil.copy2(staged / name, target)
+            (staged / name).rename(target)
         metadata = args.payload / 'provenance/cached-consumer/build-payload.json'
         write(metadata, manifest['build_payload'])
         graft = ['php', str(args.root / 'bin/build-payload'), 'graft', '--root', str(args.payload), '--metadata', str(metadata)]

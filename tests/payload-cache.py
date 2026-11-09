@@ -4,12 +4,14 @@
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -89,6 +91,34 @@ class PayloadCache(unittest.TestCase):
         template = self.root / 'config/templates/craft.yml.twig'
         template.write_text(template.read_text().replace('-O2', '-O3'))
         self.assertNotEqual(self.state()['seed-key'], previous['seed-key'])
+
+    def test_streamed_archive_rejects_corruption_and_inventory_changes(self):
+        content = b'cached executable'
+        manifest = {'files': {'bin/php': {'sha256': hashlib.sha256(content).hexdigest(), 'mode': 0o755}}}
+        metadata = json.dumps(manifest).encode()
+        valid = [('cache.json', metadata), ('files/bin/php', content)]
+        for name, members in [('valid', valid), ('duplicate', valid + [valid[1]]),
+                              ('missing', valid[:1]), ('extra', valid + [('files/bin/other', content)]),
+                              ('corrupt', [valid[0], ('files/bin/php', b'changed')])]:
+            with self.subTest(name=name):
+                raw = io.BytesIO()
+                with tarfile.open(fileobj=raw, mode='w') as archive:
+                    for path, data in members:
+                        header = tarfile.TarInfo(path)
+                        header.size, header.mode = len(data), 0o755
+                        archive.addfile(header, io.BytesIO(data))
+                compressed = self.root / (name + '.tar.zst')
+                compressed.write_bytes(subprocess.check_output(['zstd', '-q', '-c'], input=raw.getvalue()))
+                destination = self.root / name
+                if name == 'valid':
+                    self.assertEqual(cache.extract(compressed, destination), manifest)
+                    self.assertEqual((destination / 'bin/php').read_bytes(), content)
+                    compressed.write_bytes(compressed.read_bytes()[:-4])
+                    with self.assertRaises((subprocess.CalledProcessError, tarfile.TarError, RuntimeError)):
+                        cache.extract(compressed, self.root / 'truncated')
+                else:
+                    with self.assertRaises(RuntimeError):
+                        cache.extract(compressed, destination)
 
     def fixture(self, directory, value, php=False):
         (directory / 'lib').mkdir(parents=True)
