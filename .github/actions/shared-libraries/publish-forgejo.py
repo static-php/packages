@@ -199,16 +199,15 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
         if helper['archive_sha256'](path) != digests[path]:
             raise RuntimeError('A cohort archive changed after publication preflight: ' + path.name)
         try:
-            helper['upload_verified_archive'](host, owner, password, kind, path)
+            helper['upload_verified_archive'](host, owner, password, kind, path, preflighted=True)
         except Exception as error:
             failure = f'Upload failed for {host} {owner}/{path.name}: {error}'
             print(failure + '; continuing with remaining packages', flush=True)
             return failure
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
-    # Limit contention while recovering the secondary registry's HTTP 500 failures.
-    # Primary publication keeps its parallel uploads.
+    # Mirror cohorts are serialized by the workflow; bound concurrent large uploads.
     failures = []
-    with ThreadPoolExecutor(max_workers=1 if mirror else 4) as pool:
+    with ThreadPoolExecutor(max_workers=2 if mirror else 4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
             failures.extend(error for error in pool.map(upload, phase) if error)
     if failures:
@@ -231,7 +230,7 @@ def publish_mirror(action, cohort, directory, package_type, owners, selected, he
         if not groups:
             continue
         try:
-            publish(action, helper['host2'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap, mirror=True)
+            publish(action, helper['host2'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, True, mirror=True)
         except RuntimeError as error:
             failures.append(str(error))
             print(str(error) + '; continuing with remaining mirror packages', flush=True)
