@@ -15,6 +15,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fnmatch import fnmatch
+from functools import lru_cache
 from urllib.parse import quote
 
 MIGRATION_CUTOFF_PATH = 'usr/share/php-zts/migration/cutoffs.json'
@@ -456,12 +457,23 @@ def package_metadata(pkg_file, pkg_type):
     with open(pkg_file, 'rb') as archive:
         return apk_metadata(archive)
 
+@lru_cache(maxsize=4096)
+def valid_apk_version(version):
+    result = subprocess.run(['apk', 'version', '--check', version], capture_output=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError('Cannot validate published APK version: ' + version)
+    return result.returncode == 0
+
+
 def version_is_newer(pkg_type, left, right):
     if pkg_type == 'debian':
         result = subprocess.run(['dpkg', '--compare-versions', left, 'gt', right])
         if result.returncode not in [0, 1]:
             raise RuntimeError(f"Cannot compare Debian versions {left} and {right}")
         return result.returncode == 0
+    left_valid, right_valid = valid_apk_version(left), valid_apk_version(right)
+    if not left_valid or not right_valid:
+        return left_valid and not right_valid
     result = subprocess.check_output(['apk', 'version', '-t', left, right], universal_newlines=True).strip()
     if result not in ['<', '=', '>']:
         raise RuntimeError(f"Cannot compare APK versions {left} and {right}")

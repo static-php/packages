@@ -573,6 +573,21 @@ class ForgejoPublication(unittest.TestCase):
             publisher['publish']('upload', 'https://mirror.test', 'test', 'alpine', {'85': [path]}, helpers, True, mirror=True)
         upload.assert_not_called()
 
+    @unittest.skipUnless(shutil.which('apk'), 'native APK version comparator unavailable')
+    def test_invalid_old_apk_version_cannot_block_valid_mirror_replacement(self):
+        path = self.archive(name='php-zts-igbinary', version='3.2.17_rc1_p82-r5')
+        remote = [{'name': 'php-zts-igbinary', 'version': '3.2.17~rc1p82-r0'}]
+        self.assertFalse(helper['version_is_newer']('alpine', remote[0]['version'], '3.2.17_rc1_p82-r5'))
+        self.assertTrue(helper['version_is_newer']('alpine', '3.2.17_rc1_p82-r5', remote[0]['version']))
+        self.assertTrue(helper['version_is_newer']('alpine', '3.2.17_rc1_p82-r6', '3.2.17_rc1_p82-r5'))
+        upload = Mock()
+        helpers = dict(helper, get_remote_candidates=lambda *args: remote,
+                       get_remote_package_archs=Mock(side_effect=AssertionError('Invalid old archive read')),
+                       upload_verified_archive=upload)
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher['publish']('upload', 'https://mirror.test', 'test', 'alpine', {'82': [path]}, helpers, True, mirror=True)
+        upload.assert_called_once_with('https://mirror.test', '82', 'test', 'alpine', path, preflighted=True)
+
     def test_parallel_uploads_finish_dependencies_before_cli(self):
         libraries = {'php-zts-lib-' + str(i) for i in range(4)}
         paths = [self.archive(name=name) for name in sorted(libraries | {'php-zts-cli', 'php-zts-runtime-layout'})]
