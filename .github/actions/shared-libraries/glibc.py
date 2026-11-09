@@ -426,6 +426,8 @@ def record():
               'package_images': json.loads(os.environ['PACKAGE_IMAGES'])}
     if (STAGE / 'payload-provenance.json').is_file():
         target['payload_stream'] = read(STAGE / 'payload-provenance.json')['php_stream']
+    if (STAGE / 'packaged-stream').is_file():
+        target['packaged_stream'] = (STAGE / 'packaged-stream').read_text().strip()
     for directory in [STAGE / 'common', *[STAGE / kind for kind in FORMATS]]:
         write(directory / 'target.json', target)
         (directory / 'cache-key').write_text(os.environ['CACHE_KEY'] + '\n')
@@ -582,11 +584,23 @@ def package():
     test_dependencies(kind, root, STAGE / kind, consumers=True)
 
 
+def package_inline():
+    if os.environ.get('PUBLISH') != 'false' or not os.environ.get('PACKAGES'):
+        raise RuntimeError('Inline packaging requires a selected build/test-only request')
+    for kind in FORMATS:
+        if not read(STAGE / kind / 'shared-library-plan.json').get('build_only'):
+            raise RuntimeError('Inline packaging requires unpublished native dependency fixtures')
+    for kind in FORMATS:
+        run(['python3', '.github/actions/shared-libraries/glibc.py', 'package'], env=dict(os.environ, TYPE=kind))
+        copy_tree(ROOT / 'dist' / kind, STAGE / kind / 'consumers')
+    (STAGE / 'packaged-stream').write_text(os.environ['PHPV'] + '\n')
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'test-packages', 'test-dependencies'])
+    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'inline-package', 'test-packages', 'test-dependencies'])
     args = parser.parse_args()
-    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'test-packages': test_packages,
+    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'inline-package': package_inline, 'test-packages': test_packages,
      'test-dependencies': lambda: test_dependencies(os.environ['TYPE'], ROOT / 'build' / os.environ['PHPV'], format_stage(os.environ['TYPE']), consumers=True)}[args.command]()
 
 

@@ -354,7 +354,8 @@ def main():
                 if selection is not None and not (request and (request.get("full") or request.get("packages"))):
                     continue
                 packages = "" if request and request.get("full") else ",".join(request.get("packages", [])) if request else value["packages"]
-                includes.append(dict(value, type=kind, packages=packages, **{"package-image": value["package_images"][kind], "library-only": False}))
+                includes.append(dict(value, type=kind, packages=packages, packaged=value.get('packaged_stream') == value['php-version'],
+                                     **{"package-image": value["package_images"][kind], "library-only": False}))
         for target in target_values:
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
             plan = json.loads(path.read_text())

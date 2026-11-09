@@ -26,9 +26,11 @@ runs:
             shell: bash
             run: bash .github/actions/shared-libraries/run.sh glibc-payload
         -   name: Pack sealed common payload
+            if: env.INLINE_PACKAGE != 'true'
             shell: bash
             run: python3 .github/actions/shared-libraries/payload-cache.py package-archive --payload "build/$PHPV" --packages "$PACKAGES" --output php-payload.tar.zst
         -   name: Stage sealed common payload
+            if: env.INLINE_PACKAGE != 'true'
             uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
             with:
                 overwrite: true
@@ -36,6 +38,10 @@ runs:
                 path: php-payload.tar.zst
                 compression-level: 0
                 retention-days: 1
+        -   name: Package selected outputs in the producer
+            if: env.INLINE_PACKAGE == 'true'
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh glibc-inline-package
         -   name: Export PHP-only sealed cache
             if: env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true'
             shell: bash

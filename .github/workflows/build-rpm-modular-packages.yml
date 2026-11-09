@@ -296,10 +296,12 @@ jobs:
                     bash .github/actions/shared-libraries/run.sh glibc-classify
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
+                    echo "inline-package=$(jq -s 'all(.[]; .build_only == true)' stage/rpm/shared-library-plan.json stage/deb/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
             -   name: Build single PHP stream in the restored SDK workspace
                 if: steps.classification.outputs.inline-stream != ''
                 uses: ./.github/actions/php-payload
                 env:
+                    INLINE_PACKAGE: ${{ inputs.publish != true && inputs.packages != '' && steps.classification.outputs.inline-package == 'true' }}
                     PHPV: ${{ steps.classification.outputs.inline-stream }}
                     PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').packages }}
                     COMPILE: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile }}
@@ -621,12 +623,12 @@ jobs:
                     name: shared-sdk-glibc-${{ matrix.target }}
                     path: stage
             -   name: Download common PHP payload
-                if: matrix.library-only != true
+                if: matrix.library-only != true && matrix.packaged != true
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
             -   name: Extract sealed common payload
-                if: matrix.library-only != true
+                if: matrix.library-only != true && matrix.packaged != true
                 run: zstd -dc php-payload.tar.zst | tar -xpf -
             -   name: Download matching library packages
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -639,6 +641,7 @@ jobs:
                 run: |
                     mkdir -p "dist/$TYPE" library-stage/libraries
                     find library-stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;
+                    if [[ -d library-stage/consumers ]]; then cp -a library-stage/consumers/. "dist/$TYPE/"; fi
             -   name: Prepare native baseline comparison tools
                 if: env.BUILD_ONLY != 'true'
                 run: |
@@ -653,7 +656,7 @@ jobs:
                     if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-plan "stage/$TYPE/shared-library-plan.json"); fi
                     python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline "${args[@]}"
             -   name: Package sealed payload without compilation
-                if: matrix.library-only != true
+                if: matrix.library-only != true && matrix.packaged != true
                 run: |
                     docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
                         -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \

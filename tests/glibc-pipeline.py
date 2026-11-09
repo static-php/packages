@@ -234,6 +234,16 @@ class Pipeline(unittest.TestCase):
             self.assertEqual({entry['type'] for entry in matrix}, {'rpm', 'deb'})
             self.assertEqual({entry['arch'] for entry in matrix}, {'x86_64'})
             self.assertTrue(all(entry['image'] == 'producer' for entry in matrix))
+            self.assertTrue(all(not entry['packaged'] for entry in matrix))
+            for path in root.glob('*/target.json'):
+                target = json.loads(path.read_text())
+                target.update(payload_stream='8.6', packaged_stream='8.6')
+                path.write_text(json.dumps(target))
+            result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'packages', '--plans', root,
+                '--succeeded', '', '--sdk-succeeded', 'alma8-x86_64'], text=True)
+            matrix = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
+            self.assertEqual({entry['type'] for entry in matrix}, {'rpm', 'deb'})
+            self.assertTrue(all(entry['arch'] == 'x86_64' and entry['packaged'] for entry in matrix))
 
     def test_php_only_build_test_does_not_package_or_reseal_the_sdk(self):
         with tempfile.TemporaryDirectory() as temporary:

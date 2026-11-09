@@ -52,7 +52,7 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
 fi
 
 case "$command" in
-    classify|glibc-classify|glibc-record|glibc-payload|glibc-package)
+    classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-inline-package)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
