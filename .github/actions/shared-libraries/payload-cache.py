@@ -494,19 +494,23 @@ def validation_hosts(packages):
     return hosts - packages
 
 
-def packaging_projection(payload, record, manifest, packages):
+def packaging_projection(payload, record, manifest, packages, library_selection=None):
     excluded = set()
-    if packages and 'devel' not in packages:
-        consumers = packages | validation_hosts(packages)
-        retained = {'bin/php'}
-        retained.update('bin/php-' + name for name in consumers & {'cgi', 'fpm'})
-        retained.update(name for name in record['files'] if component_file(name, record) in consumers)
-        if 'embed' in consumers:
-            retained.update(name for name in record['files'] if name.startswith('lib/libphp'))
-        consumers = dict(record, files={name: value for name, value in record['files'].items() if name in retained})
+    if library_selection is not None or packages and 'devel' not in packages:
+        retained = set()
         graph = library_graph(manifest)
-        bindings = consumer_bindings(payload, consumers, abi(manifest), graph)
-        libraries = set(dependency_closure(({'openssl'} & graph.keys()) | {name for values in bindings.values() for name in values}, graph))
+        if library_selection is not None:
+            libraries = set(dependency_closure(library_selection, graph))
+        else:
+            consumers = packages | validation_hosts(packages)
+            retained = {'bin/php'}
+            retained.update('bin/php-' + name for name in consumers & {'cgi', 'fpm'})
+            retained.update(name for name in record['files'] if component_file(name, record) in consumers)
+            if 'embed' in consumers:
+                retained.update(name for name in record['files'] if name.startswith('lib/libphp'))
+            consumers = dict(record, files={name: value for name, value in record['files'].items() if name in retained})
+            bindings = consumer_bindings(payload, consumers, abi(manifest), graph)
+            libraries = set(dependency_closure(({'openssl'} & graph.keys()) | {name for values in bindings.values() for name in values}, graph))
         for name, entry in manifest['libraries'].items():
             paths = set(entry['files']) | set(entry.get('runtime_assets', {}))
             if name in libraries:

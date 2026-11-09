@@ -118,8 +118,10 @@ def combine_plans(plans):
 
 def merge_library_abi(common, formats):
     for name, entry in common['libraries'].items():
-        kind, current = max(((kind, manifest['libraries'][name]) for kind, manifest in formats.items()),
-                            key=lambda item: item[1].get('abi_epoch', 1))
+        candidates = [(kind, manifest['libraries'][name]) for kind, manifest in formats.items() if name in manifest['libraries']]
+        if not candidates:
+            continue
+        kind, current = max(candidates, key=lambda item: item[1].get('abi_epoch', 1))
         entry['abi_epoch'] = current.get('abi_epoch', 1)
         capability = 'php-zts-lib-' + name + '-abi-' + str(entry['abi_epoch'])
         entry['abi_capability'] = capability
@@ -286,7 +288,19 @@ def classify():
             directory = format_stage(kind)
             selected_sdk = format_sdk(kind)
             if selected_sdk != sdk:
-                copy_tree(sdk, selected_sdk)
+                if scope is not None and os.environ.get('LIBRARIES') and not rebuilt:
+                    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+                    record, manifest, excluded = graph['packaging_projection'](sdk, read(sdk / 'build-payload.json'),
+                        read(sdk / 'shared-libraries.json'), set(), library_selection=scope)
+                    if selected_sdk.exists():
+                        shutil.rmtree(selected_sdk)
+                    def ignore(directory, names):
+                        return [name for name in names if str((Path(directory) / name).relative_to(sdk)) in excluded or name.endswith('.a')]
+                    shutil.copytree(sdk, selected_sdk, symlinks=True, ignore=ignore)
+                    write(selected_sdk / 'build-payload.json', record)
+                    write(selected_sdk / 'shared-libraries.json', manifest)
+                else:
+                    copy_tree(sdk, selected_sdk)
             if glibc and not shared and variants_ready:
                 run(variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
             if glibc and not shared:
