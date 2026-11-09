@@ -4,7 +4,7 @@
 // Define constants
 define('BASE_PATH', dirname(__DIR__));
 const INI_PATH = BASE_PATH . '/src/ini';
-const DIST_PATH = BASE_PATH . '/dist';
+define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');
 const DIST_RPM_PATH = DIST_PATH . '/rpm';
 const DIST_DEB_PATH = DIST_PATH . '/deb';
 const DIST_APK_PATH = DIST_PATH . '/apk';

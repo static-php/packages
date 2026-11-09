@@ -182,6 +182,30 @@ def package_libraries(kind):
     consumer_manifest = ROOT / 'dist' / kind / 'shared-library-consumers.json'
     if consumer_manifest.exists():
         shutil.copy2(consumer_manifest, packages / consumer_manifest.name)
+    test_library_dependencies(kind, selected_sdk, directory)
+
+
+def test_library_dependencies(kind, sdk, directory):
+    plan = read(directory / 'shared-library-plan.json')
+    if not plan.get('build_only'):
+        return
+    libraries = read(sdk / 'shared-libraries.json')['libraries']
+    selected = set(plan['libraries'])
+    closure = set(selected)
+    pending = list(selected)
+    while pending:
+        entry = libraries[pending.pop()]
+        for dependency in entry.get('depends', []) + entry.get('dlopen_dependencies', []):
+            if dependency in libraries and dependency not in closure:
+                closure.add(dependency)
+                pending.append(dependency)
+    needed = sorted(closure - selected)
+    if needed:
+        environment = dict(os.environ, SPP_DIST_PATH=str(directory / 'test-dependencies'),
+                           SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]))
+        environment.pop('SPP_SHARED_LIBRARY_PLAN', None)
+        run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(sdk),
+             '--libraries=' + ','.join(needed), '--iteration=1'], env=environment)
 
 
 def classify():
@@ -223,6 +247,8 @@ def classify():
                 args += ['--request', STAGE / 'effective-source-plan.json']
             old = directory / 'baseline/shared-libraries.json'
             request = read(STAGE / 'effective-source-plan.json')
+            if os.environ.get('LIBRARIES') and os.environ.get('PUBLISH') == 'false':
+                args += ['--build-only']
             if not os.environ.get('LIBRARIES') and (os.environ.get('MODE', 'full') == 'full' or
                     (not old.exists() or not read(old).get('libraries')) and
                     all(request.get('requests', {}).get(stream, {}).get('full') for stream in STREAMS)):
@@ -285,6 +311,23 @@ def classify():
         source = STAGE / kind / 'baseline'
         if source.exists():
             copy_tree(source, common / kind / 'baseline')
+
+
+def test_libraries():
+    kind = os.environ['TYPE']
+    directory = STAGE if kind == 'apk' else ROOT / 'library-stage'
+    if not read(directory / 'shared-library-plan.json').get('build_only'):
+        raise RuntimeError('Fresh library validation requires an unpublished subset plan')
+    candidates = STAGE / 'native-libraries'
+    candidates.mkdir(exist_ok=True)
+    for source in [directory / 'test-dependencies' / kind, ROOT / 'dist' / kind]:
+        for archive in source.glob('*.' + kind):
+            shutil.copy2(archive, candidates / archive.name)
+    runtime = {'rpm': 'alma8', 'deb': 'debian', 'apk': 'alpine'}[kind]
+    run(['python3', 'tests/shared-runtime-containers.py', '--os', runtime, '--php', os.environ['PHPV'],
+         '--arch', os.environ['MATRIX_ARCH'], '--artifacts', candidates,
+         '--manifest', directory / 'shared-libraries.json', '--skip-individual', '--skip-fixtures',
+         '--report', ROOT / 'dist' / kind / 'native-install-receipt.json'])
 
 
 def record():
@@ -444,9 +487,9 @@ def package():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package'])
+    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'test-libraries'])
     args = parser.parse_args()
-    {'classify': classify, 'record': record, 'payload': payload, 'package': package}[args.command]()
+    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'test-libraries': test_libraries}[args.command]()
 
 
 if __name__ == '__main__':

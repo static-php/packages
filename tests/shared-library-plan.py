@@ -147,6 +147,31 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertTrue(result['bootstrap'])
         self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
 
+    def test_unpublished_library_subset_is_testable_but_never_publishable(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            baseline = directory / 'baseline'
+            baseline.mkdir()
+            (baseline / 'shared-libraries.json').write_text(json.dumps(planner['empty_manifest']()))
+            current = manifest({'fixture': library(), 'other': library(soname='libother.so.1')})
+            (directory / 'current.json').write_text(json.dumps(current))
+            args = argparse.Namespace(manifest=str(directory / 'current.json'), baseline=str(baseline),
+                                      root=str(directory), request=None, bootstrap=False, build_only=True,
+                                      mode='incremental', libraries='fixture', rebuilt_libraries='',
+                                      php_versions='8.5', packages='', type='deb',
+                                      manifest_output=str(directory / 'annotated.json'), output=str(directory / 'plan.json'))
+            with patch.dict(namespace, {'cached_abi': lambda *args: True}):
+                planner['prepare'](args)
+            plan = json.loads(Path(args.output).read_text())
+            self.assertTrue(plan['build_only'])
+            self.assertEqual(plan['libraries'], ['fixture'])
+            self.assertFalse(any(item['full'] or item['packages'] for item in plan['php_requests'].values()))
+            with self.assertRaisesRegex(RuntimeError, 'build/test-only'):
+                planner['cohort'](argparse.Namespace(plan=args.output))
+            args.build_only = False
+            with self.assertRaisesRegex(RuntimeError, '--bootstrap'):
+                planner['prepare'](args)
+
     def test_missing_debug_baseline_blocks_release(self):
         old = manifest()
         old['libraries']['fixture'].pop('abi_dump')

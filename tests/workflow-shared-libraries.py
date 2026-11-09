@@ -354,6 +354,7 @@ class CacheAndCohortTests(unittest.TestCase):
                     directory.mkdir(parents=True, exist_ok=True)
                     planned = {'libraries': {'zlib': {'package_versions': {kind: '1.3.1-1'}}}}
                     pipeline.write(directory / 'shared-libraries.json', planned)
+                    pipeline.write(directory / 'shared-library-plan.json', {})
                     def execute(args, **kwargs):
                         if 'stage-publication-retries' in args:
                             pipeline.write(directory / 'publication-retries.json', {'remaining_libraries': ['zlib']})

@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import pwd
 import shutil
 import signal
@@ -46,11 +47,14 @@ BASES = {
 FULL_BASES = ('alma8', 'debian', 'alpine')
 PHP_VERSIONS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 HERE = Path(__file__).resolve().parent
+ARCHITECTURE = runpy.run_path(str(HERE / 'container-architecture.py'))
 WARNING = re.compile(r'Unable to (?:load dynamic library|initialize module)|PHP Startup:|symbol lookup error|(?:module|extension|Cannot load).*already loaded', re.I)
 
 
 def run(command, *, check=True, cwd=None, env=None, input=None):
     command = [str(x) for x in command]
+    if command[0] == 'docker':
+        command[0] = os.environ.get('CONTAINER_ENGINE', 'docker')
     process = subprocess.Popen(command, cwd=cwd, env=env,
                                stdin=subprocess.PIPE if input is not None else None,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -844,21 +848,24 @@ def inside(args):
 
 
 class DockerRun:
-    def __init__(self, directory):
+    def __init__(self, directory, identity=None):
         self.directory = directory
+        self.identity = identity
         self.prefix = 'spp-runtime-' + uuid.uuid4().hex[:12]
         self.containers = []
         self.images = []
         self.checked_images = set()
 
     def container(self, image, suffix):
+        if self.identity is None:
+            self.identity = ARCHITECTURE['engine_identity'](run)
         if image not in self.checked_images and image not in self.images:
             self.checked_images.add(image)
             if run(['docker', 'image', 'inspect', image], check=False).returncode:
                 self.images.append(image)
         name = self.prefix + '-' + suffix
         self.containers.append(name)
-        run(['docker', 'run', '-d', '--name', name, '--platform', 'linux/amd64',
+        run(['docker', 'run', '-d', '--name', name, *ARCHITECTURE['container_options'](self.identity),
              '--mount', f'type=bind,src={self.directory},dst=/spp', image, 'sh', '-c', 'while :; do sleep 60; done'])
         return name
 
@@ -899,20 +906,21 @@ class DockerRun:
         return remaining
 
 
-def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True, fixtures_only=False):
+def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True, fixtures_only=False, architecture=None):
     kind, image = BASES[os_name]
     artifacts = Path(artifacts).resolve() if artifacts else None
     if not fixtures_only and (not artifacts or not artifacts.is_dir() or not list(artifacts.glob('*.' + kind))):
         raise RuntimeError(f'{os_name} PHP {php}: no {kind} packages in {artifacts}')
+    identity = ARCHITECTURE['engine_identity'](run, architecture)
     directory = Path(tempfile.mkdtemp(prefix='spp-runtime-'))
     directory.chmod(0o755)
-    resources = DockerRun(directory)
-    result = {'os': os_name, 'php': php, 'base_image': image}
+    resources = DockerRun(directory, identity)
+    result = {'os': os_name, 'php': php, 'base_image': image, **resources.identity}
     try:
         (directory / 'repo').mkdir()
         for package in artifacts.glob('*.' + kind) if artifacts else []:
             shutil.copy2(package, directory / 'repo' / package.name)
-        for filename in ('shared-runtime-containers.py', 'shared-runtime.php'):
+        for filename in ('shared-runtime-containers.py', 'shared-runtime.php', 'container-architecture.py'):
             shutil.copy2(HERE / filename, directory / filename)
         if manifest:
             shutil.copy2(manifest, directory / 'manifest.json')
@@ -963,6 +971,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--os', choices=BASES)
     parser.add_argument('--php', choices=PHP_VERSIONS)
+    parser.add_argument('--arch', choices=('x86_64', 'arm64'))
     parser.add_argument('--type', choices=('rpm', 'deb', 'apk'))
     parser.add_argument('--artifacts', type=Path)
     parser.add_argument('--manifest', type=Path)
@@ -988,7 +997,7 @@ def main():
     results = []
     def validate(os_name, php, *parameters, **options):
         try:
-            results.append(cell(os_name, php, *parameters, **options))
+            results.append(cell(os_name, php, *parameters, architecture=args.arch, **options))
         except Exception as error:
             results.append({'os': os_name, 'php': php, 'ok': False, 'error': str(error)})
             print(str(error), file=sys.stderr, flush=True)

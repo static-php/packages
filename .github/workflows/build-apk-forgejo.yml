@@ -192,6 +192,7 @@ jobs:
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             IMAGE: ${{ matrix.image }}
@@ -375,6 +376,7 @@ jobs:
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             IMAGE: ${{ matrix.image }}
@@ -407,6 +409,8 @@ jobs:
                 with:
                     name: shared-libs-apk-${{ matrix.target }}
                     path: stage
+            -   name: Select native validation baseline
+                run: echo "BUILD_ONLY=$(jq -r '.build_only // false' stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Download exact common SDK
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
@@ -444,6 +448,7 @@ jobs:
                     seed-key: ${{ (!matrix.abi-break || (matrix.compile && !matrix.abi-core-rebuild)) && steps.payload-cache-key.outputs.seed-key || '' }}
                     path: php-payload-cache.tar.zst
             -   name: Freeze actual published baseline
+                if: env.BUILD_ONLY != 'true'
                 run: bash .github/actions/shared-libraries/run.sh freeze-baseline
             -   name: Build and test PHP packages
                 env:
@@ -460,7 +465,11 @@ jobs:
             -   name: Prepare real library revision for service validation
                 if: matrix.runtime-checks == true
                 run: bash .github/actions/shared-libraries/run.sh prepare-runtime
+            -   name: Verify unpublished library installation
+                if: env.BUILD_ONLY == 'true'
+                run: python3 .github/actions/shared-libraries/glibc.py test-libraries
             -   name: Verify ordinary APK upgrade
+                if: env.BUILD_ONLY != 'true'
                 env:
                     RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
                     TLS_CHECKS: ${{ matrix.tls-checks }}

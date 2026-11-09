@@ -237,6 +237,7 @@ jobs:
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -449,6 +450,7 @@ jobs:
             PHPV: ${{ matrix.php-version || '' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -639,6 +641,7 @@ jobs:
             MODE: ${{ inputs.mode || 'full' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
@@ -669,15 +672,19 @@ jobs:
                 with:
                     name: shared-libs-${{ matrix.type }}-${{ matrix.target }}
                     path: library-stage
+            -   name: Select native validation baseline
+                run: echo "BUILD_ONLY=$(jq -r '.build_only // false' library-stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Copy matching library archives
                 run: |
                     mkdir -p "dist/$TYPE"
                     find library-stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;
             -   name: Prepare native baseline comparison tools
+                if: env.BUILD_ONLY != 'true'
                 run: |
                     sudo apt-get update
                     sudo apt-get install -y python3-rpm rpm2cpio zstd
             -   name: Freeze actual published baseline
+                if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
                 run: |
@@ -694,7 +701,11 @@ jobs:
             -   name: Verify custom prefix extension update triggers
                 if: matrix.runtime-checks == true
                 run: python3 tests/runtime-consumer-triggers.py --type "$TYPE" --image "$PACKAGING_IMAGE" --output stage/consumer-trigger-native.json
+            -   name: Verify unpublished library installation
+                if: env.BUILD_ONLY == 'true'
+                run: python3 .github/actions/shared-libraries/glibc.py test-libraries
             -   name: Verify ordinary static to shared upgrade
+                if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
                     TLS_CHECKS: ${{ matrix.tls-checks }}

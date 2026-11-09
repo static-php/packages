@@ -644,7 +644,7 @@ void php_embed_shutdown(void) {
             raise RuntimeError('injected preparation failure')
         with TemporaryDirectory(prefix='spp-runtime-unit-') as artifacts:
             (Path(artifacts) / 'fixture.apk').touch()
-            with patch.object(harness['DockerRun'], 'prepare', fail):
+            with patch.object(harness['DockerRun'], 'prepare', fail), patch.dict(scope['ARCHITECTURE'], {'engine_identity': lambda *args: {}}):
                 with self.assertRaisesRegex(RuntimeError, 'injected'):
                     harness['cell']('alpine', '8.4', artifacts)
         self.assertEqual(len(created), 1)
