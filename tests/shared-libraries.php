@@ -111,6 +111,33 @@ try {
     expect($libraries->architecture() === $architecture, 'Incorrect architecture');
     expect($libraries->getPackageVersion('base', 'deb') === '1.0-2', 'Resolved package revision ignored');
     expect($libraries->abiCapability('top') === 'php-zts-lib-top-abi-2', 'ABI epoch ignored');
+    // Consumer-only repackaging restores ABI data without downloading library archives.
+    // Recover native dependency revisions from the already captured package index.
+    require dirname(__DIR__) . '/vendor/autoload.php';
+    $withoutVersions = $manifest;
+    unset($withoutVersions['libraries']['base']['package_versions']);
+    $save($withoutVersions);
+    $unresolved = SharedLibraries::load($temporary, true, $runtime);
+    $sharedProperty = new ReflectionProperty(\staticphp\step\CreatePackages::class, 'sharedLibraries');
+    $typeProperty = new ReflectionProperty(\staticphp\step\CreatePackages::class, 'packageType');
+    $resolve = new ReflectionMethod(\staticphp\step\CreatePackages::class, 'resolvePublishedLibraryVersions');
+    $sharedProperty->setValue(null, $unresolved);
+    $previousBaselines = getenv('SPP_BASELINE_MANIFESTS');
+    foreach (['rpm' => '1.0-5.el8', 'deb' => '1.0-5', 'apk' => '1.0-r5'] as $type => $version) {
+        $record = ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']];
+        $records = [array_replace($record, ['version' => '9.0-99']), array_replace($record, ['architecture' => 'wrong']), array_replace($record, ['provides' => ['php-zts-lib-base-abi-2']]), $record];
+        $baselinePath = $temporary . '/published-' . $type . '.json';
+        file_put_contents($baselinePath, json_encode(['type' => $type, 'published_packages' => $records]));
+        putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$baselinePath]));
+        $typeProperty->setValue(null, $type);
+        $resolve->invoke(null);
+        expect($unresolved->getPackageVersion('base', $type) === $version, 'Captured native library revision was not resolved for ' . $type);
+        expect($unresolved->getPackageVersion('top', $type) === $manifest['libraries']['top']['package_versions'][$type], 'Candidate library revision was overwritten');
+    }
+    putenv($previousBaselines === false ? 'SPP_BASELINE_MANIFESTS' : 'SPP_BASELINE_MANIFESTS=' . $previousBaselines);
+    $sharedProperty->setValue(null, null);
+    $typeProperty->setValue(null, 'rpm');
+    $save($manifest);
     $payload = [$temporary . '/php' => '/usr/bin/php-zts-test'];
     expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)', 'php-zts-lib-top-abi-2'], 'Consumer must require its direct owner and ABI capability');
     expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2', 'php-zts-lib-top-abi-2'], 'APK prerelease version not normalized');

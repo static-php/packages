@@ -70,6 +70,7 @@ class CreatePackages
                 }
             }
         }
+        self::resolvePublishedLibraryVersions();
         if (($payload = BuildPayload::load($manifestRoot)) !== null && !$payload->isSealed()) {
             throw new RuntimeException('Seal the recorded payload before packaging it.');
         }
@@ -545,6 +546,45 @@ class CreatePackages
             throw new RuntimeException('Cannot update the PHP phase in a retained package version: ' . $version);
         }
         return $parts[1] . $phpPhase . ($parts[2] ?? '');
+    }
+
+    private static function resolvePublishedLibraryVersions(): void
+    {
+        if (self::$sharedLibraries === null) {
+            return;
+        }
+        $type = self::$packageType;
+        $packages = [];
+        foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
+            $baseline = self::migrationBaseline($path);
+            if (($baseline['type'] ?? null) === $type) {
+                array_push($packages, ...($baseline['packages'] ?? []), ...($baseline['published_packages'] ?? []));
+            }
+        }
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        foreach (self::$sharedLibraries->libraryIds() as $id) {
+            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null) {
+                continue;
+            }
+            $source = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
+            $source = $type === 'apk' ? self::toApkVersion($source) : $source;
+            $resolved = null;
+            foreach ($packages as $package) {
+                if (($package['name'] ?? '') !== self::$sharedLibraries->libraryPackageName($id)
+                    || $normalizeArch($package['architecture'] ?? '') !== self::$sharedLibraries->architecture()
+                    || !in_array(self::$sharedLibraries->abiCapability($id), $package['provides'] ?? [], true)) {
+                    continue;
+                }
+                $version = $package['version'];
+                $upstream = preg_replace($type === 'apk' ? '/-r[0-9]+$/D' : '/-[^-]+$/D', '', $version);
+                if ($upstream === $source && ($resolved === null || self::compareMigrationVersions($type, $version, $resolved) > 0)) {
+                    $resolved = $version;
+                }
+            }
+            if ($resolved !== null) {
+                self::$sharedLibraries->setPackageVersion($id, $type, $resolved);
+            }
+        }
     }
 
     private static function compareMigrationVersions(string $type, string $left, string $right): int
