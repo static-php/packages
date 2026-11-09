@@ -78,6 +78,15 @@ def compatibility(root, target, toolchain, build_environment):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
 
 
+def consumer_target(target, plan, stream, request):
+    return dict(target, **{"php-version": stream, "packages": "" if request.get("full") else ",".join(request["packages"]),
+                           "compile": request.get("compile", True), "abi-break": bool(plan.get("abi_break")),
+                           "compile-full": bool(request.get("compile", True) and request.get("compile_full", request.get("full"))),
+                           "abi-rebuild-libraries": ",".join(plan.get("abi_rebuild_roots", [])),
+                           "abi-core-rebuild": stream in plan.get("abi_core_rebuild_streams", []),
+                           "compile-packages": "" if request.get("compile_full", request.get("full")) else ",".join(request.get("compile_packages", request.get("packages", [])))})
+
+
 def matrix(plans, php_versions, succeeded=None):
     includes, targets = [], []
     for path in sorted(plans.glob("*/shared-library-plan.json")):
@@ -94,12 +103,7 @@ def matrix(plans, php_versions, succeeded=None):
             # An empty package list means a complete PHP build only when explicitly full.
             if not request.get("full") and not request.get("packages"):
                 continue
-            includes.append(dict(target, **{"php-version": stream, "packages": "" if request.get("full") else ",".join(request["packages"]),
-                                          "compile": request.get("compile", True), "abi-break": bool(plan.get("abi_break")),
-                                          "compile-full": bool(request.get("compile", True) and request.get("compile_full", request.get("full"))),
-                                          "abi-rebuild-libraries": ",".join(plan.get("abi_rebuild_roots", [])),
-                                          "abi-core-rebuild": stream in plan.get("abi_core_rebuild_streams", []),
-                                          "compile-packages": "" if request.get("compile_full", request.get("full")) else ",".join(request.get("compile_packages", request.get("packages", [])))}))
+            includes.append(consumer_target(target, plan, stream, request))
     return includes, targets
 
 
@@ -216,6 +220,8 @@ def main():
     fp.add_argument("--build-environment", type=Path, required=True)
     validate = sub.add_parser("validate-source")
     validate.add_argument("--mode", choices=("full", "incremental"), required=True)
+    inline = sub.add_parser("inline")
+    inline.add_argument("--plan", type=Path, required=True)
     mat = sub.add_parser("matrix")
     mat.add_argument("--plans", type=Path, required=True)
     mat.add_argument("--php-versions", default="")
@@ -223,6 +229,7 @@ def main():
     packages = sub.add_parser("packages")
     packages.add_argument("--plans", type=Path, required=True)
     packages.add_argument("--succeeded", required=True)
+    packages.add_argument("--sdk-succeeded")
     packages.add_argument("--php-versions", default="")
     targets = sub.add_parser("targets")
     targets.add_argument("--directory", type=Path, required=True)
@@ -307,6 +314,13 @@ def main():
     elif args.command == "validate-source":
         if args.mode == "incremental" and not Path("downloads/build-plan.json").is_file():
             raise RuntimeError("Incremental builds require downloads/build-plan.json; run spc-download or select full mode")
+    elif args.command == "inline":
+        plan = json.loads(args.plan.read_text())
+        requests = [consumer_target({}, plan, stream, request) for stream, request in plan.get('php_requests', {}).items()
+                    if request.get('full') or request.get('packages')]
+        selected = requests[0] if len(requests) == 1 else {}
+        emit('inline-stream', selected.get('php-version', ''))
+        emit('inline-request', selected)
     elif args.command == "matrix":
         includes, targets = matrix(args.plans, csv(args.php_versions, STREAMS), None if args.succeeded is None else args.succeeded.splitlines())
         for target in targets:
@@ -316,6 +330,7 @@ def main():
             if json.loads(path.read_text()).get("libraries"):
                 includes.append(dict(target, **{"php-version": "8.4", "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
         runtime_checks([entry for entry in includes if entry.get("type") == "apk"])
+        includes = [value for value in includes if value.get("payload_stream") != value["php-version"]]
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
         publishing = [dict(target, type=kind, **{"package-image": target["package_images"][kind],
@@ -324,11 +339,13 @@ def main():
         emit("publish-matrix", {"include": publishing})
         emit("publish-any", str(bool(publishing)).lower())
     elif args.command == "packages":
-        values, target_values = matrix(args.plans, csv(args.php_versions, STREAMS))
+        sdk_succeeded = None if args.sdk_succeeded is None else set(args.sdk_succeeded.splitlines())
+        values, target_values = matrix(args.plans, csv(args.php_versions, STREAMS), sdk_succeeded)
         succeeded = set(args.succeeded.splitlines())
         includes = []
         for value in values:
-            if value["target"] + " " + value["php-version"] not in succeeded:
+            inline = sdk_succeeded is not None and value["target"] in sdk_succeeded and value.get("payload_stream") == value["php-version"]
+            if not inline and value["target"] + " " + value["php-version"] not in succeeded:
                 continue
             for kind in ["rpm", "deb"]:
                 selection = value.get("format_selection", {}).get(kind)

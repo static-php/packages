@@ -354,6 +354,8 @@ def record():
     target = {'arch': os.environ['MATRIX_ARCH'], 'alma': '8', 'target': os.environ['TARGET'],
               'image': os.environ['IMAGE'], 'source_run_id': os.environ['SOURCE_RUN_ID'],
               'package_images': json.loads(os.environ['PACKAGE_IMAGES'])}
+    if (STAGE / 'payload-provenance.json').is_file():
+        target['payload_stream'] = read(STAGE / 'payload-provenance.json')['php_stream']
     for directory in [STAGE / 'common', *[STAGE / kind for kind in FORMATS]]:
         write(directory / 'target.json', target)
         (directory / 'cache-key').write_text(os.environ['CACHE_KEY'] + '\n')

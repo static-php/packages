@@ -613,8 +613,11 @@ class WorkflowContractTests(unittest.TestCase):
         names = {'Stage pinned builder', 'Stage target plan', 'Stage library packages', 'Stage consumer packages', 'Stage common SDK metadata', 'Stage common SDK buildroot', 'Stage RPM library packages', 'Stage DEB library packages', 'Stage sealed common payload', 'Stage validated consumer packages'}
         for workflow_name, data in self.workflows():
             artifact_names = []
-            for job in data['jobs'].values():
-                for step in job.get('steps', []):
+            groups = [job.get('steps', []) for job in data['jobs'].values()]
+            if 'rpm' in workflow_name:
+                groups.append(yaml.safe_load((ROOT / '.github/actions/php-payload/action.yml').read_text())['runs']['steps'])
+            for steps in groups:
+                for step in steps:
                     if step.get('name') in names:
                         self.assertTrue(step['with'].get('overwrite'), workflow_name + ': ' + step['name'])
                         artifact_names.append(step['with']['name'])

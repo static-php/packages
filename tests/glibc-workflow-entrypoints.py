@@ -84,7 +84,8 @@ class SharedGlibcEntrypoints(unittest.TestCase):
                 script = next(step['run'] for step in data['jobs'][job]['steps']
                               if '.jobs[]' in step.get('run', ''))
                 expression = re.search(r"--jq '([^']+)'", script).group(1)
-                substitution = re.search(r"\| sed -E '([^']+)'", script).group(1)
+                sed = re.search(r"\| sed (-nE|-E) '([^']+)'", script)
+                substitution = sed.group(2)
                 suffixes = ['alma8-x86_64 php8.5', 'alma8-arm64 php8.6'] if payload else ['alma8-x86_64', 'alma8-arm64']
                 names = [label + ' (' + suffix + ')' for suffix in suffixes]
                 jobs = {'jobs': [
@@ -96,8 +97,8 @@ class SharedGlibcEntrypoints(unittest.TestCase):
                 ]}
                 selected = subprocess.run(['jq', '-r', expression], input=json.dumps(jobs),
                                           text=True, capture_output=True, check=True)
-                self.assertEqual(selected.stdout.splitlines(), names)
-                tuples = subprocess.run(['sed', '-E', substitution], input=selected.stdout,
+                self.assertEqual(selected.stdout.splitlines(), names + (['Unrelated job'] if payload else []))
+                tuples = subprocess.run(['sed', sed.group(1), substitution], input=selected.stdout,
                                         text=True, capture_output=True, check=True)
                 expected = [suffix.replace(' php', ' ') for suffix in suffixes]
                 self.assertEqual(tuples.stdout.splitlines(), expected)

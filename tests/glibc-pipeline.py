@@ -98,9 +98,8 @@ class Pipeline(unittest.TestCase):
 
     def test_payload_cache_key_initializes_build_inputs_and_sealed_output_survives_export_failure(self):
         import yaml
-        workflow = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
-        steps = next(job['steps'] for job in workflow['jobs'].values()
-                     if any(step.get('name') == 'Build and seal common PHP payload' for step in job.get('steps', [])))
+        action = yaml.safe_load((ROOT / '.github/actions/php-payload/action.yml').read_text())
+        steps = action['runs']['steps']
         names = [step.get('name') for step in steps]
         key = steps[names.index('Compute sealed PHP cache identity')]['run']
         self.assertIn('run.sh payload-key', key)
@@ -224,6 +223,29 @@ class Pipeline(unittest.TestCase):
             self.assertEqual({entry['type'] for entry in matrix}, {'rpm', 'deb'})
             self.assertEqual({entry['arch'] for entry in matrix}, {'x86_64'})
             self.assertTrue(all(entry['image'] == 'producer' for entry in matrix))
+
+    def test_single_stream_reuses_sdk_job_and_only_successful_producers_reach_packaging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / 'plan'
+            target.mkdir()
+            plan = {'php_requests': {'8.5': {'packages': ['curl'], 'compile': False}}}
+            glibc.write(target / 'shared-library-plan.json', plan)
+            glibc.write(target / 'target.json', {'target': 'alma8-x86_64', 'arch': 'x86_64', 'payload_stream': '8.5',
+                                               'package_images': {'rpm': 'producer@sha256:' + 'a' * 64, 'deb': 'packager@sha256:' + 'b' * 64}})
+            def command(*args):
+                result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', *args], text=True)
+                return dict(line.split('=', 1) for line in result.splitlines())
+            chosen = command('inline', '--plan', str(target / 'shared-library-plan.json'))
+            self.assertEqual(chosen['inline-stream'], '8.5')
+            self.assertEqual(json.loads(chosen['inline-request'])['packages'], 'curl')
+            self.assertEqual(json.loads(command('matrix', '--plans', str(root))['matrix'])['include'], [])
+            for successful in ['', 'alma8-x86_64']:
+                packaged = command('packages', '--plans', str(root), '--succeeded', '', '--sdk-succeeded', successful)
+                self.assertEqual(len(json.loads(packaged['matrix'])['include']), 2 if successful else 0)
+            plan['php_requests']['8.4'] = {'full': True}
+            glibc.write(target / 'shared-library-plan.json', plan)
+            self.assertEqual(command('inline', '--plan', str(target / 'shared-library-plan.json'))['inline-stream'], '')
 
     def test_library_only_update_gets_validation_lanes_without_php_payload_jobs(self):
         with tempfile.TemporaryDirectory(prefix='spp-glibc-library-only-') as temporary:

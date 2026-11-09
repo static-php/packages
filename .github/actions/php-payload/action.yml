@@ -1,0 +1,52 @@
+name: Build sealed PHP payload
+description: Restore or rebuild one PHP stream and stage its common glibc payload.
+runs:
+    using: composite
+    steps:
+        -   name: Compute sealed PHP cache identity
+            id: payload-cache-key
+            shell: bash
+            run: |
+                bash .github/actions/shared-libraries/run.sh payload-key | tee stage/payload-cache-inputs
+                key=$(sed -n 's/^key=//p' stage/payload-cache-inputs)
+                seed=$(sed -n 's/^seed-key=//p' stage/payload-cache-inputs)
+                printf '%s\n' "$key" > stage/payload-cache-key
+                printf '%s\n' "$seed" > stage/payload-cache-seed-key
+                cat stage/payload-cache-inputs >> "$GITHUB_OUTPUT"
+                echo "cache-key=$key" >> "$GITHUB_OUTPUT"
+        -   name: Restore sealed PHP payload
+            id: payload-cache
+            uses: ./.github/actions/buildroot-cache
+            with:
+                mode: restore
+                key: ${{ steps.payload-cache-key.outputs.cache-key }}
+                seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
+                path: php-payload-cache.tar.zst
+        -   name: Build and seal common PHP payload
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh glibc-payload
+        -   name: Pack sealed common payload
+            shell: bash
+            run: tar -cf - "build/$PHPV" stage/payload-provenance.json | zstd -f -o php-payload.tar.zst
+        -   name: Stage sealed common payload
+            uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+            with:
+                overwrite: true
+                name: shared-payload-glibc-${{ env.TARGET }}-php${{ env.PHPV }}
+                path: php-payload.tar.zst
+                compression-level: 0
+                retention-days: 1
+        -   name: Export PHP-only sealed cache
+            if: env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true'
+            shell: bash
+            run: |
+                source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
+                python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV" --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)" --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache.tar.zst
+        -   name: Save sealed PHP payload cache
+            if: env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true'
+            uses: ./.github/actions/buildroot-cache
+            with:
+                mode: save
+                key: ${{ steps.payload-cache-key.outputs.cache-key }}
+                seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
+                path: php-payload-cache.tar.zst
