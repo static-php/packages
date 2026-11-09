@@ -36,6 +36,22 @@ class UpgradeGuards(unittest.TestCase):
             rpm['read_http_file']('https://example.com', 'repodata/repomd.xml', missing_ok=True)
         self.assertEqual(request.call_count, 3)
 
+    def test_rpm_metadata_retries_origin_errors_and_still_fails_closed(self):
+        url = 'https://example.com/repodata/repomd.xml'
+        for status in (429, 500, 520, 522, 525, 526):
+            with self.subTest(status=status):
+                error = rpm_globals['urllib'].error.HTTPError(url, status, 'unavailable', {}, None)
+                response = contextlib.nullcontext(io.BytesIO(b'verified metadata'))
+                with patch.object(rpm_globals['urllib'].request, 'urlopen', side_effect=[error, response]) as request, \
+                        patch.object(rpm_globals['time'], 'sleep'):
+                    self.assertEqual(rpm['read_http_file']('https://example.com', 'repodata/repomd.xml'), b'verified metadata')
+                    self.assertEqual(request.call_count, 2)
+                with patch.object(rpm_globals['urllib'].request, 'urlopen', side_effect=error) as request, \
+                        patch.object(rpm_globals['time'], 'sleep'), self.assertRaisesRegex(RuntimeError, url + ': HTTP ' + str(status)):
+                    rpm['read_http_file']('https://example.com', 'repodata/repomd.xml', missing_ok=True)
+                self.assertEqual(request.call_count, 3)
+                error.close()
+
     def test_rpm_library_ordering_is_php_independent(self):
         local = {'name': 'php-zts-lib-openssl', 'arch': 'x86_64', 'version': '3.0.1', 'evr': '0:3.0.1-1.el10'}
         remote = dict(local, version='3.1.0', evr='0:3.1.0-1.el10')

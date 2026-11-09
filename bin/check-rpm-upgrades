@@ -33,7 +33,7 @@ def read_http_file(base_url, location, missing_ok=False):
         except urllib.error.HTTPError as error:
             if missing_ok and error.code == 404:
                 return None
-            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            if (error.code != 429 and not 500 <= error.code < 600) or attempt == 2:
                 raise RuntimeError('Cannot read published RPM metadata {}: HTTP {}'.format(request.full_url, error.code)) from error
         except (OSError, http.client.IncompleteRead):
             if attempt == 2:
