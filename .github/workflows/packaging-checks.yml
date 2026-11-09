@@ -1,0 +1,56 @@
+name: Packaging code checks
+
+on:
+    push:
+        branches: [master]
+        paths: ['bin/**', 'src/**', 'tests/**', 'config/**', 'composer.*', '.github/actions/**', '.github/workflows/**']
+    pull_request:
+        paths: ['bin/**', 'src/**', 'tests/**', 'config/**', 'composer.*', '.github/actions/**', '.github/workflows/**']
+    workflow_dispatch:
+
+permissions:
+    contents: read
+    packages: read
+
+jobs:
+    check:
+        runs-on: ubuntu-24.04
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    -   image: ghcr.io/static-php/packages-builder-rhel-8
+                        formats: rpm,deb
+                    -   image: ghcr.io/static-php/packages-builder-alpine
+                        formats: apk
+        steps:
+            -   uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Authenticate builder pull
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            -   name: Check packaging code in native builders
+                env:
+                    IMAGE: ${{ matrix.image }}
+                    FORMATS: ${{ matrix.formats }}
+                run: |
+                    docker run --rm -v "$GITHUB_WORKSPACE:/build" -w /build -e FORMATS "$IMAGE" bash -c '
+                        set -euo pipefail
+                        if command -v python3.9 >/dev/null; then
+                            mkdir -p /tmp/python-bin
+                            ln -s "$(command -v python3.9)" /tmp/python-bin/python3
+                            export PATH=/tmp/python-bin:$PATH
+                        fi
+                        git config --global --add safe.directory /build
+                        composer install --no-interaction --prefer-dist --no-progress
+                        php tests/builder-tool-cache.php
+                        php tests/package-iterations.php
+                        for format in ${FORMATS//,/ }; do php tests/package-versions.php --type="$format"; done
+                        python3 tests/payload-profile.py
+                        python3 tests/upgrade-guards.py
+                        python3 tests/forgejo-publication.py
+                        python3 tests/abi-dump-cache.py
+                        python3 tests/shared-library-plan.py
+                    '

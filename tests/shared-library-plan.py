@@ -268,7 +268,7 @@ class SharedLibraryPlan(unittest.TestCase):
                 self.assertFalse(any(item['full'] for item in plan['php_requests'].values()))
                 self.assertEqual(json.loads(Path(args.manifest_output).read_text())['libraries'], current['libraries'])
                 args.rebuilt_libraries = 'fixture'
-                with self.assertRaisesRegex(RuntimeError, 'Scoped baselines require'):
+                with self.assertRaisesRegex(RuntimeError, 'Scoped baselines must cover'):
                     planner['prepare'](args)
 
     def test_missing_debug_baseline_blocks_release(self):

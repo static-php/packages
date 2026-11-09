@@ -465,6 +465,13 @@ def abi_baseline(library):
     return digest({'sonames': sorted(names), 'hashes': hashes, 'epoch': library.get('abi_epoch', 1)})
 
 
+def needs_abi_check(previous, current):
+    previous_version = (previous or {}).get('version') or current.get('abi_reference_version')
+    versions = [re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', str(version))
+                for version in [previous_version, current.get('version')]]
+    return not all(versions) or versions[0].groups()[:2] != versions[1].groups()[:2]
+
+
 def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=None):
     if not old['libraries'] and old.get('metadata_scope') != [] and not bootstrap:
         raise RuntimeError('No published ABI baseline; initial migration requires --bootstrap')
@@ -474,11 +481,28 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
     annotated = copy.deepcopy(new)
     changes = {}
     abi_context = {}
-    unchanged, compared, reused = 0, 0, 0
+    unchanged, compared, reused, skipped = 0, 0, 0, 0
     for identifier, library in sorted(annotated['libraries'].items()):
-        analyze = rebuilt_libraries is None or identifier in rebuilt_libraries
+        previous = old['libraries'].get(identifier)
+        rebuilt = rebuilt_libraries is None or identifier in rebuilt_libraries
+        analyze = rebuilt and needs_abi_check(previous, library)
+        if rebuilt and not analyze:
+            epoch = (previous or library).get('abi_epoch', 1)
+            library['abi_epoch'] = epoch
+            library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
+            library['abi_capabilities'] = [library['abi_capability']]
+            if library.get('abi_dump'):
+                library.setdefault('abi_reference_version', (previous or library).get('abi_reference_version', (previous or library).get('version')))
+            library.pop('abi_comparison', None)
+            changes[identifier] = {'status': 'compatible', 'abi_epoch': epoch,
+                                   'abi_capability': library['abi_capability'], 'check': 'skipped-patch-or-same-version'}
+            skipped += 1
+            progress('Skipped ABI checks for {}: {} -> {} (same major/minor)'.format(
+                identifier, (previous or {}).get('version', library.get('abi_reference_version')), library['version']))
+            continue
         if analyze:
             dump_abi(new_root, identifier, library, abi_context)
+            library['abi_reference_version'] = library['version']
         elif not cached_abi(new_root, library):
             raise RuntimeError('Unchanged library has no classified cached ABI: ' + identifier)
         else:
@@ -489,7 +513,6 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
             changes[identifier] = {'status': 'unchanged', 'abi_epoch': library.get('abi_epoch', 1),
                                    'abi_capability': library.get('abi_capability')}
             continue
-        previous = old['libraries'].get(identifier)
         status = 'added' if previous is None else 'compatible'
         baseline = abi_baseline(previous)
         cached = library.get('abi_comparison', {})
@@ -545,7 +568,7 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
         changes[identifier] = {'status': 'removed'}
     progress('ABI comparison complete: {} unchanged shared objects reused, {} compared'.format(unchanged, compared))
     if rebuilt_libraries is not None:
-        progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed'.format(reused, len(annotated['libraries']) - reused))
+        progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed; {} patch/same-version rebuilds skipped'.format(reused, len(annotated['libraries']) - reused - skipped, skipped))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
                        'bootstrap': not bool(old['libraries']) and old.get('metadata_scope') != [], 'libraries': changes}
 
@@ -765,11 +788,14 @@ def prepare(args):
     if bootstrap and mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
         raise RuntimeError('Bootstrap requires full mode or a full migration request for every PHP stream')
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
+        candidates = current['libraries'].keys() if getattr(args, 'rebuilt_libraries', None) is None else rebuilt
+        checked = {name for name in candidates if name in current['libraries']
+                   and any(needs_abi_check(value['libraries'].get(name), current['libraries'][name]) for value, _ in baselines)}
         old, divergent = merge_baselines(baselines, args.type, temporary,
-                                         None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
+                                         checked)
         consumer_scope = bool(args.packages and old.get('metadata_scope') == [] and not rebuilt)
-        if old.get('metadata_scope') is not None and not consumer_scope and (not specified or rebuilt or set(specified) - set(old['metadata_scope'])):
-            raise RuntimeError('Scoped baselines require an unchanged explicit library or PHP package selection')
+        if old.get('metadata_scope') is not None and not consumer_scope and (not specified or (set(specified) | rebuilt) - set(old['metadata_scope'])):
+            raise RuntimeError('Scoped baselines must cover the selected and rebuilt libraries')
         build_only = bool(getattr(args, 'build_only', False) and
                           ((not old['libraries'] and not consumer_scope) or args.packages and old.get('unmigrated_php_streams')))
         annotated, comparison = compare(old, current, temporary, args.root, bootstrap or build_only,

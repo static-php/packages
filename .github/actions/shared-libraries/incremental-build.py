@@ -390,11 +390,19 @@ def execute(root, buildroot, plan, package_type, command=None):
     if unresolved := set(selected) & pending.keys():
         raise RuntimeError("Rebuilt libraries still require ABI rebuilds: " + ",".join(sorted(unresolved)))
     for name in selected:
+        previous = manifest.get('libraries', {}).get(name, {})
+        entry = current['libraries'][name]
+        if previous.get('abi_dump'):
+            for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty']:
+                if field in previous:
+                    entry[field] = previous[field]
+            entry['abi_reference_version'] = previous.get('abi_reference_version', previous.get('version'))
         artifact = plan["inventory"]["libraries"][name].get("artifact")
         source = plan["effective_sources"].get(artifact, {}).get("source", {})
         if artifact and current["libraries"][name].get("source_hash") != source.get("hash"):
             raise RuntimeError("Built library does not match its pinned source: " + name)
     plan["rebuilt_libraries"] = sorted(set(plan.get("rebuilt_libraries", [])) | set(selected))
+    write(buildroot / 'shared-libraries.json', current)
     if "compiler_runtime_scan" in plan:
         plan["compiler_runtime_scan"] = compiler_runtime_scan(buildroot, current, plan["compiler_runtime_scan"]["compiler_runtime"])
         if selected_static := set(selected) & set(plan["compiler_runtime_scan"].get("must_rebuild", [])):

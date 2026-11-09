@@ -143,7 +143,7 @@ def merge_library_abi(common, formats):
         capability = 'php-zts-lib-' + name + '-abi-' + str(entry['abi_epoch'])
         entry['abi_capability'] = capability
         entry['abi_capabilities'] = [capability]
-        for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_comparison']:
+        for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_comparison', 'abi_reference_version']:
             if field in current:
                 entry[field] = current[field]
         yield kind, entry
@@ -289,18 +289,13 @@ def classify():
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
     scope = None
-    if os.environ.get('LIBRARIES') and not rebuilt:
+    if os.environ.get('LIBRARIES'):
         graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
-        scope = graph['dependency_closure'](os.environ['LIBRARIES'].split(','), graph['library_graph'](read(sdk / 'shared-libraries.json')))
+        scope = graph['dependency_closure'](set(os.environ['LIBRARIES'].split(',')) | rebuilt, graph['library_graph'](read(sdk / 'shared-libraries.json')))
     elif os.environ.get('PACKAGES') and os.environ.get('PUBLISH') == 'false' and not rebuilt:
         scope = []
-    run(['php', 'tests/package-iterations.php'])
-    run(['python3', 'tests/upgrade-guards.py'])
-    if glibc:
-        run(['python3', 'tests/forgejo-publication.py'])
     def read_baseline(kind):
-        run(['php', 'tests/package-versions.php', '--type=' + kind])
-        baseline(kind, format_stage(kind) / 'baseline', abi_libraries=rebuilt, libraries=scope)
+        baseline(kind, format_stage(kind) / 'baseline', libraries=scope)
     with ThreadPoolExecutor(max_workers=len(formats)) as executor:
         list(executor.map(read_baseline, formats))
     consumers_ready = False

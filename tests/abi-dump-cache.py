@@ -119,6 +119,37 @@ class AbiDumpCache(unittest.TestCase):
             planner['compare'](previous, previous, baseline, self.root, rebuilt_libraries={'fixture'})
         self.assertEqual([call.args[1] for call in dump.call_args_list], ['fixture'])
 
+    def test_patch_and_same_version_rebuilds_skip_abi_tools(self):
+        baseline, previous = self.baseline()
+        previous['libraries']['fixture']['version'] = '1.2.3'
+        for version in ['1.2.3', '1.2.4']:
+            candidate = copy.deepcopy(previous)
+            candidate['libraries']['fixture']['version'] = version
+            forbidden = {name: Mock(side_effect=AssertionError('Patch rebuild must not inspect ABI'))
+                         for name in ['dump_abi', 'abi_difference', 'file_sha256', 'cached_abi']}
+            with self.subTest(version=version), patch.dict(namespace, forbidden):
+                updated, result = planner['compare'](previous, candidate, baseline, self.root, rebuilt_libraries={'fixture'})
+            self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 7)
+            self.assertEqual(result['libraries']['fixture']['check'], 'skipped-patch-or-same-version')
+
+    def test_major_minor_and_unknown_versions_require_checks(self):
+        for old, new in [('1.2.3', '1.3.0'), ('1.2.3', '2.0.0'), ('1.2', '1.3'), ('master', 'master'), ('1.2.3', '1.2.4rc1')]:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(planner['needs_abi_check']({'version': old}, {'version': new}))
+        self.assertFalse(planner['needs_abi_check'](None, {'version': '1.2.4', 'abi_reference_version': '1.2.3'}))
+
+    def test_minor_upgrade_checks_only_its_rebuilt_library(self):
+        baseline, previous = self.baseline()
+        previous['libraries']['fixture']['version'] = '1.2.3'
+        previous['libraries']['other'] = copy.deepcopy(previous['libraries']['fixture'])
+        candidate = copy.deepcopy(previous)
+        candidate['libraries']['fixture']['version'] = '1.3.0'
+        dump = Mock()
+        with patch.dict(namespace, {'dump_abi': dump}):
+            updated, _ = planner['compare'](previous, candidate, baseline, self.root, rebuilt_libraries={'fixture'})
+        self.assertEqual([call.args[1] for call in dump.call_args_list], ['fixture'])
+        self.assertEqual(updated['libraries']['fixture']['abi_reference_version'], '1.3.0')
+
     def test_unchanged_library_with_no_sonames_reuses_empty_abi_inventory(self):
         entry = dict(version='1.0', files=[], elf={}, abi_dump={}, abi_dump_hashes={}, abi_empty=[])
         value = {'libraries': {'fixture': entry}}

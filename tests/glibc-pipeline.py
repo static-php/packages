@@ -162,7 +162,7 @@ class Pipeline(unittest.TestCase):
                         patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else ''):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
-                expected_scans = [(format, False, expected) for format in formats]
+                expected_scans = [(format, False, set()) for format in formats]
                 if rebuilt == 'breaking':
                     expected_scans += [(format, format == formats[-1], expected) for format in formats]
                 self.assertCountEqual(scans, expected_scans)
