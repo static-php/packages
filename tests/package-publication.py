@@ -74,6 +74,13 @@ class Publication(unittest.TestCase):
                             patch.object(publication, 'assemble'), patch.object(publication.subprocess, 'run', side_effect=run), \
                             patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(io.StringIO()):
                         self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
+                        primary_summary = (root / 'summary').read_text()
+                        self.assertFalse(any(phase == 'upload-2' for _, phase in events))
+                        if kind != 'rpm':
+                            self.assertTrue(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
+                            mirrored = [stream for stream, phase in events if phase == 'upload-2']
+                            self.assertEqual(mirrored, ['8.5', '8.6'])
+                            self.assertLess(events.index(('8.6', 'upload-1')), events.index(('8.5', 'upload-2')))
                 finally:
                     os.chdir(previous)
                 upload = 'publish-rpm' if kind == 'rpm' else 'upload-1'
@@ -82,7 +89,7 @@ class Publication(unittest.TestCase):
                 for stream in ('8.5', '8.6'):
                     self.assertLess(events.index((stream, 'verify')), events.index((stream, 'publish')))
                     self.assertLess(events.index((stream, 'publish')), events.index((stream, upload)))
-                    self.assertIn(f'PHP {stream}: published', (root / 'summary').read_text())
+                    self.assertIn(f'PHP {stream}: published', primary_summary)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='spp-publication-')
@@ -272,7 +279,13 @@ class WorkflowContracts(unittest.TestCase):
         declared = self.publisher[True]['workflow_call']['inputs']
         required = {name for name, value in declared.items() if value.get('required')}
         for name in ['build-rpm-modular-packages.yml', 'build-apk-forgejo.yml', 'publish-packages.yml']:
-            job = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']['publish']
+            jobs = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']
+            job = jobs['publish']
+            mirror = jobs['mirror']
+            self.assertIn('publish', mirror['needs'])
+            self.assertIn('!cancelled()', mirror['if'])
+            self.assertTrue(mirror['with']['mirror'])
+            self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
             self.assertEqual(job['uses'], './.github/workflows/publish-package-cohort.yml')
             self.assertEqual(job['secrets'], 'inherit')
             self.assertTrue(required <= set(job['with']) <= set(declared))

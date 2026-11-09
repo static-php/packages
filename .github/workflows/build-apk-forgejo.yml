@@ -416,3 +416,24 @@ jobs:
             image: ${{ matrix.image }}
             source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
         secrets: inherit
+
+    mirror:
+        name: Mirror (apk ${{ matrix.target }})
+        needs: [setup-matrix, compute-build-matrix, publish]
+        if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            mirror: true
+            format: apk
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
+        secrets: inherit

@@ -182,11 +182,13 @@ class ForgejoPublication(unittest.TestCase):
     def test_idempotent_archive_is_verified_without_upload_or_git_repository_link(self):
         path = self.archive()
         record = {'arch': 'x86_64', 'sha256': helper['archive_sha256'](path)}
+        listing = Mock(return_value=[])
         with patch.dict(helper_globals, {
-            'get_remote_packages': lambda *args: [],
+            'get_remote_packages': listing,
             'remote_package_archives': lambda *args: [record],
         }), patch.object(helper_globals['requests'], 'put') as upload, patch.object(helper_globals['requests'], 'post', return_value=response(status=409)) as link, contextlib.redirect_stdout(io.StringIO()):
             helper['upload_verified_archive']('https://example.com', '86', 'test', 'alpine', path)
+        listing.assert_called_once_with('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl')
         upload.assert_not_called()
         link.assert_not_called()
 

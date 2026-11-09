@@ -476,7 +476,8 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
     path = Path(pkg_file)
     name, version, arch = package_metadata(path, pkg_type)
     digest = archive_sha256(path)
-    packages = get_remote_packages(host, owner, password, pkg_type)
+    print(f"Publishing: {host} {owner}/{name} {version} {arch}", flush=True)
+    packages = get_remote_packages(host, owner, password, pkg_type, name)
     allowed = verify_upload_versions(host, owner, password, pkg_type, [path], packages)
     if allowed != [path]:
         raise RuntimeError(f"Publication ordering changed for {owner}/{name}/{version}")
@@ -497,7 +498,7 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
     if any((record['arch'], record['sha256']) not in identities for record in before):
         raise RuntimeError(f"Upload changed an existing architecture: {owner}/{name}/{version}")
     publish_consumer_sidecar(host, owner, password, pkg_type, path)
-    print(f"Verified: {owner}/{name} {version} {arch} sha256={digest}")
+    print(f"Verified: {owner}/{name} {version} {arch} sha256={digest}", flush=True)
     return 0
 
 def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", branch="main"):

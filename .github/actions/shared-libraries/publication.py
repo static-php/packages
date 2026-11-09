@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, verify_upgrades
 
@@ -118,52 +119,74 @@ def api(path, paginate=False):
     return json.loads(subprocess.check_output(command, text=True))
 
 
-def publish_available(source, kind, target):
+def publish_available(source, kind, target, mirror=False):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
     prune_consumers(source, library)
     streams = sorted(stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
     scopes = [[stream] for stream in streams] or [None]
     results = []
+    outcomes = Path('log') / f'publication-{kind}-{target}.json'
+    if mirror:
+        if not outcomes.is_file():
+            print(f'No primary publication results for {kind} {target}; skipping mirror', flush=True)
+            return True
+        published = json.loads(outcomes.read_text())
+        scopes = [scope for scope in scopes if (','.join(scope) if scope else 'libraries') in published]
     with tempfile.TemporaryDirectory(prefix='spp-signed-rpms-') as signed:
         for scope in scopes:
             label = ','.join(scope) if scope else 'libraries'
-            environment = dict(os.environ, PUBLICATION_PHP_STREAMS=','.join(scope or []), SIGNED_RPM_CACHE=signed)
-            log = Path('log') / f'publication-{kind}-{target}-php{label}.log'
+            environment = dict(os.environ, PUBLICATION_PHP_STREAMS=','.join(scope or []), SIGNED_RPM_CACHE=signed, PYTHONUNBUFFERED='1')
+            log = Path('log') / (f'publication-{kind}-{target}-php{label}' + ('-mirror.log' if mirror else '.log'))
             log.parent.mkdir(exist_ok=True)
             def run(*arguments):
                 print(f'{kind.upper()} {target} PHP {label}: {arguments[-1]}', flush=True)
+                finished = threading.Event()
+                def progress():
+                    while not finished.wait(30):
+                        with log.open('rb') as output:
+                            output.seek(max(0, output.seek(0, 2) - 4096))
+                            lines = output.read().decode(errors='replace').splitlines()
+                        detail = lines[-1][-300:] if lines else 'waiting for output'
+                        print(f'{kind.upper()} {target} PHP {label}: {arguments[-1]} running; {detail}', flush=True)
+                log.touch(exist_ok=True)
+                monitor = threading.Thread(target=progress, daemon=True)
+                monitor.start()
                 try:
                     with log.open('a') as output:
                         subprocess.run(list(arguments), check=True, env=environment, stdout=output, stderr=subprocess.STDOUT)
                 except subprocess.CalledProcessError as error:
                     detail = ' | '.join(log.read_text(errors='replace').splitlines()[-4:])[-800:]
                     raise RuntimeError((detail or str(error)) + f' (details: {log})') from error
+                finally:
+                    finished.set()
+                    monitor.join()
             try:
                 verify_upgrades(source, library, kind, scope)
                 destination = Path('dist') / kind
                 if destination.exists():
                     shutil.rmtree(destination)
                 assemble(source, destination, kind, scope)
-                if kind == 'rpm':
-                    run('bash', '.github/actions/shared-libraries/sign-rpm.sh')
-                run('bash', '.github/actions/shared-libraries/run.sh', 'publish')
-                run('bash', '.github/actions/shared-libraries/run.sh', 'publish-rpm' if kind == 'rpm' else 'upload-1')
-                results.append((label, 'published'))
-                if kind != 'rpm':
-                    try:
-                        run('bash', '.github/actions/shared-libraries/run.sh', 'upload-2')
-                    except (RuntimeError, subprocess.CalledProcessError):
-                        print(f'::warning::{kind} PHP {label}: primary published; secondary mirror failed', flush=True)
+                if mirror:
+                    run('bash', '.github/actions/shared-libraries/run.sh', 'upload-2')
+                    results.append((label, 'mirrored'))
+                else:
+                    if kind == 'rpm':
+                        run('bash', '.github/actions/shared-libraries/sign-rpm.sh')
+                    run('bash', '.github/actions/shared-libraries/run.sh', 'publish')
+                    run('bash', '.github/actions/shared-libraries/run.sh', 'publish-rpm' if kind == 'rpm' else 'upload-1')
+                    results.append((label, 'published'))
+                    outcomes.write_text(json.dumps([stream for stream, state in results if state == 'published']) + '\n')
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 results.append((label, 'failed: ' + str(error)))
-                print(f'::error::{kind} PHP {label}: {error}; continuing with other streams', flush=True)
+                level = 'warning' if mirror else 'error'
+                print(f'::{level}::{kind} PHP {label}: {error}; continuing with other streams', flush=True)
     summary = '\n'.join(f'{kind.upper()} {target} PHP {stream}: {state}' for stream, state in results)
     print(summary, flush=True)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
             output.write(summary + '\n')
-    return all(state == 'published' for _, state in results)
+    return mirror or all(state == 'published' for _, state in results)
 
 
 def main():
@@ -180,7 +203,7 @@ def main():
     matrix.add_argument('--plans', type=Path, required=True)
     verify = sub.add_parser('verify-target')
     verify.add_argument('--directory', type=Path, required=True)
-    sub.add_parser('publish-available')
+    sub.add_parser('publish-available').add_argument('--mirror', action='store_true', default=os.environ.get('MIRROR') == 'true')
     artifacts = sub.add_parser('artifact-ids')
     artifacts.add_argument('--run-id', required=True)
     args = parser.parse_args()
@@ -207,7 +230,7 @@ def main():
             raise RuntimeError('No staged native packages available')
         emit('ids', ','.join(ids))
     elif args.command == 'publish-available':
-        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET']):
+        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], args.mirror):
             raise SystemExit(1)
     else:
         verify_target(args.directory, *(os.environ[name] for name in ['TYPE', 'TARGET', 'MATRIX_ARCH', 'IMAGE', 'SOURCE_RUN_ID']))

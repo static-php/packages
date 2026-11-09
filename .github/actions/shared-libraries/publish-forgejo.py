@@ -89,6 +89,7 @@ def publish(action, host, password, kind, groups, helper, bootstrap):
         raise RuntimeError('Unknown publication action: ' + action)
     digests = {path: helper['archive_sha256'](path) for paths in groups.values() for path in paths}
     for owner, paths in sorted(groups.items()):
+        print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
         remote = helper['get_remote_packages'](host, owner, password, kind)
         allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
         if len(allowed) != len(paths):

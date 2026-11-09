@@ -76,3 +76,27 @@ jobs:
             build-run-id: ${{ inputs.build_run_id }}
             artifact-ids: ${{ matrix.artifact-ids }}
         secrets: inherit
+
+    mirror:
+        name: Mirror (${{ matrix.type }} ${{ matrix.target }})
+        needs: [prepare, publish]
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            mirror: true
+            format: ${{ matrix.type }}
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            package-image-digest: ${{ matrix.package-image-digest }}
+            source-run-id: ${{ matrix.source-run-id }}
+            build-run-id: ${{ inputs.build_run_id }}
+            artifact-ids: ${{ matrix.artifact-ids }}
+        secrets: inherit
