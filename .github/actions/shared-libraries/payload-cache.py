@@ -197,6 +197,8 @@ def export(args):
     record = read(payload / 'build-payload.json')
     if record.get('state') != 'sealed':
         raise RuntimeError('Only sealed PHP payloads can be cached')
+    if record.get('packaging_selection'):
+        raise RuntimeError('A selected packaging artifact cannot replace the complete PHP cache')
     stream = '.'.join(record['php_version'].split('.')[:2])
     compiler = args.compatibility.read_text().strip()
     sdk_manifest = read(payload / 'shared-libraries.json')
@@ -453,12 +455,76 @@ def restore(args):
         raise
 
 
+def package_archive(args):
+    payload = args.payload.resolve()
+    record = read(payload / 'build-payload.json')
+    if record.get('state') != 'sealed':
+        raise RuntimeError('Packaging artifacts require a sealed producer payload')
+    manifest = read(payload / 'shared-libraries.json')
+    packages = set(filter(None, args.packages.split(',')))
+    replacements = {}
+    excluded = set()
+    if packages and 'devel' not in packages:
+        retained = {'bin/php', 'bin/frankenphp'} | {name for name in record['files'] if name.startswith('lib/libphp')}
+        retained.update('bin/php-' + name for name in packages & {'cgi', 'fpm'})
+        retained.update(name for name in record['files'] if component_file(name, record) in packages)
+        consumers = dict(record, files={name: value for name, value in record['files'].items() if name in retained})
+        graph = library_graph(manifest)
+        bindings = consumer_bindings(payload, consumers, abi(manifest), graph)
+        libraries = set(dependency_closure(({'openssl'} & graph.keys()) | {name for values in bindings.values() for name in values}, graph))
+        for name, entry in manifest['libraries'].items():
+            paths = set(entry['files']) | set(entry.get('runtime_assets', {}))
+            if name in libraries:
+                retained.update(paths)
+            else:
+                excluded.update(paths)
+                for path in entry.get('abi_dump', {}).values():
+                    excluded.update([path, path + '.inputs.json'])
+        for name, prepared in record.get('prepared', {}).items():
+            if name not in retained:
+                excluded.add(name)
+                excluded.update(value['path'] for value in prepared.values())
+        for field in ('files', 'prepared'):
+            record[field] = {name: value for name, value in record[field].items() if name in retained}
+        for field in ('library_files', 'library_abi', 'library_build_provenance'):
+            record[field] = {name: value for name, value in record.get(field, {}).items() if name in libraries}
+        record['packaging_selection'] = {'packages': sorted(packages), 'libraries': sorted(libraries),
+                                        'producer_manifest_sha256': hashlib.sha256((payload / 'build-payload.json').read_bytes()).hexdigest()}
+        manifest['libraries'] = {name: value for name, value in manifest['libraries'].items() if name in libraries}
+        replacements = {'build-payload.json': record, 'shared-libraries.json': manifest}
+    prefix = str(payload.relative_to(args.root))
+    with subprocess.Popen(['zstd', '-T0', '-f', '-o', str(args.output)], stdin=subprocess.PIPE) as compressor:
+        with tarfile.open(fileobj=compressor.stdin, mode='w|') as archive:
+            for path in sorted(payload.rglob('*')):
+                name = str(path.relative_to(payload))
+                if path.is_dir() and not path.is_symlink() or name in excluded or name.endswith('.a') and packages and 'devel' not in packages:
+                    continue
+                if name in replacements:
+                    content = (json.dumps(replacements[name], sort_keys=True, indent=2) + '\n').encode()
+                    info = archive.gettarinfo(str(path), arcname=prefix + '/' + name)
+                    info.size = len(content)
+                    archive.addfile(info, io.BytesIO(content))
+                else:
+                    archive.add(path, arcname=prefix + '/' + name, recursive=False)
+            archive.add(args.root / 'stage/payload-provenance.json', arcname='stage/payload-provenance.json')
+        compressor.stdin.close()
+        if compressor.wait():
+            raise RuntimeError('Cannot compress packaging payload')
+    print(json.dumps({'packaging_packages': sorted(packages), 'library_count': len(manifest['libraries']),
+                      'elf_count': len(record['files']), 'archive_bytes': args.output.stat().st_size}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     key = sub.add_parser('key')
     export_parser = sub.add_parser('export')
     restore_parser = sub.add_parser('restore')
+    package_parser = sub.add_parser('package-archive')
+    package_parser.add_argument('--root', type=Path, default=Path('.'))
+    package_parser.add_argument('--payload', type=Path, required=True)
+    package_parser.add_argument('--packages', default='')
+    package_parser.add_argument('--output', type=Path, required=True)
     for command in (key, export_parser, restore_parser):
         command.add_argument('--root', type=Path, default=Path('.'))
         command.add_argument('--compatibility', type=Path, required=True)
@@ -483,7 +549,7 @@ def main():
         for name in ('key', 'seed-key'):
             print(name + '=' + state[name])
     else:
-        {'export': export, 'restore': restore}[args.command](args)
+        {'export': export, 'restore': restore, 'package-archive': package_archive}[args.command](args)
 
 
 if __name__ == '__main__':

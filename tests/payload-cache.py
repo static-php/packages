@@ -115,6 +115,39 @@ class PayloadCache(unittest.TestCase):
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(directory), *extras], check=True, stdout=subprocess.DEVNULL)
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
+    def test_selected_packaging_archive_keeps_sealed_bytes_and_omits_unrelated_sdk_outputs(self):
+        payload = self.root / 'build/8.6'
+        self.fixture(payload, 1, php=True)
+        shutil.copy2(payload / 'modules/imagick-zts-86.so', payload / 'modules/unselected-zts-86.so')
+        (payload / 'lib/unneeded.a').write_bytes(b'compiler archive')
+        for command in ['record', 'seal']:
+            extra = ['--config', self.root / 'craft.yml', '--php-version', '8.6.0RC4', '--arch', 'x86_64'] if command == 'record' else []
+            subprocess.run(['php', ROOT / 'bin/build-payload', command, '--root', payload, *extra], check=True, stdout=subprocess.DEVNULL)
+        original = (payload / 'build-payload.json').read_bytes()
+        cache.write(self.root / 'stage/payload-provenance.json', {'source_run_id': '1234'})
+        archive = self.root / 'package.tar.zst'
+        cache.package_archive(argparse.Namespace(root=self.root, payload=payload, packages='imagick', output=archive))
+        restored = self.root / 'restored'
+        restored.mkdir()
+        with subprocess.Popen(['zstd', '-dc', archive], stdout=subprocess.PIPE) as stream:
+            subprocess.run(['tar', '-xpf', '-', '-C', restored], stdin=stream.stdout, check=True)
+            stream.stdout.close()
+            self.assertEqual(stream.wait(), 0)
+        selected = restored / 'build/8.6'
+        self.assertFalse((selected / 'modules/unselected-zts-86.so').exists())
+        self.assertFalse((selected / 'lib/libfixture.so.1').exists())
+        self.assertFalse((selected / 'lib/unneeded.a').exists())
+        self.assertEqual((payload / 'build-payload.json').read_bytes(), original)
+        self.assertEqual(cache.read(selected / 'build-payload.json')['prepared']['modules/imagick-zts-86.so'],
+                         json.loads(original)['prepared']['modules/imagick-zts-86.so'])
+        verify = ['php', ROOT / 'bin/build-payload', 'verify', '--root', selected]
+        subprocess.run(verify, check=True, stdout=subprocess.DEVNULL)
+        with self.assertRaisesRegex(RuntimeError, 'cannot replace the complete PHP cache'):
+            cache.export(argparse.Namespace(root=self.root, payload=selected))
+        (selected / 'modules/imagick-zts-86.so').write_bytes(b'changed')
+        self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
+
+    @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
     def test_native_graft_keeps_new_sdk_and_identical_cached_php(self):
         old = self.root / 'old'
         self.fixture(old, 1, php=True)

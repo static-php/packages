@@ -514,7 +514,13 @@ def package():
     run(['php', 'bin/build-payload', 'verify', '--root', root])
     # This is a fresh format-local extraction of the sealed common producer artifact.
     run(variants('apply', root) + ['--variants', root / 'openssl-variants', '--type', kind])
-    shutil.copy2(STAGE / kind / 'shared-libraries.json', root / 'shared-libraries.json')
+    manifest = read(STAGE / kind / 'shared-libraries.json')
+    selection = read(root / 'build-payload.json').get('packaging_selection')
+    if selection:
+        if set(os.environ.get('PACKAGES', '').split(',')) - set(selection['packages']):
+            raise RuntimeError('Packaging selection exceeds the sealed artifact')
+        manifest['libraries'] = {name: entry for name, entry in manifest['libraries'].items() if name in selection['libraries']}
+    write(root / 'shared-libraries.json', manifest)
     if (STAGE / kind / 'abi').exists():
         copy_tree(STAGE / kind / 'abi', root / 'usr/share/php-zts/libraries/abi')
     run(['php', 'bin/build-payload', 'seal', '--root', root])

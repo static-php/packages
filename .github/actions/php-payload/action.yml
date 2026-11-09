@@ -27,7 +27,7 @@ runs:
             run: bash .github/actions/shared-libraries/run.sh glibc-payload
         -   name: Pack sealed common payload
             shell: bash
-            run: tar -cf - "build/$PHPV" stage/payload-provenance.json | zstd -f -o php-payload.tar.zst
+            run: python3 .github/actions/shared-libraries/payload-cache.py package-archive --payload "build/$PHPV" --packages "$PACKAGES" --output php-payload.tar.zst
         -   name: Stage sealed common payload
             uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
             with:
