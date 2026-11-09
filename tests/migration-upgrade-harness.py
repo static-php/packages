@@ -28,6 +28,47 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_failure_output_preserves_receipt_without_dumping_it(self):
+        error = ('Command failed: docker exec test python3 migration.py\n'
+                 'Traceback (most recent call last):\n  File "migration.py", line 712\n'
+                 'RuntimeError: Replacement unchanged upgrade was not a no-op\n')
+        baseline = ('Command failed: docker exec test python3 migration.py\n'
+                    'Traceback (most recent call last):\nRuntimeError: Command failed: apk add ' + 'package ' * 200
+                    + '\nERROR: unable to select packages:\n  missing-runtime (no such package):\n'
+                    '    required by: frankenphp\n')
+        result = {'ok': False, 'cells': [
+            {'profile_id': 'common', 'ok': False, 'failed_phase': 'fresh replacement validation',
+             'error': error, 'baseline_failure': baseline, 'inventory': ['package'] * 2000},
+            {'profile_id': 'independent-spx', 'ok': True}], 'cleanup': {'complete': True}}
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / 'receipt.json'
+            summary = Path(directory) / 'summary.md'
+            arguments = ['migration-upgrade-containers.py', '--type', 'apk', '--php', '8.2', '--arch', 'arm64',
+                         '--baseline-dir', '/unused', '--artifacts', '/unused', '--report', str(report)]
+            with patch.dict(scope, {'cell': lambda *_: result}), patch.object(sys, 'argv', arguments), \
+                    patch.dict(scope['os'].environ, {'GITHUB_STEP_SUMMARY': str(summary)}), \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                self.assertEqual(harness['main'](), 1)
+            rendered = output.getvalue()
+            self.assertIn('FAIL (1/2 profiles passed)', rendered)
+            self.assertIn('common / fresh replacement validation: Replacement unchanged upgrade was not a no-op', rendered)
+            self.assertIn('missing-runtime (no such package)', rendered)
+            self.assertNotIn('Traceback', rendered)
+            self.assertNotIn('inventory', rendered)
+            self.assertLess(len(rendered), 1500)
+            self.assertIn('fresh replacement validation', summary.read_text())
+            saved = json.loads(report.read_text())
+            self.assertEqual(saved['cells'][0]['error'], error)
+            self.assertEqual(saved['cells'][0]['baseline_failure'], baseline)
+            self.assertEqual(len(saved['cells'][0]['inventory']), 2000)
+
+    def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
+        error = ('Command failed: apk add php-zts\n' + 'Installing a package\n' * 2000
+                 + 'ERROR: unable to select packages:\n  missing-runtime (no such package)\n')
+        reason = harness['failure_reason'](error)
+        self.assertIn('missing-runtime (no such package)', reason)
+        self.assertNotIn('Installing', reason)
+
     def test_replacement_noop_check_excludes_tools_installed_by_phpize_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -71,6 +71,15 @@ runs:
                 native_args=()
                 if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
                 python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type apk --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report dist/apk/native-upgrade-receipt.json --plan stage/shared-library-plan.json --packages dist/apk --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output dist/apk/shared-library-upgrade-receipt.json "${native_args[@]}"
+        -   name: Upload failed upgrade diagnostics
+            if: ${{ failure() }}
+            uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+            with:
+                name: failed-upgrade-apk-${{ env.TARGET }}-php${{ env.PHPV }}
+                path: |
+                    dist/apk/native-upgrade-receipt.json
+                    stage/published-baseline/baseline.json
+                retention-days: 7
         -   name: Report skipped shared extensions
             if: ${{ !cancelled() }}
             shell: bash

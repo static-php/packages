@@ -10,6 +10,7 @@ This validates package transactions, not the production server's signing identit
 import argparse
 import gzip
 import hashlib
+import html
 import io
 import json
 import os
@@ -34,6 +35,61 @@ RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'alma9': ('rpm', 'almalinux:9'),
 WARNING = re.compile(r'PHP Startup:|Unable to (?:load dynamic library|initialize module)|symbol lookup error|already loaded', re.I)
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_.-]*$')
 RPM_MIRROR = Path('/spp/repository/generations')
+
+
+def failure_reason(error):
+    lines = str(error).strip().splitlines()
+    exceptions = [i for i, line in enumerate(lines) if re.match(r'^[\w.]+(?:Error|Exception):', line)]
+    if exceptions:
+        lines = lines[exceptions[-1]:]
+        lines[0] = lines[0].split(':', 1)[1].strip()
+    if lines and lines[0].startswith('Command failed:'):
+        command = lines.pop(0).removeprefix('Command failed:').strip().split()
+        if not any(line.strip() for line in lines):
+            lines = ['Command failed: ' + ' '.join(command[:3])]
+        else:
+            errors = [i for i, line in enumerate(lines) if re.match(r'^(?:ERROR:|Error:|E:)', line)]
+            lines = lines[errors[0]:] if errors else lines[-6:]
+    return ' | '.join(line.strip() for line in lines if line.strip())[:800] or 'No error details recorded'
+
+
+def annotation(level, message):
+    escaped = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+    print('::' + level + '::' + escaped, flush=True)
+
+
+def report_summary(args, result):
+    cells = result.get('cells', [result])
+    passed = sum(cell.get('ok', False) for cell in cells)
+    target = f'{args.type.upper()} PHP {args.php} / {args.arch}'
+    lines = [f'{target}: {"PASS" if result["ok"] else "FAIL"} ({passed}/{len(cells)} profiles passed)']
+    for cell in cells:
+        profile = cell.get('profile_id', args.profile)
+        if not cell.get('ok'):
+            reason = failure_reason(cell['error']) if cell.get('error') else 'Validation did not complete'
+            if cell.get('cleanup', {}).get('complete') is False:
+                reason += '; cleanup failed: ' + failure_reason('; '.join(cell['cleanup'].get('remaining', [])))
+            message = f'{profile} / {cell.get("failed_phase", "validation")}: {reason}'
+            lines.append('FAILED ' + message)
+            annotation('error', target + ': ' + message)
+        if cell.get('baseline_failure'):
+            lines.append(f'{profile}: old baseline unavailable; replacement validation '
+                         + ('passed' if cell.get('ok') else 'failed') + '. '
+                         + failure_reason(cell['baseline_failure']))
+    if 'cells' in result and result.get('error'):
+        message = 'Validation setup: ' + failure_reason(result['error'])
+        lines.append(message)
+        annotation('error', target + ': ' + message)
+    if result.get('cleanup', {}).get('complete') is False:
+        message = 'Cleanup failed: ' + failure_reason('; '.join(result['cleanup'].get('remaining', [])))
+        lines.append(message)
+        annotation('error', target + ': ' + message)
+    lines.append(f'Full diagnostics: {args.report} (included in CI artifacts)')
+    summary = '\n'.join(lines)
+    print(summary, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write('<pre>' + html.escape(summary) + '</pre>\n')
 
 
 def run(command, *, check=True, input=None, cwd=None, env=None):
@@ -1191,6 +1247,7 @@ class PreparedMirror:
                   'emulated': resources.execution['emulated'],
                   'signing_scope': 'Disposable signed local mirror; test key trusted before old installation. Published archive SHA256 verified; production signing/server behavior is not asserted.'}
         client = None
+        phase = 'prepare profile'
         try:
             self.assert_bound(args)
             allowed = {p['fresh_package'] for p in candidate_only_profiles(baseline, self.inventory)}
@@ -1216,17 +1273,20 @@ class PreparedMirror:
             result['runtime_evidence'] = resources.runtime_evidence[-1]
             common = self.command(args)
             if args.fresh_package:
+                phase = 'fresh installation'
                 checked = resources.exec(client, common + ['--inside', 'fresh'])
                 result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
                 return result
             try:
+                phase = 'published baseline installation/load'
                 resources.exec(client, common + ['--inside', 'old'])
             except RuntimeError as error:
                 if args.library_only or args.partial_consumers:
                     raise
                 self.assert_bound(args)
                 result['baseline_failure'] = str(error)
-                print('::warning::Published baseline cannot be installed or loaded; validating its replacement: ' + str(error)[-2000:], flush=True)
+                annotation('warning', 'Published baseline unavailable; trying a fresh replacement. ' + failure_reason(error))
+                phase = 'fresh replacement validation'
                 resources.exec(client, ['true'])
                 run(['docker', 'rm', '-f', client])
                 resources.containers.remove(client)
@@ -1237,6 +1297,7 @@ class PreparedMirror:
                 checked = resources.exec(client, common + ['--inside', 'replacement'])
                 result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
             else:
+                phase = 'ordinary upgrade validation'
                 before = json.loads((scratch / 'client-before.json').read_text())
                 result['old_installation'] = {
                     'versions': {name: version for name, version in before['installed'].items() if managed(name)},
@@ -1249,6 +1310,7 @@ class PreparedMirror:
                 checked = resources.exec(client, common + ['--inside', 'new'])
                 result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
             if args.tls or args.services:
+                phase = 'TLS/service validation'
                 self.assert_bound(args)
                 removed = run(['docker', 'rm', '-f', client], check=False)
                 if removed.returncode and 'No such container' not in removed.stderr:
@@ -1258,7 +1320,7 @@ class PreparedMirror:
                 client = None
                 lifetime_hooks(args, scratch, result)
         except BaseException as error:
-            result.update(ok=False, error=str(error), interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)),
+            result.update(ok=False, error=str(error), failed_phase=phase, interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)),
                           prepared_inputs_invalid=isinstance(error, PreparedInputError))
         finally:
             remaining = []
@@ -1341,7 +1403,7 @@ def suite(args, baseline, profiles):
                 finally:
                     if temporary_report.exists():
                         temporary_report.unlink()
-            print('Migration result: ' + profile['id'] + ' ok=' + str(receipt['ok']) + (' error=' + receipt.get('error', '')[-2400:] if not receipt['ok'] else ''), flush=True)
+            print('Migration result: ' + profile['id'] + (' PASS' if receipt['ok'] else ' FAIL'), flush=True)
             if (receipt.get('interrupted') or receipt.get('prepared_inputs_invalid')
                     or receipt.get('cleanup', {}).get('complete') is False):
                 break
@@ -1413,7 +1475,7 @@ def main():
     result.update(complete=result['ok'], state='passed' if result['ok'] else 'interrupted' if result.get('interrupted') else 'failed')
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2) + '\n')
-    print(json.dumps(result, indent=2))
+    report_summary(args, result)
     return 0 if result['ok'] else 1
 
 
