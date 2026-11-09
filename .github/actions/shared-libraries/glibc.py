@@ -235,7 +235,7 @@ def test_dependencies(kind, sdk, directory, consumers=False):
         hosts = graph['validation_hosts'](set(filter(None, os.environ.get('PACKAGES', '').split(','))))
         if hosts:
             run(['php', 'bin/spp', 'package', '--type=' + kind, '--phpv=' + os.environ['PHPV'],
-                 '--packages=' + ','.join(sorted(hosts)), '--iteration=1'], env=environment)
+                 '--buildroot=' + str(sdk), '--packages=' + ','.join(sorted(hosts)), '--iteration=1'], env=environment)
         for location in [ROOT / 'dist', directory / 'test-dependencies']:
             metadata = location / kind / 'shared-library-consumers.json'
             if metadata.is_file():
@@ -547,7 +547,7 @@ def package():
     if kind not in FORMATS:
         raise RuntimeError('Unsupported glibc package format')
     stream = os.environ['PHPV']
-    root = ROOT / 'build' / stream
+    root = Path(os.environ.get('PACKAGE_ROOT', ROOT / 'build' / stream))
     provenance = read(STAGE / 'payload-provenance.json')
     expected = hashlib.sha256((STAGE / kind / 'shared-library-plan.json').read_bytes()).hexdigest()
     if provenance.get('php_stream') != stream or provenance.get('source_run_id') != os.environ['SOURCE_RUN_ID'] or provenance.get('format_plan_sha256', {}).get(kind) != expected:
@@ -565,7 +565,7 @@ def package():
     if (STAGE / kind / 'abi').exists():
         copy_tree(STAGE / kind / 'abi', root / 'usr/share/php-zts/libraries/abi')
     run(['php', 'bin/build-payload', 'seal', '--root', root])
-    flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + kind, '--debuginfo', *revision_flags()]
+    flags = ['--phpv=' + stream, '--buildroot=' + str(root), '--prefix=-zts', '--type=' + kind, '--debuginfo', *revision_flags()]
     if os.environ.get('PACKAGES'):
         flags += ['--packages=' + os.environ['PACKAGES']]
     environment = dict(os.environ)
@@ -590,9 +590,13 @@ def package_inline():
     for kind in FORMATS:
         if not read(STAGE / kind / 'shared-library-plan.json').get('build_only'):
             raise RuntimeError('Inline packaging requires unpublished native dependency fixtures')
-    for kind in FORMATS:
-        run(['python3', '.github/actions/shared-libraries/glibc.py', 'package'], env=dict(os.environ, TYPE=kind))
+    def package_format(kind):
+        root = ROOT / 'build' / (kind + '-' + os.environ['PHPV'])
+        copy_tree(ROOT / 'build' / os.environ['PHPV'], root)
+        run(['python3', '.github/actions/shared-libraries/glibc.py', 'package'], env=dict(os.environ, TYPE=kind, PACKAGE_ROOT=str(root)))
         copy_tree(ROOT / 'dist' / kind, STAGE / kind / 'consumers')
+    with ThreadPoolExecutor(max_workers=len(FORMATS)) as executor:
+        list(executor.map(package_format, FORMATS))
     (STAGE / 'packaged-stream').write_text(os.environ['PHPV'] + '\n')
 
 

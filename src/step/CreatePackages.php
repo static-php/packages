@@ -47,8 +47,8 @@ class CreatePackages
         self::$resolvedIterations = [];
         self::$versionArch = [];
         self::$consumerManifest = [];
-        if ($buildroot !== null && (!$libsOnly || !is_file($buildroot . '/shared-libraries.json'))) {
-            throw new \InvalidArgumentException('--buildroot requires --libs-only and a shared library SDK manifest.');
+        if ($buildroot !== null && !is_file($buildroot . '/shared-libraries.json')) {
+            throw new \InvalidArgumentException('--buildroot requires a shared library manifest.');
         }
         if ($libraryManifest !== null && !$libsOnly) {
             throw new \InvalidArgumentException('--library-manifest requires --libs-only.');

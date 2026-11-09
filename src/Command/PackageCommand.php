@@ -22,7 +22,7 @@ class PackageCommand extends BaseCommand
             ->addOption('iteration', null, InputOption::VALUE_REQUIRED, 'Specify iteration number to use for packages (overrides auto-detected)')
             ->addOption('bump', null, InputOption::VALUE_NONE, 'Bump each package iteration to (latest published on the remote repo) + 1')
             ->addOption('libs-only', null, InputOption::VALUE_NONE, 'Package shared libraries without requiring a PHP binary')
-            ->addOption('buildroot', null, InputOption::VALUE_REQUIRED, 'Shared library SDK directory (requires --libs-only)')
+            ->addOption('buildroot', null, InputOption::VALUE_REQUIRED, 'Sealed PHP payload or shared library SDK directory')
             ->addOption('library-manifest', null, InputOption::VALUE_REQUIRED, 'Classified library metadata for the SDK (requires --libs-only)')
             ->addOption('libraries', null, InputOption::VALUE_REQUIRED, 'Select shared libraries (comma-separated; requires --libs-only)');
     }
@@ -34,9 +34,6 @@ class PackageCommand extends BaseCommand
         $bump = (bool)$input->getOption('bump');
         $libsOnly = (bool)$input->getOption('libs-only');
         $buildroot = $input->getOption('buildroot');
-        if ($buildroot !== null && !$libsOnly) {
-            throw new \InvalidArgumentException('--buildroot requires --libs-only.');
-        }
         $libraries = $input->getOption('libraries');
         $libraries = $libraries === null ? null : array_values(array_filter(array_map('trim', explode(',', $libraries))));
         if ($libraries === [] || ($libraries !== null && !$libsOnly)) {

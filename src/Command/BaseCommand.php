@@ -51,7 +51,7 @@ abstract class BaseCommand extends Command
         define('SPP_TARGET', $target);
         define('SPP_PREFIX', $prefix);
         define('SPP_TYPE', $type);
-        define('BUILD_ROOT_PATH', BASE_PATH . '/build/' . $phpVersion);
+        define('BUILD_ROOT_PATH', $this->getName() === 'package' && $input->getOption('buildroot') !== null ? $input->getOption('buildroot') : BASE_PATH . '/build/' . $phpVersion);
         define('BUILD_BIN_PATH', BUILD_ROOT_PATH . '/bin');
         define('BUILD_LIB_PATH', BUILD_ROOT_PATH . '/lib');
         define('BUILD_INCLUDE_PATH', BUILD_ROOT_PATH . '/include');

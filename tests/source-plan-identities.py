@@ -29,6 +29,18 @@ class SourceIdentities(unittest.TestCase):
             launcher.write_text(launcher.read_text() + "putenv('CFLAGS=-O0');\n")
             self.assertNotEqual(source.identity(root), previous)
 
+    def test_package_buildroot_does_not_change_compiler_identity(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'src/Command/BaseCommand.php'
+            path.parent.mkdir(parents=True)
+            path.write_text("define('BUILD_ROOT_PATH', BASE_PATH . '/build/' . $phpVersion);\n")
+            previous = source.identity(root)
+            path.write_text("define('BUILD_ROOT_PATH', $this->getName() === 'package' && $input->getOption('buildroot') !== null ? $input->getOption('buildroot') : BASE_PATH . '/build/' . $phpVersion);\n")
+            self.assertEqual(source.identity(root), previous)
+            path.write_text(path.read_text().replace("=== 'package'", "=== 'build'"))
+            self.assertNotEqual(source.identity(root), previous)
+
     def actor_template(self, root, shared):
         path = root / 'config/templates/craft.yml.twig'
         path.parent.mkdir(parents=True)

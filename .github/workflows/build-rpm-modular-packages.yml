@@ -403,6 +403,8 @@ jobs:
             any: ${{ steps.filter.outputs.any }}
             publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
             publish-any: ${{ steps.filter.outputs.publish-any }}
+            package-matrix: ${{ steps.filter.outputs.package-matrix }}
+            package-any: ${{ steps.filter.outputs.package-any }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -426,6 +428,9 @@ jobs:
                         | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
                         --php-versions "$PHP_VERSIONS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
+                    python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
+                        --php-versions "$PHP_VERSIONS" --succeeded '' --sdk-succeeded "$succeeded" \
+                        | sed -E 's/^(matrix|any)=/package-\1=/' >> "$GITHUB_OUTPUT"
 
     build-payload:
         name: Build payload (${{ matrix.target }} php${{ matrix.php-version }})
@@ -547,7 +552,7 @@ jobs:
 
     compute-package-matrix:
         needs: [compute-build-matrix, build-payload]
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
         runs-on: ubuntu-24.04
         permissions:
             actions: read
@@ -582,8 +587,8 @@ jobs:
 
     package:
         name: Package and upgrade (${{ matrix.type }} ${{ matrix.target }} php${{ matrix.php-version }})
-        needs: [setup-matrix, compute-package-matrix]
-        if: ${{ !cancelled() && needs.compute-package-matrix.outputs.any == 'true' }}
+        needs: [setup-matrix, compute-build-matrix, compute-package-matrix]
+        if: ${{ !cancelled() && (needs.compute-package-matrix.outputs.any == 'true' || needs.compute-build-matrix.outputs.package-any == 'true') }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: read
@@ -591,7 +596,7 @@ jobs:
             actions: read
         strategy:
             fail-fast: false
-            matrix: ${{ fromJson(needs.compute-package-matrix.outputs.matrix) }}
+            matrix: ${{ fromJson(needs.compute-package-matrix.outputs.matrix || needs.compute-build-matrix.outputs.package-matrix) }}
         env:
             IMAGE: ${{ matrix.image }}
             PACKAGING_IMAGE: ${{ matrix.package-image }}

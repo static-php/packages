@@ -220,6 +220,12 @@ def identity(root):
             b"define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');",
             b"const DIST_PATH = BASE_PATH . '/dist';")
         files['bin/spp'] = hashlib.sha256(launcher).hexdigest()
+    base_command = 'src/Command/BaseCommand.php'
+    if base_command in files:
+        source = (root / base_command).read_bytes().replace(
+            b"define('BUILD_ROOT_PATH', $this->getName() === 'package' && $input->getOption('buildroot') !== null ? $input->getOption('buildroot') : BASE_PATH . '/build/' . $phpVersion);",
+            b"define('BUILD_ROOT_PATH', BASE_PATH . '/build/' . $phpVersion);")
+        files[base_command] = hashlib.sha256(source).hexdigest()
     scoped = scoped_hook_inputs(root)
     files = {name: value for name, value in files.items()
              if name not in scoped
