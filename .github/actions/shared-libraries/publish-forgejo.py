@@ -7,6 +7,8 @@ import os
 import re
 import runpy
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from itertools import groupby
 
 
 STREAM_OWNERS = ('82', '83', '84', '85', '86')
@@ -99,12 +101,16 @@ def publish(action, host, password, kind, groups, helper, bootstrap):
     if action == 'check':
         return
     ordered = publication_order(groups, helper, kind, bootstrap)
-    for index, (_, owner, path) in enumerate(ordered, 1):
+    def upload(item):
+        index, (_, owner, path) = item
         print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         if helper['archive_sha256'](path) != digests[path]:
             raise RuntimeError('A cohort archive changed after publication preflight: ' + path.name)
         helper['upload_verified_archive'](host, owner, password, kind, path)
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
+            list(pool.map(upload, phase))
 
 
 def main(argv=None):

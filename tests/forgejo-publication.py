@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import unittest
+from threading import Barrier
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -369,6 +370,26 @@ class ForgejoPublication(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'owner 86'):
             publisher['publish']('upload', 'https://example.com', 'test', 'alpine', groups, helpers, True)
         upload.assert_not_called()
+
+    def test_parallel_uploads_finish_dependencies_before_cli(self):
+        libraries = {'php-zts-lib-' + str(i) for i in range(4)}
+        paths = [self.archive(name=name) for name in sorted(libraries | {'php-zts-cli', 'php-zts-runtime-layout'})]
+        completed = set()
+        barrier = Barrier(4)
+        def upload(host, owner, password, kind, path):
+            name = helper['package_metadata'](path, kind)[0]
+            if name in libraries:
+                self.assertIn('php-zts-runtime-layout', completed)
+                barrier.wait(timeout=3)
+            if name == 'php-zts-cli':
+                self.assertTrue(libraries <= completed)
+            completed.add(name)
+        helpers = dict(helper, get_remote_candidates=lambda *args: [],
+                       verify_upload_versions=lambda host, owner, password, kind, paths, remote: paths,
+                       upload_verified_archive=upload)
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher['publish']('upload', 'https://example.com', 'test', 'alpine', {'85': paths}, helpers, True)
+        self.assertEqual(len(completed), 6)
 
     def test_initial_and_breaking_update_order(self):
         paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-intl', 'php-zts-lib-ssl', 'php-zts-runtime-layout')]

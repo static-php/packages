@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import time
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fnmatch import fnmatch
 from urllib.parse import quote
@@ -106,12 +107,13 @@ def get_remote_packages_for_owners(host, owners, password, pkg_type):
 def get_remote_candidates(host, owner, password, pkg_type, files):
     metadata = package_metadata if pkg_type in ('debian', 'alpine') else get_package_info
     names = sorted({metadata(path, pkg_type)[0] for path in files})
-    packages = []
-    for index, name in enumerate(names, 1):
+    def lookup(item):
+        index, name = item
         print(f"Listing versions {index}/{len(names)}: {host} {owner}/{name}", flush=True)
-        packages.extend(package for package in get_remote_packages(host, owner, password, pkg_type, name)
-                        if package['name'] == name)
-    return packages
+        return [package for package in get_remote_packages(host, owner, password, pkg_type, name)
+                if package['name'] == name]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [package for batch in pool.map(lookup, enumerate(names, 1)) for package in batch]
 
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
@@ -404,13 +406,14 @@ def version_is_newer(pkg_type, left, right):
     return result == '>'
 
 def verify_upload_versions(host, owner, password, pkg_type, files, packages):
-    candidates = []
+    candidates = {}
     skipped = {}
-    for index, pkg_file in enumerate(files, 1):
+    def check(item):
+        index, pkg_file = item
         name, version, arch = package_metadata(pkg_file, pkg_type)
         print(f"Checking {index}/{len(files)}: {host} {owner}/{name} {version} {arch}", flush=True)
         key = (re.sub(r'-debuginfo$', '', name), version, arch)
-        candidates.append((pkg_file, key))
+        candidates[pkg_file] = key
         for published in packages:
             if published['name'] != name:
                 continue
@@ -434,8 +437,11 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
             if arch in archs:
                 skipped[key] = f"{name} {version} sorts below published {published['version']} for {arch}"
                 break
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(check, enumerate(files, 1)))
     allowed = []
-    for pkg_file, key in candidates:
+    for pkg_file in files:
+        key = candidates[pkg_file]
         if key in skipped:
             print(f"::warning::Skipping upload of {pkg_file.name}: {skipped[key]}")
         else:
