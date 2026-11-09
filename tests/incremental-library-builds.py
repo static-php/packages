@@ -22,6 +22,45 @@ spec.loader.exec_module(incremental)
 
 
 class IncrementalLibraryTests(unittest.TestCase):
+    def test_rebuild_retires_owned_alias_chain_without_touching_other_outputs(self):
+        other = incremental.file_snapshot(self.sdk, self.manifest, ['other'])
+        target = self.sdk / 'lib/libbase.so.1'
+        soname = self.sdk / 'lib/libbase-1.so.1'
+        alias = self.sdk / 'lib/libbase.so'
+        soname.symlink_to(target.name)
+        alias.symlink_to(soname.name)
+        ownership = copy.deepcopy(self.manifest)
+        ownership['libraries']['base']['files'] += ['lib/' + soname.name, 'lib/' + alias.name]
+        incremental.write(self.sdk / '.shared-library-ownership.json', ownership)
+        incremental.retire_owned_symlinks(self.sdk, ['base'])
+        self.assertFalse(soname.is_symlink())
+        self.assertFalse(alias.is_symlink())
+        self.assertEqual(target.read_bytes(), b'compiled base')
+        self.assertEqual(incremental.file_snapshot(self.sdk, self.manifest, ['other']), other)
+
+    def test_rebuild_alias_cleanup_rejects_escaping_parent_before_removing_links(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'link').symlink_to('missing')
+        (self.sdk / 'escape').symlink_to(outside, target_is_directory=True)
+        valid = self.sdk / 'lib/valid-link'
+        valid.symlink_to('missing')
+        incremental.write(self.sdk / '.shared-library-ownership.json', {'libraries': {
+            'base': {'files': ['lib/valid-link', 'escape/link']}}})
+        with self.assertRaisesRegex(RuntimeError, 'Escaping SDK output parent'):
+            incremental.retire_owned_symlinks(self.sdk, ['base'])
+        self.assertTrue(valid.is_symlink())
+        self.assertTrue((outside / 'link').is_symlink())
+
+    def test_rebuild_alias_cleanup_rejects_conflicting_ownership(self):
+        link = self.sdk / 'lib/shared-link'
+        link.symlink_to('missing')
+        incremental.write(self.sdk / '.shared-library-ownership.json', {'libraries': {
+            'base': {'files': ['lib/shared-link']}, 'other': {'files': ['lib/shared-link']}}})
+        with self.assertRaisesRegex(RuntimeError, 'Conflicting SDK ownership'):
+            incremental.retire_owned_symlinks(self.sdk, ['base'])
+        self.assertTrue(link.is_symlink())
+
     def test_recreated_unchanged_soname_link_preserves_output_snapshot(self):
         link = self.sdk / 'lib/libother.so'
         link.symlink_to('libother.so.1')

@@ -3,13 +3,22 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / '.github/actions/shared-libraries'))
+spec = importlib.util.spec_from_file_location('incremental', ROOT / '.github/actions/shared-libraries/incremental-build.py')
+incremental = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(incremental)
 
 
 RUNNER = r'''<?php
@@ -40,7 +49,7 @@ foreach ($names as $short) {
     $package->addStage('build', function () use ($short, $name): void {
         $cache = json_decode(file_get_contents(DOWNLOAD_PATH . '/.cache.json'), true, 512, JSON_THROW_ON_ERROR);
         $version = $short === 'base' ? $cache[$name]['source']['version'] : '1';
-        $soname = 'libtransition-' . $short . '.so.' . $version;
+        $soname = 'libtransition-' . $short . '-' . $version . '.so.1';
         $command = [getenv('CC'), '-shared', '-fPIC', '-g', '-gdwarf-4', '-Wl,-soname,' . $soname,
             '-o', BUILD_LIB_PATH . '/' . $soname, WORKING_DIR . '/native-sources/' . $name . '/fixture.c'];
         if ($short === 'consumer') {
@@ -105,7 +114,9 @@ class InstallerTransitionTests(unittest.TestCase):
                 (root / 'downloads/.cache.json').write_text(json.dumps(cache))
 
             def run(action, selected, success=True):
-                environment = dict(os.environ, SPC_LIBC='glibc', SPC_TARGET='', SPC_TOOLCHAIN='StaticPHP\\Toolchain\\GccNativeToolchain',
+                if action == 'build':
+                    incremental.retire_owned_symlinks(root / 'buildroot', ['transition-' + name for name in selected.split(',')])
+                environment = dict(os.environ, SPC_LIBC='musl' if Path('/etc/alpine-release').is_file() else 'glibc', SPC_TARGET='', SPC_TOOLCHAIN='StaticPHP\\Toolchain\\GccNativeToolchain',
                                    SPC_SKIP_TOOLCHAIN_CHECK='yes', SPC_ENABLE_LOG_FILE='0',
                                    CC='/usr/bin/gcc' if Path('/usr/bin/gcc').is_file() else shutil.which('cc'),
                                    CXX='/usr/bin/g++' if Path('/usr/bin/g++').is_file() else shutil.which('g++'),
@@ -132,8 +143,8 @@ class InstallerTransitionTests(unittest.TestCase):
             initial = run('build', 'base,consumer,other')
             self.assertNotIn('pending_rebuilds', initial)
             self.assertEqual(compiled(), ['base', 'consumer', 'other'])
-            consumer = signature('lib/libtransition-consumer.so.1')
-            other = signature('lib/libtransition-other.so.1')
+            consumer = signature('lib/libtransition-consumer-1.so.1')
+            other = signature('lib/libtransition-other-1.so.1')
             source = root / 'native-sources/transition-base/fixture.c'
             source.write_text('int transition_base(void) { return 2; }')
             cache['transition-base']['source'].update(version='2', hash=hashlib.sha256(source.read_bytes()).hexdigest())
@@ -141,10 +152,10 @@ class InstallerTransitionTests(unittest.TestCase):
 
             transition = run('build', 'base')
             self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base'])
-            self.assertFalse((root / 'buildroot/lib/libtransition-base.so.1').exists())
-            self.assertEqual(transition['pending_rebuilds'], {'transition-consumer': {'libtransition-base.so.1': 'transition-base'}})
-            self.assertEqual(signature('lib/libtransition-consumer.so.1'), consumer)
-            self.assertEqual(signature('lib/libtransition-other.so.1'), other)
+            self.assertFalse((root / 'buildroot/lib/libtransition-base-1.so.1').exists())
+            self.assertEqual(transition['pending_rebuilds'], {'transition-consumer': {'libtransition-base-1.so.1': 'transition-base'}})
+            self.assertEqual(signature('lib/libtransition-consumer-1.so.1'), consumer)
+            self.assertEqual(signature('lib/libtransition-other-1.so.1'), other)
             rejection = run('reuse', 'consumer', success=False)
             self.assertRegex(rejection, r'(?:incomplete|pending|LIBRARY_REUSE|invalid)')
             self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base'])
@@ -152,11 +163,11 @@ class InstallerTransitionTests(unittest.TestCase):
             final = run('build', 'consumer')
             self.assertNotIn('pending_rebuilds', final)
             self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base', 'consumer'])
-            self.assertEqual(signature('lib/libtransition-other.so.1'), other)
+            self.assertEqual(signature('lib/libtransition-other-1.so.1'), other)
             self.assertEqual(final['libraries']['transition-consumer']['depends'], ['transition-base'])
-            consumer_elf = final['libraries']['transition-consumer']['elf']['lib/libtransition-consumer.so.1']
-            self.assertIn('libtransition-base.so.2', consumer_elf['needed'])
-            self.assertNotIn('libtransition-base.so.1', consumer_elf['needed'])
+            consumer_elf = final['libraries']['transition-consumer']['elf']['lib/libtransition-consumer-1.so.1']
+            self.assertIn('libtransition-base-2.so.1', consumer_elf['needed'])
+            self.assertNotIn('libtransition-base-1.so.1', consumer_elf['needed'])
             run('reuse', 'consumer')
             self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base', 'consumer'])
             (root / 'check.c').write_text('extern int transition_consumer(void); int main(void) { return transition_consumer() == 2 ? 0 : 1; }')

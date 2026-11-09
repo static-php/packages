@@ -279,6 +279,27 @@ def invalid_libraries(root, manifest):
     return invalid
 
 
+def retire_owned_symlinks(root, selected):
+    ownership = read(root / '.shared-library-ownership.json', {}).get('libraries', {})
+    links = []
+    for name in selected:
+        for relative in ownership.get(name, {}).get('files', []):
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '..' in Path(relative).parts or '\\' in relative:
+                raise RuntimeError('Invalid SDK ownership path: ' + repr(relative))
+            path = root / relative
+            try:
+                path.parent.resolve().relative_to(root.resolve())
+            except (OSError, ValueError):
+                raise RuntimeError('Escaping SDK output parent: ' + relative) from None
+            if path.is_symlink():
+                if any(other != name and relative in record.get('files', []) for other, record in ownership.items()):
+                    raise RuntimeError('Conflicting SDK ownership: ' + relative)
+                links.append(path)
+    # Retiring a DSO must not leave its owned aliases dangling during SPC cleanup.
+    for path in links:
+        path.unlink()
+
+
 def record_state(plan, manifest):
     graph = plan["inventory"]["libraries"]
     previous = plan.get("previous_state", {}).get("libraries", {})
@@ -362,6 +383,8 @@ def execute(root, buildroot, plan, package_type, command=None):
             artifacts &= plan["effective_sources"].keys()
             pinned.ensure_sources(root, plan["effective_sources"], sorted(artifacts))
             write(cache_path, plan["effective_sources"])
+            if not plan['full']:
+                retire_owned_symlinks(buildroot, selected)
             subprocess.run(command, cwd=root, check=True, env={**os.environ, 'SPP_LIBRARY_SOURCES_ONLY': 'true'})
             observed = read(cache_path)
             for name in force:
