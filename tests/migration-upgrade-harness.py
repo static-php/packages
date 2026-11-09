@@ -179,6 +179,8 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     resources.runtime_evidence.append({'container': name})
                     return name
                 def execute(client, command):
+                    if command == ['true']:
+                        raise RuntimeError('Broken old container cannot execute commands')
                     phase = command[-1]
                     executions.append((client, phase))
                     if phase == 'old':

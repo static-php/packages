@@ -1331,9 +1331,11 @@ class PreparedMirror:
                 result['baseline_failure'] = str(error)
                 annotation('warning', 'Published baseline unavailable; trying a fresh replacement. ' + failure_reason(error))
                 phase = 'fresh replacement validation'
-                resources.exec(client, ['true'])
-                run(['docker', 'rm', '-f', client])
-                resources.containers.remove(client)
+                removed = run(['docker', 'rm', '-f', client], check=False)
+                if removed.returncode and 'No such container' not in removed.stderr:
+                    raise RuntimeError('Cannot remove failed baseline client: ' + removed.stderr)
+                if client in resources.containers:
+                    resources.containers.remove(client)
                 client = None
                 self.select_generation('new')
                 client = resources.start(self.client_image, 'replacement-' + str(self.report['profiles_started']))
