@@ -13,7 +13,7 @@ foreach (['', 'xdebug'] as $selection) {
     putenv('PACKAGES=' . $selection);
     foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
         $suffix = $type === 'deb' ? '-9' : '-r9';
-        $query = $selection === '' ? '' : '&q=php-zts-xdebug';
+        $query = '&q=php-zts-xdebug';
         $url = "https://example.com/api/v1/packages/86?type={$registryType}{$query}&limit=1000&page=";
         $cache->setValue(null, [
             $url . '1' => [200, json_encode([['name' => 'unrelated', 'version' => '1.0-99']])],
@@ -29,7 +29,7 @@ putenv('PACKAGES');
 
 $indexes = [];
 foreach (['82', '83', '84', '85', '86'] as $owner) {
-    $url = "https://example.com/api/v1/packages/{$owner}?type=alpine&q=php-zts-lib-&limit=1000&page=";
+    $url = "https://example.com/api/v1/packages/{$owner}?type=alpine&q=php-zts-lib-zlib&limit=1000&page=";
     $indexes[$url . '1'] = [200, json_encode([['name' => 'php-zts-lib-zlib', 'version' => '1.3.1-r2']])];
     $indexes[$url . '2'] = [200, $owner === '83' ? json_encode([['name' => 'php-zts-lib-zlib', 'version' => '1.3.1-r11']]) : '[]'];
     $indexes[$url . '3'] = [200, '[]'];

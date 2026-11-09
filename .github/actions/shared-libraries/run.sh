@@ -2,6 +2,10 @@
 set -euo pipefail
 
 command=$1
+if [[ -n "${ITERATION:-}" && "${BUMP:-false}" == true ]]; then
+    echo 'Choose bump=true or an explicit iteration; an explicit iteration cannot safely bump published packages.' >&2
+    exit 1
+fi
 if [[ -n "${LIBRARIES:-}" ]]; then
     export MODE=incremental
 fi

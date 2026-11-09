@@ -2451,13 +2451,8 @@ class CreatePackages
         }
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $owner ??= self::getForgejoOwner();
-        $query = str_starts_with($name, 'php-zts-lib-') ? '&q=php-zts-lib-' : '';
-        if (preg_replace('/-debuginfo$/', '', $name) === 'php-zts-runtime-layout') {
-            $query = '&q=php-zts-runtime-layout';
-        } elseif ($query === '' && getenv('PACKAGES')) {
-            $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
-            $query = '&q=' . rawurlencode(preg_replace('/-debuginfo$/', '', $matchName));
-        }
+        $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
+        $query = '&q=' . rawurlencode(preg_replace('/-debuginfo$/', '', $matchName));
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {

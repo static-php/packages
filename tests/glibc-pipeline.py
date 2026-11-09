@@ -31,6 +31,17 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_explicit_iteration_cannot_silently_disable_bumping(self):
+        with patch.dict(os.environ, ITERATION='5', BUMP='true'):
+            with self.assertRaisesRegex(RuntimeError, 'Choose bump=true or an explicit iteration'):
+                glibc.revision_flags()
+            result = subprocess.run(['bash', str(HELPERS / 'run.sh'), 'package'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Choose bump=true or an explicit iteration', result.stderr)
+        for iteration, bump, expected in [('', 'true', ['--bump']), ('5', 'false', ['--iteration=5']), ('', 'false', [])]:
+            with patch.dict(os.environ, ITERATION=iteration, BUMP=bump):
+                self.assertEqual(glibc.revision_flags(), expected)
+
     def test_complete_repackage_can_recover_a_broken_shared_baseline(self):
         baseline = {'packages': [{'name': 'php-zts-cli', 'requires': ['php-zts-lib-openssl']}]}
         self.assertEqual(workflow.upgrade_mode(baseline, {'php_requests': {'8.5': {'full': True}}}, '8.5'), 'full')

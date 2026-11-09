@@ -96,6 +96,8 @@ def share_consumers(source, destination):
 
 def revision_flags():
     iteration = os.environ.get('ITERATION', '')
+    if iteration and os.environ.get('BUMP') == 'true':
+        raise RuntimeError('Choose bump=true or an explicit iteration; an explicit iteration cannot safely bump published packages.')
     return ['--iteration=' + iteration] if iteration else ['--bump'] if os.environ.get('BUMP') == 'true' else []
 
 
