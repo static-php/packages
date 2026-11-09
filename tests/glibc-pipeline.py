@@ -118,7 +118,7 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer')]:
+        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer'), ('rpm', 'breaking', False, False), ('apk', 'breaking', False, False)]:
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
@@ -142,7 +142,7 @@ class Pipeline(unittest.TestCase):
                         subprocess.run(args, check=True)
                     elif 'prepare' in args:
                         glibc.write(option('--manifest-output'), value)
-                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}, 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
+                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}, 'abi_break': rebuilt == 'breaking', 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
                     elif 'expand' in args:
                         glibc.write(option('--output'), {'selected': []})
                     elif 'stage-publication-retries' in args:
@@ -162,12 +162,15 @@ class Pipeline(unittest.TestCase):
                         patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else ''):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
-                self.assertCountEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
+                expected_scans = [(format, False, expected) for format in formats]
+                if rebuilt == 'breaking':
+                    expected_scans += [(format, format == formats[-1], expected) for format in formats]
+                self.assertCountEqual(scans, expected_scans)
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
                 self.assertEqual(any('seal' in call for call in calls), not manual)
                 prepares = [call for call in calls if 'prepare' in call]
-                self.assertEqual(len(prepares), 1 if kind == 'apk' else 2 if cached_variants or manual else 4)
+                self.assertEqual(len(prepares), (1 if kind == 'apk' else 2 if cached_variants or manual else 4) + (len(formats) if rebuilt == 'breaking' else 0))
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
                 self.assertEqual(packaging.n_waiting, 0)
                 archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]

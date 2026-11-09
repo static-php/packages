@@ -40,6 +40,23 @@ def copy_tree(source, destination):
     run(['cp', '-a', '--reflink=auto', str(source) + '/.', destination])
 
 
+def project_libraries(source, destination, libraries):
+    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+    libraries = set(libraries)
+    if (source / 'openssl-variant.json').is_file():
+        libraries.add('openssl')
+    record, manifest, excluded = graph['packaging_projection'](source, read(source / 'build-payload.json'),
+        read(source / 'shared-libraries.json'), set(), library_selection=libraries)
+    if destination.exists():
+        shutil.rmtree(destination)
+    def ignore(directory, names):
+        return [name for name in names if str((Path(directory) / name).relative_to(source)) in excluded or name.endswith('.a')]
+    shutil.copytree(source, destination, symlinks=True, ignore=ignore)
+    write(destination / 'build-payload.json', record)
+    write(destination / 'shared-libraries.json', manifest)
+    return set(manifest['libraries'])
+
+
 def architecture():
     return 'aarch64' if os.environ['MATRIX_ARCH'] == 'arm64' else 'x86_64'
 
@@ -170,12 +187,20 @@ def shared_sdk_packaging():
 
 def package_libraries(kind):
     directory = format_stage(kind)
+    plan = read(directory / 'shared-library-plan.json')
     if (os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES')
             and not read(directory / 'shared-library-plan.json')['libraries']):
         (directory / 'libraries').mkdir(exist_ok=True)
         return
     selected_sdk = format_sdk(kind)
     shared = kind != 'apk' and selected_sdk == ROOT / 'buildroot'
+    projected = None
+    if (os.environ.get('PUBLISH') == 'false' and plan['libraries']
+            and not any(request.get('full') or request.get('packages') for request in plan['php_requests'].values())
+            and len(plan['libraries']) < len(read(selected_sdk / 'shared-libraries.json')['libraries'])):
+        destination = STAGE / ('package-sdk-' + kind)
+        projected = project_libraries(selected_sdk, destination, plan['libraries'])
+        selected_sdk, shared = destination, False
     if shared:
         graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
         selected = read(directory / 'shared-library-plan.json')['libraries']
@@ -187,7 +212,10 @@ def package_libraries(kind):
             shared = False
     manifest = directory / 'shared-libraries.json' if shared else selected_sdk / 'shared-libraries.json'
     if not shared:
-        shutil.copy2(directory / 'shared-libraries.json', manifest)
+        classified = read(directory / 'shared-libraries.json')
+        if projected is not None:
+            classified['libraries'] = {name: entry for name, entry in classified['libraries'].items() if name in projected}
+        write(manifest, classified)
         run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
     manifest_option = ['--library-manifest=' + str(manifest)] if shared else []
     abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
@@ -272,11 +300,10 @@ def classify():
         run(['python3', 'tests/forgejo-publication.py'])
     def read_baseline(kind):
         run(['php', 'tests/package-versions.php', '--type=' + kind])
-        baseline(kind, format_stage(kind) / 'baseline', consumers=bool(rebuilt) and kind == formats[-1], abi_libraries=rebuilt, libraries=scope)
+        baseline(kind, format_stage(kind) / 'baseline', abi_libraries=rebuilt, libraries=scope)
     with ThreadPoolExecutor(max_workers=len(formats)) as executor:
         list(executor.map(read_baseline, formats))
-    if rebuilt and glibc:
-        share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
+    consumers_ready = False
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
     if glibc and not shared and not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
@@ -289,16 +316,7 @@ def classify():
             selected_sdk = format_sdk(kind)
             if selected_sdk != sdk:
                 if scope is not None and os.environ.get('LIBRARIES') and not rebuilt:
-                    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
-                    record, manifest, excluded = graph['packaging_projection'](sdk, read(sdk / 'build-payload.json'),
-                        read(sdk / 'shared-libraries.json'), set(), library_selection=scope)
-                    if selected_sdk.exists():
-                        shutil.rmtree(selected_sdk)
-                    def ignore(directory, names):
-                        return [name for name in names if str((Path(directory) / name).relative_to(sdk)) in excluded or name.endswith('.a')]
-                    shutil.copytree(sdk, selected_sdk, symlinks=True, ignore=ignore)
-                    write(selected_sdk / 'build-payload.json', record)
-                    write(selected_sdk / 'shared-libraries.json', manifest)
+                    project_libraries(sdk, selected_sdk, scope)
                 else:
                     copy_tree(sdk, selected_sdk)
             if glibc and not shared and variants_ready:
@@ -329,7 +347,8 @@ def classify():
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
             for dependencies in read(selected_sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values():
                 reverse_roots.update(dependencies.values())
-        if scope is not None and any(plan.get('abi_break') for plan in plans.values()):
+        needs_consumers = any(plan.get('abi_break') or plan.get('bootstrap') and not plan.get('build_only') for plan in plans.values())
+        if scope is not None and any(plan.get('abi_break') for plan in plans.values()) or needs_consumers and not consumers_ready:
             scope = None
             for kind in formats:
                 directory = format_stage(kind) / 'baseline'
@@ -337,6 +356,7 @@ def classify():
                 baseline(kind, directory, consumers=kind == formats[-1], abi_libraries=reverse_roots)
             if glibc:
                 share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
+            consumers_ready = True
             continue
         if reverse_roots:
             run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
