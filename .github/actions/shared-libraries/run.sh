@@ -147,38 +147,14 @@ case "$command" in
         ;;
     publish-rpm)
         if [[ "$TYPE" != rpm || ! "$RPM_DIRECTORY" =~ ^/mnt/data/rpm/(x86_64|aarch64)/el8$ ]]; then
-            echo 'Canonical RPM publication requires the validated architecture/el8 destination' >&2
+            echo 'RPM publication requires the architecture/el8 destination' >&2
             exit 1
         fi
-        state="${RPM_DIRECTORY%/el8}/.php-zts"
-        incoming=$(ssh "$RPM_HOST" "mkdir -p '$state/incoming' && mktemp -d '$state/incoming/cohort-XXXXXXXX'")
-        if [[ "$incoming" != "$state/incoming/cohort-"* || ! "${incoming##*/}" =~ ^cohort-[A-Za-z0-9]+$ ]]; then
-            echo 'Invalid remote cohort staging directory' >&2
-            exit 1
-        fi
-        trap 'ssh "$RPM_HOST" "rm -rf -- '"'"'$incoming'"'"'"' EXIT
-        ssh "$RPM_HOST" "mkdir -p '$incoming/packages' '$incoming/tools'"
-        rsync -av --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$incoming/packages/"
-        rsync -av bin/canonical-rpm-repository bin/createrepo_static "$RPM_HOST:$incoming/tools/"
-        rsync -av cohort-result.json "$RPM_HOST:$incoming/cohort.json"
+        ssh "$RPM_HOST" "test ! -L '$RPM_DIRECTORY' || { echo 'EL8 repository is a symlink; refusing to redirect the upload' >&2; exit 1; }; mkdir -p '$RPM_DIRECTORY'"
+        rsync -av --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$RPM_DIRECTORY/"
         arch="${RPM_DIRECTORY%/el8}"
         arch="${arch##*/}"
-        ssh "$RPM_HOST" "bash -s -- '$state' '$incoming' '$arch'" <<'REMOTE'
-        set -euo pipefail
-        state=$1
-        incoming=$2
-        arch=$3
-        python=python3
-        if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi
-        "$python" "$incoming/tools/canonical-rpm-repository" stage \
-            --state-root "$state" --incoming "$incoming/packages" --architecture "$arch" \
-            --cohort-receipt "$incoming/cohort.json" \
-            --legacy-root "${state%/.php-zts}/el8" --legacy-root "${state%/.php-zts}/el9" \
-            --legacy-root "${state%/.php-zts}/el10" --output "$incoming/stage.json"
-        generation=$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["generation"])' "$incoming/stage.json")
-        "$python" "$incoming/tools/canonical-rpm-repository" promote \
-            --state-root "$state" --generation "$generation" --activate-aliases
-REMOTE
+        ssh "$RPM_HOST" "set -e; cd '$RPM_DIRECTORY'; python=python3; if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi; \"\$python\" - --platform el8 --arch '$arch'; createrepo_c --update .; modifyrepo_c --mdtype=modules modules.yaml repodata" < bin/createrepo_static
         ;;
     assemble|publish)
         libs="cohort/shared-libs-$TYPE-$TARGET"

@@ -19,6 +19,35 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_rpm_upload_targets_only_real_el8_and_refreshes_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / 'commands.jsonl'
+            stub = '#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["COMMAND_LOG"], "a") as log:\n log.write(json.dumps(sys.argv) + "\\n")\n'
+            for name in ('ssh', 'rsync'):
+                path = root / name
+                path.write_text(stub)
+                path.chmod(0o755)
+            environment = dict(os.environ, TYPE='rpm', MODE='full', LIBRARIES='', RPM_HOST='test-host',
+                RPM_DIRECTORY='/mnt/data/rpm/aarch64/el8', COMMAND_LOG=str(log), PATH=str(root) + os.pathsep + os.environ['PATH'])
+            subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'publish-rpm'],
+                           cwd=ROOT, env=environment, check=True, input='', text=True, capture_output=True)
+            commands = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(commands), 3)
+            self.assertIn("test ! -L '/mnt/data/rpm/aarch64/el8'", commands[0][-1])
+            self.assertEqual(commands[1][-1], 'test-host:/mnt/data/rpm/aarch64/el8/')
+            self.assertNotIn('--delete', commands[1])
+            update = commands[2][-1]
+            self.assertIn('"$python" - --platform el8 --arch', update)
+            self.assertIn('createrepo_c --update .; modifyrepo_c --mdtype=modules modules.yaml repodata', update)
+            for forbidden in ('.php-zts', '/el9', '/el10', ' ln ', ' mv ', ' rm '):
+                self.assertNotIn(forbidden, json.dumps(commands))
+            environment['RPM_DIRECTORY'] = '/mnt/data/rpm/aarch64/el9'
+            result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'publish-rpm'],
+                                    cwd=ROOT, env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(log.read_text().splitlines()), 3)
+
     def test_failed_validation_preflight_and_upload_do_not_stop_other_streams(self):
         for kind in ('rpm', 'deb', 'apk'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:

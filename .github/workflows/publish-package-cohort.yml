@@ -94,7 +94,7 @@ jobs:
                     $host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
                     EOF
                     chmod 600 "$ssh_dir/known_hosts"
-            -   name: Set canonical RPM repository paths
+            -   name: Set EL8 RPM upload directory
                 if: env.TYPE == 'rpm'
                 run: |
                     arch="$MATRIX_ARCH"
