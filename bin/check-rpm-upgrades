@@ -4,11 +4,13 @@ import argparse
 import bz2
 import gzip
 import hashlib
+import http.client
 import lzma
 import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -24,13 +26,19 @@ def read_http_file(base_url, location, missing_ok=False):
         raise RuntimeError('Invalid RPM metadata location: ' + location)
     request = urllib.request.Request(base_url.rstrip('/') + '/' + location,
                                      headers={'User-Agent': 'APT-HTTP/1.3 (2.6.1)'})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read()
-    except urllib.error.HTTPError as error:
-        if missing_ok and error.code == 404:
-            return None
-        raise RuntimeError('Cannot read published RPM metadata: HTTP {}'.format(error.code)) from error
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if missing_ok and error.code == 404:
+                return None
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                raise RuntimeError('Cannot read published RPM metadata: HTTP {}'.format(error.code)) from error
+        except (OSError, http.client.IncompleteRead):
+            if attempt == 2:
+                raise
+        time.sleep(attempt + 1)
 
 
 def php_stream(version):
