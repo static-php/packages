@@ -294,7 +294,7 @@ def classify():
     if os.environ.get('LIBRARIES'):
         graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
         scope = graph['dependency_closure'](set(os.environ['LIBRARIES'].split(',')) | rebuilt, graph['library_graph'](read(sdk / 'shared-libraries.json')))
-    elif os.environ.get('PACKAGES') and os.environ.get('PUBLISH') == 'false' and not rebuilt:
+    elif os.environ.get('PACKAGES') and not rebuilt:
         scope = []
     def read_baseline(kind):
         baseline(kind, format_stage(kind) / 'baseline', libraries=scope)

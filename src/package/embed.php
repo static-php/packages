@@ -3,6 +3,7 @@
 namespace staticphp\package;
 
 use staticphp\package;
+use staticphp\util\BuildPayload;
 use staticphp\step\CreatePackages;
 
 class embed implements package
@@ -50,7 +51,7 @@ class embed implements package
         // libphp filename with shared library suffix: libphp-zts-85.so, libphp-nts-84.so
         $libName = 'libphp' . $sharedLibrarySuffix . '.so';
 
-        $src = BUILD_ROOT_PATH . '/debug/libphp' . $sharedLibrarySuffix . '.so.debug';
+        $src = BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_LIB_PATH . '/' . $libName)['debug'] ?? BUILD_ROOT_PATH . '/debug/libphp' . $sharedLibrarySuffix . '.so.debug';
         if (!file_exists($src)) {
             return [];
         }

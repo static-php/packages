@@ -151,11 +151,12 @@ class Pipeline(unittest.TestCase):
                 glibc.write(stage / 'effective-source-plan.json', {})
                 if cached_variants:
                     glibc.write(sdk / 'openssl-variants/variants.json', {})
-                calls, scans = [], []
+                calls, scans, scopes = [], [], []
                 formats = ('apk',) if kind == 'apk' else ('rpm', 'deb')
                 packaging = Barrier(len(formats))
                 def baseline(kind, destination, consumers=False, abi_libraries=(), libraries=None):
                     scans.append((kind, consumers, set(abi_libraries)))
+                    scopes.append(libraries)
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
                 def execute(arguments, **kwargs):
                     args = [str(arg) for arg in arguments]
@@ -182,13 +183,15 @@ class Pipeline(unittest.TestCase):
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else ''):
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else '', PUBLISH='true'):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
                 expected_scans = [(format, False, set()) for format in formats]
                 if rebuilt == 'breaking':
                     expected_scans += [(format, format == formats[-1], expected) for format in formats]
                 self.assertCountEqual(scans, expected_scans)
+                if manual == 'consumer':
+                    self.assertEqual(scopes, [[] for _ in formats])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
                 self.assertEqual(any('seal' in call for call in calls), not manual)

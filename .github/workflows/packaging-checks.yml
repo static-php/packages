@@ -46,6 +46,8 @@ jobs:
                         git config --global --add safe.directory /build
                         composer install --no-interaction --prefer-dist --no-progress
                         php tests/builder-tool-cache.php
+                        php tests/build-payload.php
+                        python3 tests/glibc-pipeline.py
                         php tests/package-iterations.php
                         for format in ${FORMATS//,/ }; do php tests/package-versions.php --type="$format"; done
                         python3 tests/payload-profile.py

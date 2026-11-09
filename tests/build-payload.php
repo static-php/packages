@@ -78,6 +78,12 @@ try {
     check(!str_contains(command(['readelf', '--sections', $prepared['runtime']]), '.debug_info'), 'Prepared runtime retains DWARF');
     check(str_contains(command(['readelf', '--string-dump=.gnu_debuglink', $prepared['runtime']]), 'php-zts.debug'), 'Prepared debuglink does not match installed debugger name');
     check(str_contains(command(['readelf', '--sections', $prepared['debug']]), '.debug_info'), 'Detached debug information is missing');
+    define('BUILD_ROOT_PATH', $root);
+    define('BUILD_BIN_PATH', $root . '/bin');
+    function getBinarySuffix(): string { return '-zts'; }
+    $debugConfig = (new \staticphp\package\cli())->getDebuginfoFpmConfig();
+    check(!is_file($root . '/debug/php.debug'), 'Fixture must exercise sealed debug files without legacy paths');
+    check(($debugConfig['files'][$prepared['debug']] ?? null) === '/usr/lib/debug/usr/bin/php-zts.debug', 'Sealed CLI debuginfo was omitted from packaging');
     $sealedHash = hash_file('sha256', $prepared['runtime']);
     $before = filemtime($prepared['runtime']);
     BuildPayload::seal($root);

@@ -3,6 +3,7 @@
 namespace staticphp\package;
 
 use staticphp\package;
+use staticphp\util\BuildPayload;
 use staticphp\step\CreatePackages;
 use staticphp\util\RuntimeServices;
 
@@ -113,7 +114,7 @@ class fpm implements package
     public function getDebuginfoFpmConfig(): array
     {
         $binarySuffix = getBinarySuffix();
-        $src = BUILD_ROOT_PATH . '/debug/php-fpm.debug';
+        $src = BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/php-fpm')['debug'] ?? BUILD_ROOT_PATH . '/debug/php-fpm.debug';
         if (!file_exists($src)) {
             return [];
         }

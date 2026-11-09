@@ -3,6 +3,7 @@
 namespace staticphp\package;
 
 use staticphp\package;
+use staticphp\util\BuildPayload;
 use staticphp\CraftConfig;
 use staticphp\step\CreatePackages;
 use staticphp\util\TwigRenderer;
@@ -231,7 +232,7 @@ BASH;
     public function getDebuginfoFpmConfig(): array
     {
         $binarySuffix = getBinarySuffix();
-        $src = BUILD_ROOT_PATH . '/debug/php.debug';
+        $src = BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/php')['debug'] ?? BUILD_ROOT_PATH . '/debug/php.debug';
         if (!file_exists($src)) {
             return [];
         }

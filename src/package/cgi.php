@@ -3,6 +3,7 @@
 namespace staticphp\package;
 
 use staticphp\package;
+use staticphp\util\BuildPayload;
 use staticphp\step\CreatePackages;
 
 class cgi implements package
@@ -37,7 +38,7 @@ class cgi implements package
     public function getDebuginfoFpmConfig(): array
     {
         $binarySuffix = getBinarySuffix();
-        $src = BUILD_ROOT_PATH . '/debug/php-cgi.debug';
+        $src = BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/php-cgi')['debug'] ?? BUILD_ROOT_PATH . '/debug/php-cgi.debug';
         if (!file_exists($src)) {
             return [];
         }
