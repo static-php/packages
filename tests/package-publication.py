@@ -19,6 +19,12 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_upload_failure_report_omits_traceback_and_names_archive(self):
+        reason = 'Upload failed for https://mirror.test 85/php-zts-cgi_8.5.12-6_arm64.deb: HTTP 500 after 3 attempts'
+        lines = ['Traceback (most recent call last):', '  File "helper.py", line 56',
+                 '    raise RuntimeError()', 'RuntimeError: ' + reason]
+        self.assertEqual(publication.failure_reason(lines), reason)
+
     def test_publication_and_builds_queue_without_replacing_waiting_runs(self):
         for name in ('publish-package-cohort.yml', 'build-rpm-modular-packages.yml', 'build-apk-forgejo.yml'):
             workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())

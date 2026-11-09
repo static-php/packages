@@ -106,7 +106,10 @@ def publish(action, host, password, kind, groups, helper, bootstrap):
         print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         if helper['archive_sha256'](path) != digests[path]:
             raise RuntimeError('A cohort archive changed after publication preflight: ' + path.name)
-        helper['upload_verified_archive'](host, owner, password, kind, path)
+        try:
+            helper['upload_verified_archive'](host, owner, password, kind, path)
+        except Exception as error:
+            raise RuntimeError(f'Upload failed for {host} {owner}/{path.name}: {error}') from error
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
     with ThreadPoolExecutor(max_workers=4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
