@@ -11,6 +11,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,7 +168,10 @@ class PayloadCache(unittest.TestCase):
         target = self.root / 'restored'
         args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=target, compatibility=self.compiler,
                                   key=state['key'], seed_key=state['seed-key'], archive=archive, compile_packages='')
-        cache.restore(args)
+        runtime = cache.runtime_helper()
+        with patch.object(cache, 'runtime_helper', return_value=runtime), \
+                patch.object(runtime, 'scan_payload', side_effect=AssertionError('unchanged compiler runtime scan')):
+            cache.restore(args)
         self.assertEqual((target / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
         self.assertEqual((target / 'payload/runtime/bin/php').read_bytes(), (old / 'payload/runtime/bin/php').read_bytes())
         self.assertEqual(hashlib.sha256((target / 'lib/libfixture.so.1').read_bytes()).hexdigest(), new_library)

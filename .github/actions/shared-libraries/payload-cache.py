@@ -354,8 +354,16 @@ def restore_payload(args):
         coverage = profile_helper().cache_export_coverage(manifest['build_payload'],
                     {'state': 'verified', 'coverage': manifest['coverage']}, args.root, args.stream)
         write(staged / 'build-payload.json', manifest['build_payload'])
-        scan = runtime_helper().scan_payload(staged, state['compiler_runtime'])
         previous_runtime = manifest.get('compiler_consumers', {})
+        scanned = {item['file'] for value in previous_runtime.values() for item in value.get('files', [])}
+        expected = {name for name in manifest['build_payload']['files']
+                    if php_file(name) and name in manifest['files'] and not (staged / name).is_symlink()}
+        if (manifest.get('compiler_runtime') == state['compiler_runtime'] and scanned == expected
+                and previous_runtime and not any(value.get('embedded_cxx_runtime') for value in previous_runtime.values())):
+            scan = {'consumers': previous_runtime}
+            print('Reused compiler runtime analysis for verified, unchanged PHP cache bytes', flush=True)
+        else:
+            scan = runtime_helper().scan_payload(staged, state['compiler_runtime'])
         runtime_rebuilds = set(scan.get('must_rebuild', [])) | set(scan.get('uncertain_stripped_consumers', []))
         runtime_rebuilds |= {name for name, value in scan['consumers'].items()
                             if (value.get('uses_cxx_runtime') or value.get('uses_cxx_headers'))
