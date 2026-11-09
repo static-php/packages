@@ -172,7 +172,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     for name in ('frankenphp', 'frankenphp-debuginfo')]
         self.assertEqual(harness['validate_partial_candidates']('apk', [], packages),
                          ['frankenphp', 'frankenphp-debuginfo'])
-        with self.assertRaisesRegex(RuntimeError, 'managed runtime'):
+        with self.assertRaisesRegex(RuntimeError, 'not a managed package: unrelated'):
             harness['validate_partial_candidates']('apk', [], [{'name': 'unrelated', 'version': '1-r0'}])
 
     def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
