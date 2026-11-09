@@ -55,6 +55,7 @@ jobs:
         permissions:
             actions: read
             contents: read
+            packages: read
         outputs:
             downloads-run-id: ${{ steps.source.outputs.run-id }}
             matrix: ${{ steps.matrix.outputs.matrix }}
@@ -87,7 +88,12 @@ jobs:
                         exit 1
                     fi
                     echo "run-id=$source_run" >> "$GITHUB_OUTPUT"
-            -   name: Set target matrix
+            -   name: Log in to builder registry
+                env:
+                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    ACTOR: ${{ github.actor }}
+                run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+            -   name: Set target matrix and pin shared images
                 id: matrix
                 env:
                     ARCHITECTURES: ${{ inputs.architectures }}
@@ -95,80 +101,11 @@ jobs:
                 run: |
                     python3 .github/actions/shared-libraries/workflow.py setup --type=apk \
                         --architectures "$ARCHITECTURES" \
-                        --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
-
-    resolve-builders:
-        name: Resolve builder (${{ matrix.target }})
-        needs: setup-matrix
-        runs-on: ubuntu-24.04
-        permissions:
-            contents: read
-            packages: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Pin target builder image
-                env:
-                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    ACTOR: ${{ github.actor }}
-                    ARCH: ${{ matrix.arch }}
-                    ALMA: ${{ matrix.alma }}
-                run: |
-                    set -euo pipefail
-                    echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-                    python3 .github/actions/shared-libraries/workflow.py setup --type=apk \
-                        --architectures "$ARCH" --alma-versions "$ALMA" --resolve-images > "$RUNNER_TEMP/builder-output"
-                    sed -n 's/^matrix=//p' "$RUNNER_TEMP/builder-output" | jq '.include[0]' > target.json
-            -   name: Stage pinned builder
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-builders-apk-${{ matrix.target }}
-                    path: target.json
-                    retention-days: 1
-
-    compute-libs-matrix:
-        needs: [setup-matrix, resolve-builders]
-        if: ${{ !cancelled() }}
-        runs-on: ubuntu-24.04
-        permissions:
-            contents: read
-            actions: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download pinned builders
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                continue-on-error: true
-                with:
-                    pattern: shared-builders-apk-*
-                    path: builders
-            -   name: Filter successful builder targets
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                run: |
-                    set -euo pipefail
-                    succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success" and (.name | test("^Resolve builder \\("))) | .name' \
-                        | sed -E 's/^Resolve builder \(([^)]+)\)$/\1/' | sort -u)
-                    python3 .github/actions/shared-libraries/workflow.py targets --directory builders \
-                        --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
+                        --php-versions "$PHP_VERSIONS" --resolve-images >> "$GITHUB_OUTPUT"
 
     build-libs:
         name: Build libs shared (${{ matrix.target }})
-        needs: [setup-matrix, compute-libs-matrix]
-        if: ${{ !cancelled() && needs.compute-libs-matrix.outputs.any == 'true' }}
+        needs: setup-matrix
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         permissions:
             contents: write
@@ -179,7 +116,7 @@ jobs:
                 shell: bash
         strategy:
             fail-fast: false
-            matrix: ${{ fromJson(needs.compute-libs-matrix.outputs.matrix) }}
+            matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
         env:
             SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
             TYPE: apk

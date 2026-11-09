@@ -93,10 +93,12 @@ The Alpine workflow still uses `tar --zstd` — that is **fine**; those steps ru
 
 ## Matrix isolation pattern
 
+Setup resolves the shared multi-architecture builder/packager image tags once before emitting the architecture matrix; image resolution has no per-architecture jobs or artifact transfer.
+
 Per-target failures must not cascade. Pattern used in `build-rpm-modular-packages.yml`:
 
-1. **Fan-out job** uses `strategy.fail-fast: false` and an explicit, parseable `name:` such as `Resolve builder (alma8-{arch})`, `Build libs shared (alma8-{arch})` or `Build payload (alma8-{arch} php{stream})`. The name format is the contract — downstream filters parse it.
-2. **Filter job** runs with `if: ${{ !cancelled() }}` and `permissions: actions: read`. It calls `gh api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs --paginate --jq …`, selects successful terminal job names (including reusable-workflow prefixes), and sed-extracts target/stream identities. `.github/actions/shared-libraries/workflow.py` combines these with downloaded target plans to emit `{include: [...]}` matrices and `any` booleans. Its `targets`, `matrix` and `packages` commands cover builder, SDK and common-payload stages; one successful payload fans out only to the requested formats.
+1. **Fan-out job** uses `strategy.fail-fast: false` and an explicit, parseable `name:` such as `Build libs shared (alma8-{arch})` or `Build payload (alma8-{arch} php{stream})`. The name format is the contract — downstream filters parse it.
+2. **Filter job** runs with `if: ${{ !cancelled() }}` and `permissions: actions: read`. It calls `gh api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs --paginate --jq …`, selects successful terminal job names (including reusable-workflow prefixes), and sed-extracts target/stream identities. `.github/actions/shared-libraries/workflow.py` combines these with downloaded target plans to emit `{include: [...]}` matrices and `any` booleans. Its `matrix` and `packages` commands cover SDK and common-payload stages; one successful payload fans out only to the requested formats.
 3. **Downstream job** does `needs: [filter-job]`, gates with `if: ${{ !cancelled() && needs.filter-job.outputs.any == 'true' }}`, and uses `matrix: ${{ fromJson(needs.filter-job.outputs.matrix) }}`.
 
 Why `!cancelled()` not `success()`: upstream matrix entries are allowed to fail; without `!cancelled()` the filter job wouldn't run at all.

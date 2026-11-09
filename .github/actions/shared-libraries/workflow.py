@@ -231,9 +231,6 @@ def main():
     packages.add_argument("--succeeded", required=True)
     packages.add_argument("--sdk-succeeded")
     packages.add_argument("--php-versions", default="")
-    targets = sub.add_parser("targets")
-    targets.add_argument("--directory", type=Path, required=True)
-    targets.add_argument("--succeeded", required=True)
     merge = sub.add_parser("assemble")
     merge.add_argument("--source", type=Path, required=True)
     merge.add_argument("--destination", type=Path, required=True)
@@ -366,12 +363,6 @@ def main():
         runtime_checks(includes)
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
-    elif args.command == "targets":
-        succeeded = set(args.succeeded.splitlines())
-        values = [json.loads(path.read_text()) for path in sorted(args.directory.glob("*/target.json"))]
-        values = [value for value in values if value["target"] in succeeded]
-        emit("matrix", {"include": values})
-        emit("any", str(bool(values)).lower())
     elif args.command == "assemble":
         assemble(args.source, args.destination, args.type)
     elif args.command == "receipt":

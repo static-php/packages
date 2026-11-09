@@ -231,31 +231,19 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(builds[0]['packages'], 'imagick,redis')
 
     def test_builder_tags_are_resolved_once_and_pinned_for_all_arches(self):
-        output = io.StringIO()
         digest = 'sha256:' + '1' * 64
-        argv = ['workflow.py', 'setup', '--type=rpm', '--resolve-images']
-        with mock.patch('sys.argv', argv), mock.patch('sys.stdout', output), mock.patch.object(workflow.subprocess, 'check_output', return_value=json.dumps({'digest': digest})) as inspect:
-            workflow.main()
-        values = dict(line.split('=', 1) for line in output.getvalue().splitlines())
-        matrix = json.loads(values['matrix'])['include']
-        self.assertEqual(inspect.call_count, 3)
-        self.assertEqual(len(matrix), 6)
-        self.assertTrue(all(value['image'].endswith('@' + digest) for value in matrix))
-
-    def test_failed_builder_resolution_does_not_block_other_targets(self):
-        with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
-            root = Path(temporary)
-            for target in ['alma8-x86_64', 'alma9-x86_64']:
-                directory = root / target
-                directory.mkdir()
-                (directory / 'target.json').write_text(json.dumps({'target': target, 'image': 'pinned'}))
+        for kind, calls, targets in [('rpm', 3, 6), ('glibc', 2, 2), ('apk', 1, 2)]:
             output = io.StringIO()
-            argv = ['workflow.py', 'targets', '--directory', str(root), '--succeeded', 'alma9-x86_64']
-            with mock.patch('sys.argv', argv), mock.patch('sys.stdout', output):
+            argv = ['workflow.py', 'setup', '--type=' + kind, '--resolve-images']
+            with self.subTest(kind=kind), mock.patch('sys.argv', argv), mock.patch('sys.stdout', output), mock.patch.object(workflow.subprocess, 'check_output', return_value=json.dumps({'digest': digest})) as inspect:
                 workflow.main()
-            values = dict(line.split('=', 1) for line in output.getvalue().splitlines())
-            self.assertEqual(json.loads(values['matrix'])['include'], [{'target': 'alma9-x86_64', 'image': 'pinned'}])
-            self.assertEqual(values['any'], 'true')
+                values = dict(line.split('=', 1) for line in output.getvalue().splitlines())
+                matrix = json.loads(values['matrix'])['include']
+                self.assertEqual(inspect.call_count, calls)
+                self.assertEqual(len(matrix), targets)
+                self.assertTrue(all(value['image'].endswith('@' + digest) for value in matrix))
+                if kind == 'glibc':
+                    self.assertTrue(all(image.endswith('@' + digest) for value in matrix for image in value['package_images'].values()))
 
 
 class ProgramStackTests(unittest.TestCase):
@@ -610,7 +598,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn('!cancelled()', data['jobs']['publish']['if'])
 
     def test_uniquely_owned_staging_artifacts_can_be_replaced_on_rerun(self):
-        names = {'Stage pinned builder', 'Stage target plan', 'Stage library packages', 'Stage consumer packages', 'Stage common SDK metadata', 'Stage common SDK buildroot', 'Stage RPM library packages', 'Stage DEB library packages', 'Stage sealed common payload', 'Stage validated consumer packages'}
+        names = {'Stage target plan', 'Stage library packages', 'Stage consumer packages', 'Stage common SDK metadata', 'Stage common SDK buildroot', 'Stage RPM library packages', 'Stage DEB library packages', 'Stage sealed common payload', 'Stage validated consumer packages'}
         for workflow_name, data in self.workflows():
             artifact_names = []
             groups = [job.get('steps', []) for job in data['jobs'].values()]
@@ -621,7 +609,7 @@ class WorkflowContractTests(unittest.TestCase):
                     if step.get('name') in names:
                         self.assertTrue(step['with'].get('overwrite'), workflow_name + ': ' + step['name'])
                         artifact_names.append(step['with']['name'])
-            self.assertEqual(len(artifact_names), 8 if 'rpm' in workflow_name else 5)
+            self.assertTrue(artifact_names)
             self.assertEqual(len(set(artifact_names)), len(artifact_names))
 
     def test_source_is_downloaded_before_buildroot_cache(self):

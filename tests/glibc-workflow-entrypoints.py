@@ -75,7 +75,6 @@ class SharedGlibcEntrypoints(unittest.TestCase):
     def test_job_filters_accept_reusable_workflow_names_and_exclude_failures(self):
         data, _ = workflow('build-rpm-modular-packages.yml')
         cases = {
-            'compute-libs-matrix': ('Resolve builder', False),
             'compute-build-matrix': ('Build libs shared', False),
             'compute-package-matrix': ('Build payload', True),
         }
