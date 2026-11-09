@@ -1048,6 +1048,14 @@ def artifact_paths(directory, kind):
     return sorted(Path(directory).resolve().glob('*.' + kind))
 
 
+def write_inventory(path, inventory):
+    # The native container creates this file as root. Replace it through the
+    # runner-owned directory instead of trying to truncate a root-owned file.
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(json.dumps(inventory))
+    temporary.replace(path)
+
+
 class PreparedInputError(RuntimeError):
     pass
 
@@ -1202,7 +1210,7 @@ class PreparedMirror:
                 native_version = native_version.split(':', 1)[-1]
             if frozen is None or native_version != frozen['version']:
                 native_inventory['baseline_index_failure'] = 'Frozen archive header differs from recorded published version: ' + package['name']
-        (scratch / 'inventory.json').write_text(json.dumps(native_inventory))
+        write_inventory(scratch / 'inventory.json', native_inventory)
         (repository / 'keys').symlink_to('../keys', target_is_directory=True)
         run(['docker', 'exec', '-d', '-w', '/spp/repository', helper, 'python3', '-m', 'http.server', '8080'])
         self.inventory = native_inventory

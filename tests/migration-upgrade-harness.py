@@ -29,6 +29,16 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_runner_can_update_read_only_container_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'inventory.json'
+            path.write_text('{}')
+            path.chmod(0o444)
+            inventory = {'old': [], 'baseline_index_failure': 'broken published archive'}
+            harness['write_inventory'](path, inventory)
+            self.assertEqual(json.loads(path.read_text()), inventory)
+            self.assertFalse(path.with_name('inventory.json.tmp').exists())
+
     def test_failure_output_preserves_receipt_without_dumping_it(self):
         error = ('Command failed: docker exec test python3 migration.py\n'
                  'Traceback (most recent call last):\n  File "migration.py", line 712\n'
