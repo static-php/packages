@@ -46,7 +46,7 @@ def failure_reason(error):
     if lines and lines[0].startswith('Command failed:'):
         command = lines.pop(0).removeprefix('Command failed:').strip().split()
         if not any(line.strip() for line in lines):
-            lines = ['Command failed: ' + ' '.join(command[:3])]
+            lines = ['Command failed: ' + ' '.join(command[:5] if command[:3] == ['apk', 'version', '-t'] else command[:3])]
         else:
             errors = [i for i, line in enumerate(lines) if re.match(r'^(?:ERROR:|Error:|E:)', line)]
             lines = lines[errors[0]:] if errors else lines[-6:]
@@ -472,6 +472,16 @@ def index_generation(kind, name, stream, arch):
     return packages
 
 
+def index_baseline(kind, stream, arch, partial):
+    try:
+        return index_generation(kind, 'old', stream, arch), None
+    except RuntimeError as error:
+        if partial:
+            raise
+        # A malformed published archive must not prevent validating its replacement.
+        return inspect_directory(kind, Path('/spp/repository/generations/old')), str(error)
+
+
 def copy_historical(old, new):
     for source in old.rglob('*'):
         if source.is_file():
@@ -714,7 +724,7 @@ def inside(args):
                 validate_library_only_candidates(incoming)
             incoming_changes = validate_partial_candidates(kind, frozen, incoming)
         make_keys(kind)
-        old = index_generation(kind, 'old', args.php, args.arch)
+        old, baseline_index_failure = index_baseline(kind, args.php, args.arch, partial)
         if partial:
             incoming_names = {p['name'] for p in incoming}
             for package in old:
@@ -743,6 +753,7 @@ def inside(args):
         published_names = json.loads(Path('/spp/published-names.json').read_text())
         Path('/spp/inventory.json').write_text(json.dumps({'old': old, 'new': new, 'incoming': incoming,
                                                         'incoming_changes': incoming_changes, 'library': library,
+                                                        'baseline_index_failure': baseline_index_failure,
                                                         'published_names': published_names}))
         return
     if args.inside == 'replacement':
@@ -878,8 +889,8 @@ def inside(args):
     for name in comparison_names:
         if name not in candidate:
             raise RuntimeError('Published installed package lacks a candidate: ' + name)
-        if not newer(kind, before['installed'][name], candidate[name]['version']):
-            raise RuntimeError('Candidate is not strictly newer: ' + name)
+    # The ordinary solver transaction below proves version ordering. In particular,
+    # APK 3 can upgrade installed legacy tags which `apk version -t` rejects.
     ordinary_upgrade(kind)
     after = installed(kind)
     if partial:
@@ -1283,6 +1294,8 @@ class PreparedMirror:
                 return result
             try:
                 phase = 'published baseline installation/load'
+                if self.inventory.get('baseline_index_failure'):
+                    raise RuntimeError(self.inventory['baseline_index_failure'])
                 resources.exec(client, common + ['--inside', 'old'])
             except RuntimeError as error:
                 if args.library_only or args.partial_consumers:

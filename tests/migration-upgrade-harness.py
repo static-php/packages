@@ -62,6 +62,26 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual(saved['cells'][0]['baseline_failure'], baseline)
             self.assertEqual(len(saved['cells'][0]['inventory']), 2000)
 
+    def test_broken_old_index_does_not_block_complete_replacement_validation(self):
+        old = [{'name': 'php-zts-cli', 'version': '8.3.36-r3'}]
+        def broken_index(*args):
+            raise RuntimeError('old CLI: v2 package format error')
+        with patch.dict(scope, {'index_generation': broken_index, 'inspect_directory': lambda *args: old}):
+            packages, failure = harness['index_baseline']('apk', '8.3', 'arm64', False)
+            self.assertEqual(packages, old)
+            self.assertIn('v2 package format error', failure)
+            with self.assertRaisesRegex(RuntimeError, 'v2 package format error'):
+                harness['index_baseline']('apk', '8.3', 'arm64', True)
+
+    def test_legacy_apk_upgrade_requires_the_actual_candidate_transaction(self):
+        before = {'php-zts-imagick': '3.8.1p85-r1'}
+        candidate = {'php-zts-imagick': {'version': '3.8.1.0_p85-r5'}}
+        harness['assert_upgrade'](before, {'php-zts-imagick': '3.8.1.0_p85-r5'}, candidate, list(before))
+        with self.assertRaisesRegex(RuntimeError, 'held back'):
+            harness['assert_upgrade'](before, before, candidate, list(before))
+        reason = harness['failure_reason']('Command failed: apk version -t 3.8.1p85-r1 3.8.1.0_p85-r5')
+        self.assertIn('3.8.1p85-r1 3.8.1.0_p85-r5', reason)
+
     def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
         error = ('Command failed: apk add php-zts\n' + 'Installing a package\n' * 2000
                  + 'ERROR: unable to select packages:\n  missing-runtime (no such package)\n')
