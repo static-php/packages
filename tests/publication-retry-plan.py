@@ -142,6 +142,26 @@ class PublicationRetryPlan(unittest.TestCase):
         with patch.dict(os.environ, BUMP='false', ITERATION=''):
             self.assertEqual(self.abi_rollout(changed_code=True)['publication_retries'], {})
 
+    def test_empty_runtime_asset_map_spellings_reuse_the_published_archive(self):
+        old, new = b'old archive', b'validated archive'
+        previous = library(1, old)
+        previous['runtime_assets'] = []
+        published = library(2, new)
+        published['runtime_assets'] = []
+        current = library()
+        current['runtime_assets'] = {}
+        first = self.snapshot('owner84', manifest(previous), {'archives/fixture-1.rpm': old})
+        second = self.snapshot('owner85', manifest(published), {'archives/fixture-2.rpm': new})
+        plan = self.prepare(first, second, libraries='fixture', current_value=current)
+        self.assertEqual(plan['publication_retries']['fixture']['published_version'], '0:1.0-2')
+
+    def test_changed_runtime_assets_cannot_reuse_a_published_archive(self):
+        current = library()
+        current['runtime_assets'] = {'modules/provider.so': '/usr/lib/php-zts/lib/modules/provider.so'}
+        first = self.snapshot('owner84', manifest(library(1, b'old')), {'archives/fixture-1.rpm': b'old'})
+        second = self.snapshot('owner85', manifest(library(2, b'new')), {'archives/fixture-2.rpm': b'new'})
+        self.assertEqual(self.prepare(first, second, libraries='fixture', current_value=current)['publication_retries'], {})
+
     def test_explicit_bump_still_repackages_an_abi_rollout_provider(self):
         with patch.dict(os.environ, BUMP='true', ITERATION=''):
             self.assertEqual(self.abi_rollout()['publication_retries'], {})

@@ -167,7 +167,9 @@ def source_changes(old, new):
             changes[identifier] = 'added'
         elif current is None:
             changes[identifier] = 'removed'
-        elif environment_changed or any(previous.get(key) != current.get(key) for key in ['version', 'source_hash', 'build_identity', 'elf', 'files', 'file_hashes', 'license', 'license_files', 'depends', 'runtime_assets', 'dlopen_dependencies']):
+        elif (environment_changed
+              or any(previous.get(key) != current.get(key) for key in ['version', 'source_hash', 'build_identity', 'elf', 'files', 'file_hashes', 'license', 'license_files', 'depends', 'dlopen_dependencies'])
+              or (previous.get('runtime_assets') or {}) != (current.get('runtime_assets') or {})):
             changes[identifier] = 'changed'
     return changes
 
