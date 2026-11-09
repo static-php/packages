@@ -14,15 +14,18 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER = runpy.run_path(str(ROOT / 'bin/apk-reuse-published'))
 
 
-def archive(path, revision=0, payload=b'working ELF', dependency='musl', script=b'exit 0', stamp=1, debug=False):
+def archive(path, revision=0, payload=b'working ELF', dependency='musl', script=b'exit 0', stamp=1, debug=False, cutoffs=None):
     name = 'php-zts-cli' + ('-debuginfo' if debug else '')
     metadata = f'pkgname = {name}\npkgver = 8.3.36-r{revision}\narch = x86_64\nbuilddate = {stamp}\ndatahash = ignored-{stamp}\n'
-    metadata += f'depend = {dependency}\n'
+    metadata += f'depend = {dependency}\nsize = {len(payload) + len(json.dumps(cutoffs))}\n'
     if debug:
         metadata += f'depend = php-zts-cli=8.3.36-r{revision}\n'
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w') as target:
-        for name, data in [('.PKGINFO', metadata.encode()), ('.post-install', script), ('usr/bin/php-zts', payload)]:
+        entries = [('.PKGINFO', metadata.encode()), ('.post-install', script), ('usr/bin/php-zts', payload)]
+        if cutoffs is not None:
+            entries.append(('usr/share/php-zts/migration/cutoffs.json', json.dumps(cutoffs).encode()))
+        for name, data in entries:
             entry = tarfile.TarInfo(name)
             entry.mode = 0o755
             entry.mtime = stamp
@@ -115,6 +118,16 @@ class ReusePublished(unittest.TestCase):
         data.update(architecture='x86_64', consumer_versions={'8.3': {'php-zts-cli': '8.3.36-r3'}})
         self.manifest.write_text(json.dumps(data))
         self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
+
+    def test_retry_inventory_does_not_bump_cli_but_changed_migration_constraints_do(self):
+        rules = {'schema': 1, 'formats': {'apk': {'php-zts-amqp': '2.2.0.0_p83-r1'}}}
+        archive(self.old, revision=3, cutoffs=dict(rules, candidate_archives={'old': 'hash'}, published_versions={'old': 'version'}))
+        archive(self.new, cutoffs=dict(rules, candidate_archives={}, published_versions={'new': 'different inventory'}))
+        self.baseline()
+        self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
+        rules['formats']['apk']['php-zts-amqp'] = '2.2.0.0_p83-r2'
+        archive(self.new, cutoffs=rules)
+        self.assertEqual(self.select(), {'revision': 4})
 
     def test_tampered_baseline_archive_is_rejected(self):
         archive(self.old, revision=3)

@@ -42,7 +42,14 @@ def contents(path):
             record = [member.type.decode(), member.mode, member.uid, member.gid, member.linkname,
                       {key: value for key, value in member.pax_headers.items() if key not in ('mtime', 'atime', 'ctime')}]
             if member.isfile():
-                record.append(stream_hash(archive.extractfile(member)))
+                content = archive.extractfile(member)
+                if name == 'usr/share/php-zts/migration/cutoffs.json':
+                    cutoffs = json.load(content)
+                    for key in ('candidate_archives', 'published_versions'):
+                        cutoffs.pop(key, None)
+                    record.append(hashlib.sha256(json.dumps(cutoffs, sort_keys=True).encode()).hexdigest())
+                else:
+                    record.append(stream_hash(content))
             if name in files and files[name] != record:
                 raise RuntimeError('Conflicting archive members: ' + name)
             files[name] = record
@@ -53,7 +60,7 @@ def contents(path):
     if not re.fullmatch(r'.+-r\d+', version):
         raise RuntimeError('Invalid APK revision: ' + version)
     base = re.sub(r'-debuginfo$', '', name)
-    for key in ('builddate', 'datahash'):
+    for key in ('builddate', 'datahash', 'size'):
         fields.pop(key, None)
     fields['pkgver'] = [version.rsplit('-r', 1)[0]]
     for key in ('depend', 'provides', 'replaces'):
