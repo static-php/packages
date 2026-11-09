@@ -261,25 +261,24 @@ def classify():
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
             for dependencies in read(selected_sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values():
                 reverse_roots.update(dependencies.values())
-        if not reverse_roots:
-            if variants_ready:
-                break
-            run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
-            run(variants('build', sdk))
-            run(['php', 'bin/build-payload', 'seal', '--root', sdk])
-            variants_ready = True
-            continue
-        variants_ready = not glibc
-        run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
-             '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(reverse_roots)),
-             '--output', STAGE / 'library-reverse-plan.json'])
-        if not read(STAGE / 'library-reverse-plan.json').get('selected'):
-            raise RuntimeError('ABI transition requires libraries absent from the incremental build plan')
-        run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'run', '--root', '.',
-             '--plan', STAGE / 'library-reverse-plan.json', '--type', formats[0]])
-        rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
-        shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
-        (STAGE / 'sdk-rebuilt').touch()
+        if reverse_roots:
+            run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
+                 '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(reverse_roots)),
+                 '--output', STAGE / 'library-reverse-plan.json'])
+            if read(STAGE / 'library-reverse-plan.json').get('selected'):
+                run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'run', '--root', '.',
+                     '--plan', STAGE / 'library-reverse-plan.json', '--type', formats[0]])
+                rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
+                shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
+                (STAGE / 'sdk-rebuilt').touch()
+                variants_ready = not glibc
+                continue
+        if variants_ready:
+            break
+        run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
+        run(variants('build', sdk))
+        run(['php', 'bin/build-payload', 'seal', '--root', sdk])
+        variants_ready = True
     else:
         raise RuntimeError('Library ABI planning did not converge')
     run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])

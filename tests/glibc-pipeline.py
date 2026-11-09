@@ -132,7 +132,9 @@ class Pipeline(unittest.TestCase):
                         subprocess.run(args, check=True)
                     elif 'prepare' in args:
                         glibc.write(option('--manifest-output'), value)
-                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}})
+                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}, 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
+                    elif 'expand' in args:
+                        glibc.write(option('--output'), {'selected': []})
                     elif 'stage-publication-retries' in args:
                         glibc.write(option('--output'), {'remaining_libraries': ['fixture']})
                     elif args[:2] == ['php', 'bin/spp']:

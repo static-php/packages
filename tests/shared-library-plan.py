@@ -147,6 +147,29 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertTrue(result['bootstrap'])
         self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
 
+    def test_newly_rebuilt_dependent_uses_retained_archive_for_abi(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source, output = directory / 'source', directory / 'output'
+            source.mkdir()
+            (source / 'fixture.deb').write_bytes(b'captured package')
+            value = manifest()
+            entry = value['libraries']['fixture']
+            entry.update(published_version='1.0-1', published_archive='fixture.deb',
+                         published_archive_sha256=hashlib.sha256(b'captured package').hexdigest(),
+                         abi_dump_hashes={'libfixture.so.1': hashlib.sha256(b'<abi-corpus/>').hexdigest()})
+            def extract(archive, kind, destination, libraries):
+                self.assertEqual(libraries, {'fixture'})
+                self.assertEqual(kind, 'deb')
+                path = destination / 'abi/libfixture.so.1.xml'
+                path.parent.mkdir()
+                path.write_bytes(b'<abi-corpus/>')
+            extracted = Mock(side_effect=extract)
+            with patch.dict(namespace, {'extract_metadata': extracted}):
+                planner['merge_baselines']([(value, source)], 'deb', output, {'fixture'})
+            extracted.assert_called_once()
+            self.assertEqual((output / 'abi/libfixture.so.1.xml').read_bytes(), b'<abi-corpus/>')
+
     def test_unpublished_library_subset_is_testable_but_never_publishable(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)

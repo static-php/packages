@@ -647,10 +647,19 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None):
         if selected.get('abi_epoch', 1) < max(library.get('abi_epoch', 1) for library, _ in available):
             raise RuntimeError('Published ABI generation moved backwards: ' + identifier)
         merged['libraries'][identifier] = copy.deepcopy(selected)
-        for relative in selected.get('abi_dump', {}).values() if abi_libraries is None or identifier in abi_libraries else ():
+        for soname, relative in selected.get('abi_dump', {}).items() if abi_libraries is None or identifier in abi_libraries else ():
+            original = rooted(source, relative)
+            if not original.is_file() and selected.get('published_archive'):
+                archive = rooted(source, selected['published_archive'])
+                if file_sha256(archive) != selected.get('published_archive_sha256'):
+                    raise RuntimeError('Captured ABI baseline archive checksum mismatch: ' + identifier)
+                extract_metadata(archive, kind, Path(source), {identifier})
+                for name, path in selected.get('abi_dump', {}).items():
+                    if file_sha256(rooted(source, path)) != selected.get('abi_dump_hashes', {}).get(name):
+                        raise RuntimeError('Captured ABI baseline checksum mismatch: ' + identifier)
             output = rooted(destination, relative)
             output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(rooted(source, relative), output)
+            shutil.copyfile(original, output)
         if selected.get('published_archive'):
             relative = selected['published_archive']
             output = rooted(destination, relative)
