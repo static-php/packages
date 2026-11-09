@@ -57,6 +57,8 @@ try {
     file_put_contents($root . '/include/php/Zend/zend_modules.h', "#define ZEND_MODULE_API_NO 20260922\n");
     $compiler = getenv('CC') ?: 'cc';
     command([$compiler, '-shared', '-fPIC', '-g', '-Wl,-soname,libanswer.so.1', '-Wl,--enable-new-dtags,-rpath,/usr/lib/php-zts/lib', $root . '/answer.c', '-o', $root . '/lib/libanswer.so.1']);
+    mkdir($root . '/modules');
+    copy($root . '/lib/libanswer.so.1', $root . '/modules/curl-zts-86.so');
     symlink('libanswer.so.1', $root . '/lib/libanswer.so');
     command([$compiler, '-g', $root . '/main.c', '-L' . $root . '/lib', '-lanswer', '-Wl,--enable-new-dtags,-rpath,/usr/lib/php-zts/lib', '-o', $root . '/bin/php']);
     $manifest = ['schema' => 1, 'linkage' => 'shared', 'libc' => 'glibc', 'architecture' => php_uname('m'), 'libraries' => [
@@ -80,10 +82,21 @@ try {
     check(str_contains(command(['readelf', '--sections', $prepared['debug']]), '.debug_info'), 'Detached debug information is missing');
     define('BUILD_ROOT_PATH', $root);
     define('BUILD_BIN_PATH', $root . '/bin');
+    define('BUILD_MODULES_PATH', $root . '/modules');
     function getBinarySuffix(): string { return '-zts'; }
+    function getSharedLibrarySuffix(): string { return '-zts-86'; }
+    function getModuledir(): string { return '/usr/lib/php-zts/modules'; }
     $debugConfig = (new \staticphp\package\cli())->getDebuginfoFpmConfig();
     check(!is_file($root . '/debug/php.debug'), 'Fixture must exercise sealed debug files without legacy paths');
     check(($debugConfig['files'][$prepared['debug']] ?? null) === '/usr/lib/debug/usr/bin/php-zts.debug', 'Sealed CLI debuginfo was omitted from packaging');
+    $extension = new class extends \staticphp\extension {
+        public function __construct() {}
+        public function isSharedExtension(): bool { return true; }
+    };
+    (new ReflectionProperty(\staticphp\extension::class, 'name'))->setValue($extension, 'curl');
+    $module = $payload->prepareFile($root . '/modules/curl-zts-86.so');
+    check(!is_file($root . '/debug/curl-zts-86.so.debug'), 'Fixture must omit legacy extension debug paths');
+    check(($extension->getDebuginfoFpmConfig()['files'][$module['debug']] ?? null) === '/usr/lib/debug/usr/lib/php-zts/modules/curl-zts-86.so.debug', 'Sealed extension debuginfo was omitted from packaging');
     $sealedHash = hash_file('sha256', $prepared['runtime']);
     $before = filemtime($prepared['runtime']);
     BuildPayload::seal($root);

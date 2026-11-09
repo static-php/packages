@@ -4,6 +4,7 @@ namespace staticphp;
 
 use Exception;
 use staticphp\step\CreatePackages;
+use staticphp\util\BuildPayload;
 use staticphp\util\ExtMeta;
 use staticphp\util\TwigRenderer;
 
@@ -240,7 +241,8 @@ SH;
             return [];
         }
         $sharedLibrarySuffix = getSharedLibrarySuffix();
-        $src = BUILD_ROOT_PATH . '/debug/' . $this->name . $sharedLibrarySuffix . '.so.debug';
+        $src = BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_MODULES_PATH . '/' . $this->name . $sharedLibrarySuffix . '.so')['debug']
+            ?? BUILD_ROOT_PATH . '/debug/' . $this->name . $sharedLibrarySuffix . '.so.debug';
         if (!file_exists($src)) {
             return [];
         }
