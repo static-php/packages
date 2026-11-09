@@ -403,7 +403,7 @@ class CreatePackages
                 $currentUpstream = $type === 'apk' ? self::toApkVersion($identity[0]) : $identity[0];
                 $publishedUpstream = $type === 'apk' ? self::toApkVersion($latest[1]) : $latest[1];
                 if (self::compareMigrationVersions($type, $currentUpstream, $publishedUpstream) < 0) {
-                    return $proposed;
+                    return $type === 'apk' ? self::validApkPackageVersion($proposed) : $proposed;
                 }
             }
         }
@@ -444,7 +444,7 @@ class CreatePackages
                 $retained = $floor;
             }
         }
-        return $retained ?? $proposed;
+        return $type === 'apk' ? self::validApkPackageVersion($retained ?? $proposed) : ($retained ?? $proposed);
     }
 
     private static function migrationPhase(string $phase, bool $apk = false): ?string
@@ -480,6 +480,9 @@ class CreatePackages
 
     private static function migrationVersionIdentity(string $type, string $version): ?array
     {
+        if ($type === 'apk') {
+            $version = self::legacyApkPackageVersion($version);
+        }
         $number = '([0-9]+(?:\.[0-9]+){1,2})';
         $phase = '((?:~{1,2}(?:alpha|beta|rc|dev)\d*)*)';
         if ($type !== 'apk') {
@@ -521,6 +524,9 @@ class CreatePackages
 
     private static function replaceMigrationPhpPhase(string $type, string $version, string $phpPhase): string
     {
+        if ($type === 'apk') {
+            $version = self::legacyApkPackageVersion($version);
+        }
         $number = '[0-9]+(?:\.[0-9]+){1,2}';
         if ($type !== 'apk') {
             $phase = '(?:~{1,2}(?:alpha|beta|rc|dev)\d*)*';
@@ -617,6 +623,9 @@ class CreatePackages
             }
             if ($name === self::getPrefix() . '-cli' || $name === 'php-zts-runtime-layout' || str_starts_with($name, 'php-zts-lib-')) {
                 throw new RuntimeException('Migration cutoffs may only constrain PHP runtime consumers');
+            }
+            if (self::$packageType === 'apk') {
+                $version = self::validApkPackageVersion($version);
             }
             $conflicts[] = match (self::$packageType) {
                 'deb' => $name . ' (<< ' . $version . ')',
@@ -968,7 +977,7 @@ class CreatePackages
     }
 
     /**
-     * APK requires a suffix after an upstream prerelease instead of the stable version's p tag.
+     * Use valid APK suffixes; the numeric bridge keeps stable versions above legacy pXX tags.
      */
     public static function getPhpVersionTag(string $packageType, string $packageVersion, bool $includePhpPrerelease = true): string
     {
@@ -983,7 +992,7 @@ class CreatePackages
         }
         return match ($packageType) {
             'deb' => '+php' . $phpVersionSuffix,
-            'apk' => (str_contains($packageVersion, '~') ? '_p' : 'p') . $phpVersionSuffix,
+            'apk' => (str_contains($packageVersion, '~') ? '_p' : '.0_p') . $phpVersionSuffix,
             default => '_' . $phpVersionSuffix,
         };
     }
@@ -1005,6 +1014,20 @@ class CreatePackages
             return '';
         }
         return self::migrationPhase($parts[1]) ?? '';
+    }
+
+    private static function legacyApkPackageVersion(string $version): string
+    {
+        return preg_replace_callback('/^([0-9]+(?:\.[0-9]+){1,2})\.0_p(\d{2,})(?:_p(\d+))?/',
+            static fn (array $m): string => $m[1] . 'p' . $m[2] . (isset($m[3]) ? '.' . $m[3] : ''), $version);
+    }
+
+    public static function validApkPackageVersion(string $version): string
+    {
+        // apk-tools 3 rejects p85 and p85.12 inside dependency constraints.
+        // A numeric zero sorts above the old letter tag without changing the upstream release.
+        return preg_replace_callback('/^([0-9]+(?:\.[0-9]+){1,2})p(\d{2,})(?:\.(\d+))?/',
+            static fn (array $m): string => $m[1] . '.0_p' . $m[2] . (isset($m[3]) ? '_p' . $m[3] : ''), $version);
     }
 
     public static function toApkVersion(string $version): string

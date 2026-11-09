@@ -61,6 +61,10 @@ $less = static function (string $type, string $older, string $newer) use ($compa
 };
 
 $equal = static function (string $type, string $left, string $right) use ($compare, $command, &$checks): void {
+    if ($type === 'apk') {
+        $left = CreatePackages::validApkPackageVersion($left);
+        $right = CreatePackages::validApkPackageVersion($right);
+    }
     if ($left !== $right || $compare->invoke($command, $type, $left, $right) !== 0) {
         throw new RuntimeException("Expected equal {$type} versions: {$left} = {$right}");
     }
@@ -87,13 +91,13 @@ foreach ($types as $type) {
         }
         $previousCore = $core;
     }
-    $stableTag = match ($type) {'deb' => '+php82', 'apk' => 'p82', default => '_82'};
+    $stableTag = match ($type) {'deb' => '+php82', 'apk' => '.0_p82', default => '_82'};
     foreach (['1.13.1', '0.13.0'] as $upstream) {
         $stable = $version($type, $upstream, '8.2.35');
         if ($stable !== $upstream . $stableTag) {
             throw new RuntimeException("Unexpected stable {$type} version: {$stable}");
         }
-        $published = $stable . '.35' . ($type === 'apk' ? '_p0' : '+ext');
+        $published = $stable . ($type === 'apk' ? '_p35_p0' : '.35+ext');
         $less($type, $stable . $revision, $published . $revision);
         $nextUpstream = $upstream === '1.13.1' ? '1.13.2' : '0.13.1';
         $less($type, $published . $revision, $version($type, $nextUpstream, '8.2.35') . $revision);
@@ -137,7 +141,11 @@ foreach ($types as $type) {
     foreach (['8.2.30', '8.3.30', '8.4.20', '8.5.10'] as $php) {
         $suffix = str_replace('.', '', substr($php, 0, 3));
         $legacy = match ($type) {'deb' => "5.1.28+php{$suffix}", 'apk' => "5.1.28p{$suffix}", default => "5.1.28_{$suffix}"};
-        $equal($type, $legacy, $version($type, '5.1.28', $php));
+        if ($type === 'apk') {
+            $less($type, $legacy, $version($type, '5.1.28', $php));
+        } else {
+            $equal($type, $legacy, $version($type, '5.1.28', $php));
+        }
         $less($type, $version($type, '3.6.0dev', $php), $version($type, '3.6.0alpha1', $php));
         foreach ($legacyXdebug[$type] as $older) {
             $oldSuffix = $type === 'deb' ? 'php86' : ($type === 'apk' ? 'p86' : '_86');
@@ -199,7 +207,7 @@ foreach ($types as $type) {
         putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$baseline], JSON_THROW_ON_ERROR));
         foreach (['frankenphp', 'pie-zts', 'php-zts-swoole'] as $name) {
             foreach (['', $type === 'apk' ? '_p0' : '+ext'] as $boundary) {
-                $publishedVersion = '1.13.5' . $stableTag . '.35' . $boundary;
+                $publishedVersion = '1.13.5' . $stableTag . ($type === 'apk' ? '_p35' : '.35') . $boundary;
                 $published = $publishedVersion . match ($type) {'rpm' => '-1.el10', 'apk' => '-r1', default => '-1'};
                 file_put_contents($baseline, json_encode(['type' => $type, 'packages' => [
                     ['name' => $name, 'version' => $published, 'architecture' => 'x86_64'],

@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 ARCHITECTURE = runpy.run_path(str(HERE / 'container-architecture.py'))
 RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'alma9': ('rpm', 'almalinux:9'),
             'alma10': ('rpm', 'almalinux:10'), 'debian': ('deb', 'debian:11'),
-            'alpine': ('apk', 'alpine:3.21')}
+            'alpine': ('apk', 'alpine:3.24')}
 WARNING = re.compile(r'PHP Startup:|Unable to (?:load dynamic library|initialize module)|symbol lookup error|already loaded', re.I)
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_.-]*$')
 RPM_MIRROR = Path('/spp/repository/generations')
@@ -765,8 +765,12 @@ def inside(args):
         development = runtime['development_checks'](kind, managed_names)
         before_upgrade = installed(kind)
         ordinary_upgrade(kind)
-        if installed(kind) != before_upgrade:
-            raise RuntimeError('Replacement unchanged upgrade was not a no-op')
+        after_upgrade = installed(kind)
+        changes = {name: [before_upgrade.get(name), after_upgrade.get(name)]
+                   for name in before_upgrade.keys() | after_upgrade.keys()
+                   if managed(name) and before_upgrade.get(name) != after_upgrade.get(name)}
+        if changes:
+            raise RuntimeError('Replacement upgrade changed managed packages: ' + json.dumps(changes, sort_keys=True))
         print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True,
               'coverage': 'fresh_replacement_after_broken_baseline',
               'installed_versions': {name: after[name] for name in managed_names},
