@@ -244,6 +244,33 @@ class SharedLibraryPlan(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'different library metadata scopes'):
                 planner['merge_baselines']([(previous, temporary), (manifest(), temporary)], 'deb', temporary, set())
 
+    def test_php_only_scope_uses_cached_abi_and_detects_unpublished_runtime(self):
+        for migrated in [True, False]:
+            with self.subTest(migrated=migrated), TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                baseline = directory / 'baseline'
+                baseline.mkdir()
+                previous = dict(manifest({}), metadata_scope=[], unmigrated_php_streams=[] if migrated else ['8.5'])
+                (baseline / 'shared-libraries.json').write_text(json.dumps(previous))
+                current = manifest({'fixture': dict(library(epoch=3), package_versions={'deb': '1.0-7'})})
+                (directory / 'current.json').write_text(json.dumps(current))
+                args = argparse.Namespace(manifest=str(directory / 'current.json'), baseline=str(baseline),
+                                          root=str(directory), request=None, bootstrap=False, build_only=True,
+                                          mode='incremental', libraries='', rebuilt_libraries='',
+                                          php_versions='8.5', packages='fpm', type='deb',
+                                          manifest_output=str(directory / 'annotated.json'), output=str(directory / 'plan.json'))
+                with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
+                    planner['prepare'](args)
+                plan = json.loads(Path(args.output).read_text())
+                self.assertEqual(plan['build_only'], not migrated)
+                self.assertEqual(plan['libraries'], [])
+                self.assertEqual(plan['php_requests']['8.5']['packages'], ['fpm'])
+                self.assertFalse(any(item['full'] for item in plan['php_requests'].values()))
+                self.assertEqual(json.loads(Path(args.manifest_output).read_text())['libraries'], current['libraries'])
+                args.rebuilt_libraries = 'fixture'
+                with self.assertRaisesRegex(RuntimeError, 'Scoped baselines require'):
+                    planner['prepare'](args)
+
     def test_missing_debug_baseline_blocks_release(self):
         old = manifest()
         old['libraries']['fixture'].pop('abi_dump')

@@ -466,7 +466,7 @@ def abi_baseline(library):
 
 
 def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=None):
-    if not old['libraries'] and not bootstrap:
+    if not old['libraries'] and old.get('metadata_scope') != [] and not bootstrap:
         raise RuntimeError('No published ABI baseline; initial migration requires --bootstrap')
     for key in ['architecture', 'libc', 'runtime_libdir']:
         if old['libraries'] and old.get(key) and new.get(key) != old[key]:
@@ -547,7 +547,7 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
     if rebuilt_libraries is not None:
         progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed'.format(reused, len(annotated['libraries']) - reused))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
-                       'bootstrap': not bool(old['libraries']), 'libraries': changes}
+                       'bootstrap': not bool(old['libraries']) and old.get('metadata_scope') != [], 'libraries': changes}
 
 
 def reverse_closure(value, initial):
@@ -622,6 +622,7 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None):
         raise RuntimeError('Cannot merge baselines with different library metadata scopes')
     if scopes and None not in scopes:
         merged['metadata_scope'] = list(next(iter(scopes)))
+    merged['unmigrated_php_streams'] = sorted(set().union(*(set(value.get('unmigrated_php_streams', [])) for value, _ in baselines)))
     divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
     drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
     for value, _ in baselines:
@@ -766,9 +767,11 @@ def prepare(args):
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
         old, divergent = merge_baselines(baselines, args.type, temporary,
                                          None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
-        if old.get('metadata_scope') is not None and (not specified or rebuilt or set(specified) - set(old['metadata_scope'])):
-            raise RuntimeError('Scoped baselines require an unchanged explicit library selection')
-        build_only = bool(getattr(args, 'build_only', False) and not old['libraries'])
+        consumer_scope = bool(args.packages and old.get('metadata_scope') == [] and not rebuilt)
+        if old.get('metadata_scope') is not None and not consumer_scope and (not specified or rebuilt or set(specified) - set(old['metadata_scope'])):
+            raise RuntimeError('Scoped baselines require an unchanged explicit library or PHP package selection')
+        build_only = bool(getattr(args, 'build_only', False) and
+                          ((not old['libraries'] and not consumer_scope) or args.packages and old.get('unmigrated_php_streams')))
         annotated, comparison = compare(old, current, temporary, args.root, bootstrap or build_only,
                                        None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
     for identifier, library in annotated['libraries'].items():
@@ -1475,6 +1478,25 @@ def missing_forgejo_owner(args, error):
     return False
 
 
+def unmigrated_consumers(args):
+    native = runpy.run_path(str(ROOT / 'freeze-migration-baseline.py'))
+    architecture = normalized_arch(args.arch, args.type)
+    missing = []
+    for stream in filter(None, args.php_versions.split(',')):
+        if stream not in STREAMS:
+            raise RuntimeError('Unknown PHP baseline stream: ' + stream)
+        if args.type == 'rpm':
+            inventory, _, _ = native['rpm_index'](args.base_url.rstrip('/') + '/', architecture, stream)
+        else:
+            suffix = 'debian/' if args.type == 'deb' else 'alpine/main/php-zts/'
+            base = args.host.rstrip('/') + '/api/packages/' + stream.replace('.', '') + '/' + suffix
+            inventory, _, _ = native['deb_index' if args.type == 'deb' else 'apk_index'](base, architecture)
+        latest = native['latest_packages'](args.type, [package for package in inventory if package['name'] == 'php-zts-cli'])
+        if not any(name.startswith('php-zts-shared-runtime-') for name in latest.get('php-zts-cli', {}).get('provides', [])):
+            missing.append(stream)
+    return missing
+
+
 def baseline(args):
     destination = Path(args.output)
     if destination.exists() and any(destination.iterdir()):
@@ -1523,6 +1545,8 @@ def baseline(args):
         merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
         merged['divergent_libraries'] = sorted(divergent)
         merged['baseline_origins'] = captured
+        if getattr(args, 'php_versions', None):
+            merged['unmigrated_php_streams'] = unmigrated_consumers(args)
         if not getattr(args, 'skip_consumers', False):
             stream = getattr(args, 'consumer_stream', '8.5')
             shared_consumer_inventory(merged, stream)
@@ -1796,6 +1820,7 @@ def main():
     command.add_argument('--skip-consumers', action='store_true')
     command.add_argument('--abi-libraries')
     command.add_argument('--libraries', help='Download metadata only for these libraries and the runtime layout')
+    command.add_argument('--php-versions', help='Check native metadata for already-shared PHP runtime hosts')
     command.add_argument('--output', required=True)
     command = commands.add_parser('migration-cutoffs')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])

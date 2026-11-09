@@ -51,6 +51,8 @@ def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None)
     args += ['--abi-libraries', ','.join(sorted(abi_libraries))]
     if libraries is not None:
         args += ['--libraries', ','.join(sorted(libraries))]
+    if os.environ.get('PACKAGES') and os.environ.get('PUBLISH') == 'false':
+        args += ['--php-versions', os.environ.get('PHP_VERSIONS') or ','.join(STREAMS)]
     if kind == 'rpm':
         host = os.environ.get('RPM_BASE_URL', 'https://rpm.henderkes.com').rstrip('/')
         args += ['--base-url', host + '/' + architecture() + '/el8']
@@ -256,6 +258,8 @@ def classify():
     if os.environ.get('LIBRARIES') and not rebuilt:
         graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
         scope = graph['dependency_closure'](os.environ['LIBRARIES'].split(','), graph['library_graph'](read(sdk / 'shared-libraries.json')))
+    elif os.environ.get('PACKAGES') and os.environ.get('PUBLISH') == 'false' and not rebuilt:
+        scope = []
     run(['php', 'tests/package-iterations.php'])
     run(['python3', 'tests/upgrade-guards.py'])
     if glibc:

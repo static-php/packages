@@ -82,6 +82,23 @@ class PublicationBaselines(unittest.TestCase):
                 result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
                 self.assertFalse(result['consumer_inventory_complete'])
 
+    def test_php_migration_is_detected_from_native_metadata_without_archives(self):
+        for kind in ['rpm', 'deb', 'apk']:
+            for provides in [[], ['php-zts-shared-runtime-85']]:
+                with self.subTest(kind=kind, provides=provides):
+                    index = Mock(return_value=([{'name': 'php-zts-cli', 'provides': provides}], None, None))
+                    native = {'rpm_index': index, 'deb_index': index, 'apk_index': index,
+                              'latest_packages': lambda kind, packages: {p['name']: p for p in packages}}
+                    args = self.baseline_args(type=kind, arch='arm64', php_versions='8.5', base_url='https://fixture/el8')
+                    with patch.object(runpy, 'run_path', return_value=native):
+                        self.assertEqual(planner['unmigrated_consumers'](args), [] if provides else ['8.5'])
+                    self.assertEqual(index.call_args.args[1], 'arm64' if kind == 'deb' else 'aarch64')
+
+    def test_php_migration_probe_does_not_hide_repository_failures(self):
+        native = {'apk_index': Mock(side_effect=RuntimeError('repository unavailable'))}
+        with patch.object(runpy, 'run_path', return_value=native), self.assertRaisesRegex(RuntimeError, 'repository unavailable'):
+            planner['unmigrated_consumers'](self.baseline_args(type='apk', php_versions='8.5'))
+
     def test_unchanged_selection_does_not_read_unrelated_package_archives(self):
         args = self.baseline_args(type='deb', owner='85', skip_consumers=True, abi_libraries='', libraries='zlib')
         helper = {'get_remote_packages': Mock(return_value=[{'name': 'php-zts-lib-other', 'version': '1-1'}])}

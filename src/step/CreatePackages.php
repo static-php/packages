@@ -61,7 +61,7 @@ class CreatePackages
             if (($plan['build_only'] ?? false) === true) {
                 // Unpublished native test dependencies are packaged locally with iteration 1.
                 foreach (self::$sharedLibraries->libraryIds() as $id) {
-                    if (self::$sharedLibraries->getPackageVersion($id, self::$packageType) !== null) {
+                    if (in_array($id, $plan['libraries'], true) && self::$sharedLibraries->getPackageVersion($id, self::$packageType) !== null) {
                         continue;
                     }
                     $version = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
