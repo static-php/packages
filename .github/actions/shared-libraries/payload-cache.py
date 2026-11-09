@@ -467,6 +467,8 @@ def validation_hosts(packages):
     hosts = {'cli'}
     if packages - {'cli', 'cgi', 'fpm', 'embed', 'frankenphp', 'devel', 'common', 'pie'}:
         hosts.add('frankenphp')
+    if 'frankenphp' in packages | hosts:
+        hosts.add('embed')
     return hosts - packages
 
 

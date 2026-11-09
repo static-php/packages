@@ -119,8 +119,8 @@ class PayloadCache(unittest.TestCase):
     def test_validation_hosts_follow_the_requested_runtime(self):
         self.assertEqual(cache.validation_hosts({'fpm'}), {'cli'})
         self.assertEqual(cache.validation_hosts({'cli'}), set())
-        self.assertEqual(cache.validation_hosts({'curl'}), {'cli', 'frankenphp'})
-        self.assertEqual(cache.validation_hosts({'curl', 'frankenphp'}), {'cli'})
+        self.assertEqual(cache.validation_hosts({'curl'}), {'cli', 'frankenphp', 'embed'})
+        self.assertEqual(cache.validation_hosts({'curl', 'frankenphp'}), {'cli', 'embed'})
 
     def test_selected_packaging_archive_keeps_sealed_bytes_and_omits_unrelated_sdk_outputs(self):
         payload = self.root / 'build/8.6'
@@ -144,6 +144,7 @@ class PayloadCache(unittest.TestCase):
         self.assertFalse((selected / 'modules/unselected-zts-86.so').exists())
         self.assertFalse((selected / 'lib/libfixture.so.1').exists())
         self.assertFalse((selected / 'lib/unneeded.a').exists())
+        self.assertTrue((selected / 'lib/libphp-zts-86.so').is_file())
         self.assertEqual((payload / 'build-payload.json').read_bytes(), original)
         self.assertEqual(cache.read(selected / 'build-payload.json')['prepared']['modules/imagick-zts-86.so'],
                          json.loads(original)['prepared']['modules/imagick-zts-86.so'])
