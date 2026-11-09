@@ -300,13 +300,26 @@ class Publication(unittest.TestCase):
             publication.publication_matrix(self.state(), self.plans)
         self.assertEqual(len(publication.publication_matrix(self.state('deb'), self.plans)), 1)
 
-    def test_untrusted_unfinished_and_wrong_workflow_runs_are_rejected(self):
+    def test_untrusted_invalid_and_wrong_workflow_runs_are_rejected(self):
         self.plan()
         for key, value in [('head_repository', {'full_name': 'other/packages'}), ('head_branch', 'feature'),
                            ('event', 'pull_request'), ('path', '.github/workflows/build-images.yml'),
                            ('status', 'in_progress'), ('conclusion', 'skipped'), ('head_sha', 'bad')]:
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 publication.inspect_run(dict(self.run, **{key: value}), self.artifacts, 'static-php/packages', 'master', 'rpm')
+
+    def test_running_build_can_publish_already_staged_cohorts(self):
+        self.plan()
+        self.artifacts = [item for item in self.artifacts
+                          if item['name'] != 'shared-consumers-rpm-alma8-x86_64-php8.6']
+        for status in ('queued', 'pending', 'waiting', 'in_progress'):
+            with self.subTest(status=status):
+                self.run.update(status=status, conclusion=None)
+                state = self.state()
+                selected = publication.publication_matrix(state, self.plans, selected_php='8.4')
+                self.assertEqual(len(selected), 1)
+                with self.assertRaisesRegex(RuntimeError, 'No complete retained'):
+                    publication.publication_matrix(state, self.plans, selected_php='8.6')
 
     def test_cancelled_run_retains_its_completed_package_cohorts(self):
         self.plan()

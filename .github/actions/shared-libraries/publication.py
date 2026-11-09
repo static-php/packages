@@ -30,8 +30,10 @@ def inspect_run(run, artifacts, repository, branch, kind):
         raise RuntimeError('The selected run is not a supported ' + family + ' package build')
     if run.get('head_branch') != branch:
         raise RuntimeError('Only builds from the default branch can be published')
-    if run.get('status') != 'completed' or run.get('conclusion') not in ('success', 'failure', 'cancelled'):
-        raise RuntimeError('Wait for the package build to finish before publishing')
+    completed = run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure', 'cancelled')
+    running = run.get('status') in ('queued', 'pending', 'waiting', 'in_progress') and not run.get('conclusion')
+    if not (completed or running):
+        raise RuntimeError('Unsupported package build state')
     if not re.fullmatch(r'[a-f0-9]{40}', run.get('head_sha', '')):
         raise RuntimeError('Missing build commit identity')
     available = {}
