@@ -1491,8 +1491,10 @@ def unmigrated_consumers(args):
             suffix = 'debian/' if args.type == 'deb' else 'alpine/main/php-zts/'
             base = args.host.rstrip('/') + '/api/packages/' + stream.replace('.', '') + '/' + suffix
             inventory, _, _ = native['deb_index' if args.type == 'deb' else 'apk_index'](base, architecture)
-        latest = native['latest_packages'](args.type, [package for package in inventory if package['name'] == 'php-zts-cli'])
-        if not any(name.startswith('php-zts-shared-runtime-') for name in latest.get('php-zts-cli', {}).get('provides', [])):
+        candidates = [package for package in inventory if package['name'] == 'php-zts-cli']
+        version = lambda package: (str(package.get('epoch', '0')) + ':' if args.type == 'rpm' else '') + package['version']
+        candidates.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, version(a), version(b))), reverse=True)
+        if not candidates or not any(name.startswith('php-zts-shared-runtime-') for name in candidates[0].get('provides', [])):
             missing.append(stream)
     return missing
 

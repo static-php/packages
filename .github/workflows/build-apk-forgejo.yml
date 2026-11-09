@@ -264,14 +264,14 @@ jobs:
                 env:
                     PHPV: ${{ steps.classification.outputs.inline-stream }}
                     LIBRARY_ONLY: false
-                    PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).packages }}
-                    COMPILE: ${{ fromJson(steps.classification.outputs.inline-request).compile }}
-                    COMPILE_PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).compile-packages }}
-                    ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request).abi-rebuild-libraries }}
-                    ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request).abi-break }}
-                    ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request).abi-core-rebuild }}
-                    RUNTIME_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request).runtime-checks }}
-                    TLS_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request).tls-checks }}
+                    PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').packages }}
+                    COMPILE: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile }}
+                    COMPILE_PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile-packages }}
+                    ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-rebuild-libraries }}
+                    ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-break }}
+                    ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-core-rebuild }}
+                    RUNTIME_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request || '{}').runtime-checks }}
+                    TLS_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request || '{}').tls-checks }}
             -   name: Pack buildroot
                 if: inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
                 run: tar --zstd -cf buildroot.tar.zst buildroot

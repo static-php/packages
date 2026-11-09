@@ -224,8 +224,9 @@ def test_dependencies(kind, sdk, directory, consumers=False):
                        SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
     selected = set(plan['libraries'])
     roots = set(selected)
+    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
     if consumers:
-        hosts = {'cli', 'embed', 'frankenphp'} - set(os.environ.get('PACKAGES', '').split(','))
+        hosts = graph['validation_hosts'](set(filter(None, os.environ.get('PACKAGES', '').split(','))))
         if hosts:
             run(['php', 'bin/spp', 'package', '--type=' + kind, '--phpv=' + os.environ['PHPV'],
                  '--packages=' + ','.join(sorted(hosts)), '--iteration=1'], env=environment)
@@ -234,7 +235,6 @@ def test_dependencies(kind, sdk, directory, consumers=False):
             if metadata.is_file():
                 for consumer in read(metadata).get('consumers', {}).values():
                     roots.update(consumer['libraries'])
-    graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
     closure = graph['dependency_closure'](roots, graph['library_graph'](read(sdk / 'shared-libraries.json')))
     needed = sorted(set(closure) - selected)
     if needed:

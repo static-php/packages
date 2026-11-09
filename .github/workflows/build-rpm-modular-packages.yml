@@ -310,12 +310,12 @@ jobs:
                 uses: ./.github/actions/php-payload
                 env:
                     PHPV: ${{ steps.classification.outputs.inline-stream }}
-                    PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).packages }}
-                    COMPILE: ${{ fromJson(steps.classification.outputs.inline-request).compile }}
-                    COMPILE_PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).compile-packages }}
-                    ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request).abi-rebuild-libraries }}
-                    ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request).abi-break }}
-                    ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request).abi-core-rebuild }}
+                    PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').packages }}
+                    COMPILE: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile }}
+                    COMPILE_PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile-packages }}
+                    ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-rebuild-libraries }}
+                    ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-break }}
+                    ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-core-rebuild }}
             -   name: Pack buildroot
                 if: inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
                 run: tar -cf - buildroot | zstd -f -o buildroot.tar.zst

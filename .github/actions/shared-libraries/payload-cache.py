@@ -455,6 +455,13 @@ def restore(args):
         raise
 
 
+def validation_hosts(packages):
+    hosts = {'cli'}
+    if packages - {'cli', 'cgi', 'fpm', 'embed', 'frankenphp', 'devel', 'common', 'pie'}:
+        hosts.add('frankenphp')
+    return hosts - packages
+
+
 def package_archive(args):
     payload = args.payload.resolve()
     record = read(payload / 'build-payload.json')
@@ -465,9 +472,12 @@ def package_archive(args):
     replacements = {}
     excluded = set()
     if packages and 'devel' not in packages:
-        retained = {'bin/php', 'bin/frankenphp'} | {name for name in record['files'] if name.startswith('lib/libphp')}
-        retained.update('bin/php-' + name for name in packages & {'cgi', 'fpm'})
-        retained.update(name for name in record['files'] if component_file(name, record) in packages)
+        consumers = packages | validation_hosts(packages)
+        retained = {'bin/php'}
+        retained.update('bin/php-' + name for name in consumers & {'cgi', 'fpm'})
+        retained.update(name for name in record['files'] if component_file(name, record) in consumers)
+        if 'embed' in consumers:
+            retained.update(name for name in record['files'] if name.startswith('lib/libphp'))
         consumers = dict(record, files={name: value for name, value in record['files'].items() if name in retained})
         graph = library_graph(manifest)
         bindings = consumer_bindings(payload, consumers, abi(manifest), graph)

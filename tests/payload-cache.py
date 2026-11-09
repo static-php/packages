@@ -115,6 +115,12 @@ class PayloadCache(unittest.TestCase):
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(directory), *extras], check=True, stdout=subprocess.DEVNULL)
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
+    def test_validation_hosts_follow_the_requested_runtime(self):
+        self.assertEqual(cache.validation_hosts({'fpm'}), {'cli'})
+        self.assertEqual(cache.validation_hosts({'cli'}), set())
+        self.assertEqual(cache.validation_hosts({'curl'}), {'cli', 'frankenphp'})
+        self.assertEqual(cache.validation_hosts({'curl', 'frankenphp'}), {'cli'})
+
     def test_selected_packaging_archive_keeps_sealed_bytes_and_omits_unrelated_sdk_outputs(self):
         payload = self.root / 'build/8.6'
         self.fixture(payload, 1, php=True)

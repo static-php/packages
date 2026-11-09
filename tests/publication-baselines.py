@@ -86,7 +86,7 @@ class PublicationBaselines(unittest.TestCase):
         for kind in ['rpm', 'deb', 'apk']:
             for provides in [[], ['php-zts-shared-runtime-85']]:
                 with self.subTest(kind=kind, provides=provides):
-                    index = Mock(return_value=([{'name': 'php-zts-cli', 'provides': provides}], None, None))
+                    index = Mock(return_value=([{'name': 'php-zts-cli', 'version': '8.5.12-1', 'provides': provides}], None, None))
                     native = {'rpm_index': index, 'deb_index': index, 'apk_index': index,
                               'latest_packages': lambda kind, packages: {p['name']: p for p in packages}}
                     args = self.baseline_args(type=kind, arch='arm64', php_versions='8.5', base_url='https://fixture/el8')
