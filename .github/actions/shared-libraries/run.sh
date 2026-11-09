@@ -76,7 +76,7 @@ baseline() {
 }
 
 case "$command" in
-    glibc-classify|glibc-record|glibc-payload|glibc-package)
+    classify|glibc-classify|glibc-record|glibc-payload|glibc-package)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
@@ -104,69 +104,6 @@ case "$command" in
             touch stage/sdk-rebuilt
         fi
         test -s buildroot/shared-libraries.json
-        ;;
-    classify)
-        git config --global --add safe.directory "$PWD"
-        composer install --no-interaction --prefer-dist --no-progress
-        mkdir -p stage
-        python3 .github/actions/shared-libraries/source-plan.py --reconcile --root . --output stage/effective-source-plan.json
-        baseline stage/baseline
-        args=(--type "$TYPE" --manifest buildroot/shared-libraries.json --root buildroot \
-            --baseline stage/baseline --mode "$MODE" \
-            --libraries "$LIBRARIES" --php-versions "$PHP_VERSIONS" --packages "$PACKAGES" \
-            --output stage/shared-library-plan.json \
-            --manifest-output buildroot/shared-libraries.json)
-        if [[ -f stage/effective-source-plan.json ]]; then
-            args+=(--request stage/effective-source-plan.json)
-        fi
-        if [[ -z "$LIBRARIES" ]] && { [[ "$MODE" == full ]] || python3 -c 'import json,sys; from pathlib import Path; b=Path("stage/baseline/shared-libraries.json"); p=json.load(open("downloads/build-plan.json")); empty=not b.exists() or not json.loads(b.read_text()).get("libraries"); sys.exit(not (empty and all(p.get("requests",{}).get(s,{}).get("full") for s in ["8.2","8.3","8.4","8.5","8.6"])))'; }; then
-            args+=(--bootstrap)
-        fi
-        for phase in $(seq 1 1000); do
-            rebuilt=''
-            if [[ -f stage/library-build-plan.json ]]; then
-                rebuilt=$(python3 -c 'import json; p=json.load(open("stage/library-build-plan.json")); print(",".join(json.load(open("buildroot/shared-libraries.json"))["libraries"] if p.get("full") else p.get("rebuilt_libraries", [])))')
-            fi
-            python3 bin/shared-library-plan prepare "${args[@]}" --rebuilt-libraries "$rebuilt"
-            roots=$(python3 -c 'import json; p=json.load(open("stage/shared-library-plan.json")); m=json.load(open("buildroot/shared-libraries.json")); print(",".join(sorted(set(p.get("abi_rebuild_roots", [])) | {provider for dependencies in m.get("pending_rebuilds", {}).values() for provider in dependencies.values()})))')
-            [[ -z "$roots" ]] && break
-            python3 .github/actions/shared-libraries/incremental-build.py expand --root . \
-                --plan stage/library-build-plan.json --libraries "$roots" --output stage/library-reverse-plan.json
-            pending=$(python3 -c 'import json; print(",".join(json.load(open("stage/library-reverse-plan.json"))["selected"]))')
-            [[ -z "$pending" ]] && break
-            python3 .github/actions/shared-libraries/incremental-build.py run --root . \
-                --plan stage/library-reverse-plan.json --type "$TYPE"
-            cp stage/library-reverse-plan.json stage/library-build-plan.json
-            touch stage/sdk-rebuilt
-            if [[ "$phase" == 1000 ]]; then
-                echo 'Library ABI rebuild planning did not converge' >&2
-                exit 1
-            fi
-        done
-        python3 .github/actions/shared-libraries/incremental-build.py validate-final --root .
-        php bin/build-payload seal --root buildroot
-        export SPP_BASELINE_MANIFESTS
-        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for p in pathlib.Path("stage").glob("baseline/shared-libraries.json")]))')
-        export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
-        retry_args=(--plan stage/shared-library-plan.json --destination "dist/$TYPE" --manifest buildroot/shared-libraries.json --manifest-output buildroot/shared-libraries.json --output stage/publication-retries.json)
-        [[ ! -f stage/baseline/shared-libraries.json ]] || retry_args+=(--baseline-manifest stage/baseline/shared-libraries.json)
-        python3 bin/shared-library-plan stage-publication-retries "${retry_args[@]}"
-        selected=$(python3 -c 'import json; print(",".join(json.load(open("stage/publication-retries.json"))["remaining_libraries"]))')
-        layout_required=$(python3 -c 'import json; print(str(json.load(open("stage/publication-retries.json")).get("layout_required", False)).lower())')
-        if [[ -n "$selected" || "$layout_required" == true ]]; then
-            flags=(--libs-only --type="$TYPE" --debuginfo)
-            if [[ -n "$selected" ]]; then flags+=(--libraries="$selected"); else flags+=(--packages=runtime_layout); fi
-            if [[ -n "$ITERATION" ]]; then flags+=(--iteration="$ITERATION"); elif [[ "$BUMP" == true ]]; then flags+=(--bump); fi
-            php bin/spp package "${flags[@]}"
-        fi
-        mkdir -p stage/libraries
-        find "dist/$TYPE" -maxdepth 1 -name "*.$TYPE" -exec cp -a {} stage/libraries/ \;
-        if [[ -f "dist/$TYPE/shared-library-consumers.json" ]]; then cp "dist/$TYPE/shared-library-consumers.json" stage/libraries/; fi
-        php bin/build-payload manifest --root buildroot --type "$TYPE" --output stage/shared-libraries.json
-        if [[ -d buildroot/usr/share/php-zts/libraries/abi ]]; then
-            mkdir -p stage/abi
-            cp -a buildroot/usr/share/php-zts/libraries/abi/. stage/abi/
-        fi
         ;;
     payload-key)
         composer install --no-interaction --prefer-dist --no-progress >&2

@@ -343,56 +343,29 @@ class CacheAndCohortTests(unittest.TestCase):
             self.assertEqual(trusted, [str(root / 'downloads/libargon2'), str(root / 'downloads/source with spaces')])
 
     def test_classification_hands_off_resolved_library_package_revisions(self):
-        for selected in ['zlib', '']:
-            with self.subTest(selected=selected), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
+        pipeline = module('native_pipeline', 'glibc.py')
+        for kind in ['apk', 'rpm', 'deb']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                for directory in ['bin', 'shims', 'buildroot/usr/share/php-zts/libraries/abi/zlib', '.github/actions/shared-libraries']:
-                    (root / directory).mkdir(parents=True)
-                for name in ['incremental-build.py', 'workflow.py']:
-                    shutil.copy2(ROOT / '.github/actions/shared-libraries' / name, root / '.github/actions/shared-libraries' / name)
-                (root / '.github/actions/shared-libraries/source-plan.py').write_text('''import sys
-from pathlib import Path
-a=sys.argv[1:];Path(a[a.index('--output')+1]).write_text('{}')
-''')
-                (root / 'buildroot/usr/share/php-zts/libraries/abi/zlib/libz.so.1.xml').write_text('<abi-corpus/>')
-                (root / 'bin/shared-library-plan').write_text('''import json,os,sys
-from pathlib import Path
-args=sys.argv[1:]
-def flag(name): return args[args.index(name)+1]
-if args[0]=='stage-publication-retries':
-    Path(flag('--destination')).mkdir(parents=True,exist_ok=True)
-    Path(flag('--output')).write_text(json.dumps({'remaining_libraries':[os.environ['SELECTED']] if os.environ['SELECTED'] else [],'layout_required':False}))
-elif args[0]=='baseline':
-    Path(flag('--output')).mkdir(parents=True)
-elif args[0]=='prepare':
-    if '--request' in args:
-        assert Path(flag('--request')).is_file(), 'Missing request passed to planner'
-    Path(flag('--output')).write_text(json.dumps({'libraries':[os.environ['SELECTED']] if os.environ['SELECTED'] else []}))
-    Path(flag('--manifest-output')).write_text(json.dumps({'schema':1,'linkage':'shared','libraries':{'zlib':{'package_versions':{'deb':'1.3.1-1'}}}}))
-''')
-                for name in ['git', 'composer']:
-                    path = root / 'shims' / name
-                    path.write_text('#!/bin/sh\nexit 0\n')
-                    path.chmod(0o755)
-                php = root / 'shims/php'
-                php.write_text('''#!/bin/sh
-if [ "$1" = bin/build-payload ] && [ "$2" = manifest ]; then
-    while [ "$1" != --output ]; do shift; done
-    cp buildroot/shared-libraries.json "$2"
-elif [ "$1" = bin/spp ] && [ "$2" = package ]; then
-    printf '%s' '{"libraries":{"zlib":{"package_versions":{"deb":"1.3.1-2"}}}}' > buildroot/shared-libraries.json
-    mkdir -p dist/deb
-    printf archive > dist/deb/zlib.deb
-    printf '{}' > dist/deb/shared-library-consumers.json
-fi
-''')
-                php.chmod(0o755)
-                env = dict(os.environ, PATH=str(root / 'shims') + ':' + os.environ['PATH'], TYPE='deb', MODE='full', LIBRARIES='', PHP_VERSIONS='', PACKAGES='', ITERATION='', BUMP='false', MATRIX_ARCH='amd64', SELECTED=selected)
-                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'classify'], cwd=root, env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                manifest = json.loads((root / 'stage/shared-libraries.json').read_text())
-                self.assertEqual(manifest['libraries']['zlib']['package_versions']['deb'], '1.3.1-2' if selected else '1.3.1-1')
-                self.assertTrue((root / 'stage/abi/zlib/libz.so.1.xml').is_file())
+                stage = root / 'stage'
+                with mock.patch.object(pipeline, 'ROOT', root), mock.patch.object(pipeline, 'STAGE', stage):
+                    sdk, directory = pipeline.format_sdk(kind), pipeline.format_stage(kind)
+                    sdk.mkdir(parents=True)
+                    directory.mkdir(parents=True, exist_ok=True)
+                    planned = {'libraries': {'zlib': {'package_versions': {kind: '1.3.1-1'}}}}
+                    pipeline.write(directory / 'shared-libraries.json', planned)
+                    def execute(args, **kwargs):
+                        if 'stage-publication-retries' in args:
+                            pipeline.write(directory / 'publication-retries.json', {'remaining_libraries': ['zlib']})
+                        elif args[:3] == ['php', 'bin/spp', 'package']:
+                            planned['libraries']['zlib']['package_versions'][kind] = '1.3.1-2'
+                            pipeline.write(sdk / 'shared-libraries.json', planned)
+                        elif 'manifest' in args:
+                            pipeline.write(directory / 'shared-libraries.json', pipeline.read(sdk / 'shared-libraries.json'))
+                    with mock.patch.object(pipeline, 'run', execute):
+                        pipeline.package_libraries(kind)
+                    result = pipeline.read(directory / 'shared-libraries.json')
+                    self.assertEqual(result['libraries']['zlib']['package_versions'][kind], '1.3.1-2')
 
     def test_annotated_abi_files_are_restored_before_php_build(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:

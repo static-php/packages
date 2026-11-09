@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one EL8 payload and consume it in format-only packaging stages."""
+"""Plan and package native SDKs; share the EL8 payload between RPM and DEB."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -141,9 +141,17 @@ def save_abi_cache(root, kind):
                 copy_tree(directory, STAGE / 'abi-cache' / (kind if directory.name == 'openssl' else 'common') / directory.name)
 
 
+def format_stage(kind):
+    return STAGE if kind == 'apk' else STAGE / kind
+
+
+def format_sdk(kind):
+    return ROOT / 'buildroot' if kind == 'apk' else STAGE / ('sdk-' + kind)
+
+
 def package_libraries(kind):
-    directory = STAGE / kind
-    selected_sdk = STAGE / ('sdk-' + kind)
+    directory = format_stage(kind)
+    selected_sdk = format_sdk(kind)
     shutil.copy2(directory / 'shared-libraries.json', selected_sdk / 'shared-libraries.json')
     run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
     abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
@@ -177,30 +185,34 @@ def package_libraries(kind):
 
 
 def classify():
+    formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
+    glibc = formats == FORMATS
     sdk = ROOT / 'buildroot'
     STAGE.mkdir(exist_ok=True)
     run(['python3', '.github/actions/shared-libraries/source-plan.py', '--reconcile', '--root', '.',
          '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
-    for kind in FORMATS:
+    for kind in formats:
         run(['php', 'tests/package-versions.php', '--type=' + kind])
-        baseline(kind, STAGE / kind / 'baseline', consumers=bool(rebuilt) and kind == 'deb', abi_libraries=rebuilt)
-    if rebuilt:
+        baseline(kind, format_stage(kind) / 'baseline', consumers=bool(rebuilt) and kind == formats[-1], abi_libraries=rebuilt)
+    if rebuilt and glibc:
         share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
-    variants_ready = False
-    if not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
+    variants_ready = not glibc
+    if glibc and not rebuilt and (sdk / 'openssl-variants/variants.json').is_file():
         run(variants('build', sdk))
         variants_ready = True
     for phase in range(100):
         plans, reverse_roots = {}, set()
-        for kind in FORMATS:
-            directory = STAGE / kind
-            selected_sdk = STAGE / ('sdk-' + kind)
-            copy_tree(sdk, selected_sdk)
-            if variants_ready:
+        for kind in formats:
+            directory = format_stage(kind)
+            selected_sdk = format_sdk(kind)
+            if selected_sdk != sdk:
+                copy_tree(sdk, selected_sdk)
+            if glibc and variants_ready:
                 run(variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
-            seed_abi_cache(selected_sdk, kind)
+            if glibc:
+                seed_abi_cache(selected_sdk, kind)
             args = ['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
                     '--manifest', selected_sdk / 'shared-libraries.json', '--root', selected_sdk,
                     '--baseline', directory / 'baseline', '--mode', os.environ.get('MODE', 'full'),
@@ -216,7 +228,8 @@ def classify():
                     all(request.get('requests', {}).get(stream, {}).get('full') for stream in STREAMS)):
                 args += ['--bootstrap']
             run(args)
-            save_abi_cache(selected_sdk, kind)
+            if glibc:
+                save_abi_cache(selected_sdk, kind)
             plan = read(directory / 'shared-library-plan.json')
             plans[kind] = plan
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
@@ -230,22 +243,24 @@ def classify():
             run(['php', 'bin/build-payload', 'seal', '--root', sdk])
             variants_ready = True
             continue
-        variants_ready = False
+        variants_ready = not glibc
         run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
              '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(reverse_roots)),
              '--output', STAGE / 'library-reverse-plan.json'])
         if not read(STAGE / 'library-reverse-plan.json').get('selected'):
             raise RuntimeError('ABI transition requires libraries absent from the incremental build plan')
         run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'run', '--root', '.',
-             '--plan', STAGE / 'library-reverse-plan.json', '--type', 'rpm'])
+             '--plan', STAGE / 'library-reverse-plan.json', '--type', formats[0]])
         rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
         shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
         (STAGE / 'sdk-rebuilt').touch()
     else:
-        raise RuntimeError('Cross-format library ABI planning did not converge')
+        raise RuntimeError('Library ABI planning did not converge')
     run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
-    with ThreadPoolExecutor(max_workers=len(FORMATS)) as executor:
-        list(executor.map(package_libraries, FORMATS))
+    with ThreadPoolExecutor(max_workers=len(formats)) as executor:
+        list(executor.map(package_libraries, formats))
+    if not glibc:
+        return
     sdk_manifest = read(sdk / 'shared-libraries.json')
     format_manifests = {kind: read(STAGE / kind / 'shared-libraries.json') for kind in FORMATS}
     for kind, entry in merge_library_abi(sdk_manifest, format_manifests):
@@ -260,7 +275,7 @@ def classify():
     write(sdk / 'shared-libraries.json', sdk_manifest)
     common = STAGE / 'common'
     write(common / 'shared-library-plan.json', combine_plans(plans))
-    for kind in FORMATS:
+    for kind in formats:
         for name in ['shared-library-plan.json', 'shared-libraries.json']:
             target = common / kind / name
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -108,8 +108,8 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for rebuilt, cached_variants in [(False, False), (False, True), (True, False)]:
-            with self.subTest(rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
+        for kind, rebuilt, cached_variants in [('rpm', False, False), ('rpm', False, True), ('rpm', True, False), ('apk', False, False), ('apk', True, False)]:
+            with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
                 value = {'libraries': {'fixture': {'abi_epoch': 1}}}
@@ -119,7 +119,8 @@ class Pipeline(unittest.TestCase):
                 if cached_variants:
                     glibc.write(sdk / 'openssl-variants/variants.json', {})
                 calls, scans = [], []
-                packaging = Barrier(2)
+                formats = ('apk',) if kind == 'apk' else ('rpm', 'deb')
+                packaging = Barrier(len(formats))
                 def baseline(kind, destination, consumers=False, abi_libraries=()):
                     scans.append((kind, consumers, set(abi_libraries)))
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
@@ -137,24 +138,24 @@ class Pipeline(unittest.TestCase):
                     elif args[:2] == ['php', 'bin/spp']:
                         kind = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--type='))
                         selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
-                        self.assertEqual(Path(selected), stage / ('sdk-' + kind))
+                        self.assertEqual(Path(selected), sdk if kind == 'apk' else stage / ('sdk-' + kind))
                         self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
                         packaging.wait(timeout=5)
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute):
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
-                self.assertEqual(scans, [('rpm', False, expected), ('deb', rebuilt, expected)])
+                self.assertEqual(scans, [('apk', rebuilt, expected)] if kind == 'apk' else [('rpm', False, expected), ('deb', rebuilt, expected)])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
                 self.assertTrue(any('seal' in call for call in calls))
                 prepares = [call for call in calls if 'prepare' in call]
-                self.assertEqual(len(prepares), 2 if cached_variants else 4)
+                self.assertEqual(len(prepares), 1 if kind == 'apk' else 2 if cached_variants else 4)
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
                 self.assertEqual(packaging.n_waiting, 0)
-                self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), 2)
+                self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), len(formats))
 
     def test_shared_consumer_graph_preserves_native_rpm_versions_and_libraries(self):
         with tempfile.TemporaryDirectory() as temporary:
