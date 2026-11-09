@@ -335,7 +335,9 @@ class WorkflowContracts(unittest.TestCase):
     def test_format_dispatch_and_existing_builds_use_the_same_publisher(self):
         inputs = self.workflow[True]['workflow_dispatch']['inputs']
         self.assertEqual(inputs['format']['options'], ['rpm', 'deb', 'apk'])
-        self.assertEqual(set(inputs), {'format', 'build_run_id', 'mirror_run_id'})
+        self.assertEqual(set(inputs), {'format', 'build_run_id', 'mirror_run_id', 'skip_mirror'})
+        self.assertFalse(inputs['skip_mirror']['default'])
+        self.assertIn('!inputs.skip_mirror', self.workflow['jobs']['mirror']['if'])
         self.assertIn("inputs.mirror_run_id == ''", self.workflow['jobs']['publish']['if'])
         self.assertEqual(self.workflow['jobs']['mirror']['with']['primary-run-id'], '${{ inputs.mirror_run_id }}')
         download = next(step for step in self.publisher['jobs']['publish-glibc']['steps']

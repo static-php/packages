@@ -17,6 +17,10 @@ on:
                 description: "Optional: retry only mirrors using this run's completed primary publication results"
                 type: string
                 default: ""
+            skip_mirror:
+                description: "Publish to host 1 only; mirror its results afterward"
+                type: boolean
+                default: false
 
 permissions:
     contents: read
@@ -84,7 +88,7 @@ jobs:
     mirror:
         name: Mirror (${{ matrix.type }} ${{ matrix.target }})
         needs: [prepare, publish]
-        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && (inputs.mirror_run_id != '' || !inputs.skip_mirror) }}
         permissions:
             contents: read
             packages: read
