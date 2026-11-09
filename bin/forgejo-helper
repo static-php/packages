@@ -49,13 +49,15 @@ def apk_native_metadata(path):
     raise RuntimeError('APK archive has no control metadata')
 
 
-def get_remote_packages(host, owner, password, pkg_type):
+def get_remote_packages(host, owner, password, pkg_type, query=None):
     url = f"{host}/api/v1/packages/{owner}"
     packages = []
     page = 1
     previous = None
     while True:
         params = {"type": pkg_type, "limit": 1000, "page": page}
+        if query is not None:
+            params["q"] = query
         response = requests.get(url, params=params, auth=registry_auth(owner, password), timeout=30)
         response.raise_for_status()
         batch = response.json()

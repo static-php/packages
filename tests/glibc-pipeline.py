@@ -142,6 +142,9 @@ class Pipeline(unittest.TestCase):
                         selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
                         self.assertEqual(Path(selected), sdk if kind == 'apk' else stage / ('sdk-' + kind))
                         self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
+                        archives = root / 'dist' / kind
+                        archives.mkdir(parents=True, exist_ok=True)
+                        (archives / ('fixture.' + kind)).write_bytes(b'package')
                         packaging.wait(timeout=5)
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
@@ -157,6 +160,8 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(len(prepares), 1 if kind == 'apk' else 2 if cached_variants else 4)
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
                 self.assertEqual(packaging.n_waiting, 0)
+                archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]
+                self.assertEqual(len(archive_checks), 0 if kind == 'apk' else 2)
                 self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), len(formats))
 
     def test_shared_consumer_graph_preserves_native_rpm_versions_and_libraries(self):

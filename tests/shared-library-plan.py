@@ -147,6 +147,26 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertTrue(result['bootstrap'])
         self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
 
+    def test_apk_baseline_does_not_download_archives_for_other_architectures(self):
+        import requests
+        with TemporaryDirectory() as temporary:
+            queried = []
+            def listing(host, owner, password, kind, query=None):
+                queried.append(query)
+                return [{'name': 'php-zts-lib-fixture', 'version': '1.0-r1'}]
+            helper = {'get_remote_packages': listing}
+            native = {'apk_index': lambda base, architecture: ([], {}, [])}
+            def load(path):
+                return helper if str(path).endswith('forgejo-helper') else native
+            args = argparse.Namespace(type='apk', output=temporary, arch='x86_64', skip_consumers=True,
+                                      abi_libraries='', consumer_stream='8.5', owner='85',
+                                      host='https://example.com', password_env=None, consumer_password_env=None)
+            with patch.object(runpy, 'run_path', load), patch.object(requests, 'get', side_effect=AssertionError('Unexpected archive download')):
+                planner['baseline_single'](args)
+            result = json.loads((Path(temporary) / 'shared-libraries.json').read_text())
+            self.assertEqual(result['libraries'], {})
+            self.assertEqual(queried, ['php-zts-lib-', 'php-zts-runtime-layout'])
+
     def test_newly_rebuilt_dependent_uses_retained_archive_for_abi(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)

@@ -1318,7 +1318,11 @@ def baseline_single(args):
             password = os.environ.get(args.password_env, '') if args.password_env else ''
             consumer_password = os.environ.get(args.consumer_password_env, '') if args.consumer_password_env else password
             auth = (args.owner, password) if password else None
-            packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
+            if scan_consumers:
+                packages = helper['get_remote_packages'](args.host, args.owner, password, package_type)
+            else:
+                packages = [item for query in ['php-zts-lib-', 'php-zts-runtime-layout']
+                            for item in helper['get_remote_packages'](args.host, args.owner, password, package_type, query)]
             consumer_streams = [consumer_stream] if scan_consumers else []
             if args.owner in [value.replace('.', '') for value in STREAMS]:
                 consumer_streams = [consumer_stream] if scan_consumers and args.owner == consumer_stream.replace('.', '') else []
@@ -1328,25 +1332,39 @@ def baseline_single(args):
                                                packages=packages if owner == args.owner and consumer_password == password else None)
                 consumers[stream].update(versions)
                 consumer_versions[stream].update(versions)
+            apk_packages = {}
+            if args.type == 'apk':
+                native = runpy.run_path(str(ROOT / 'freeze-migration-baseline.py'))
+                base = args.host.rstrip('/') + '/api/packages/' + args.owner + '/alpine/main/php-zts/'
+                inventory, _, _ = native['apk_index'](base, architecture)
+                apk_packages = {(item['name'], item['version']): item for item in inventory}
+                packages = [item for item in packages if (item['name'], item['version']) in apk_packages]
             names = {item['name'] for item in packages if (item['name'].startswith('php-zts-lib-') or item['name'] == 'php-zts-runtime-layout') and not item['name'].endswith('-debuginfo')}
             for name in sorted(names):
                 versions = [item for item in packages if item['name'] == name]
                 versions.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, a['version'], b['version'])), reverse=True)
                 for item in versions:
-                    url = '{}/api/v1/packages/{}/{}/{}/{}/files'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'])
-                    response = requests.get(url, auth=auth, timeout=30)
-                    response.raise_for_status()
+                    if args.type == 'apk':
+                        published = apk_packages[(name, item['version'])]
+                        files = [{'name': PurePosixPath(published['publication_url']).name, 'url': published['publication_url']}]
+                    else:
+                        url = '{}/api/v1/packages/{}/{}/{}/{}/files'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'])
+                        response = requests.get(url, auth=auth, timeout=30)
+                        response.raise_for_status()
+                        files = response.json()
                     matched = False
-                    for file in response.json():
+                    for file in files:
                         if args.type == 'deb' and architecture not in file.get('name', '') and not file.get('name', '').endswith('_all.deb'):
                             continue
-                        url = '{}/{}/-/packages/{}/{}/{}/files/{}'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'], file['id'])
+                        url = file['url'] if args.type == 'apk' else '{}/{}/-/packages/{}/{}/{}/files/{}'.format(args.host.rstrip('/'), args.owner, package_type, name, item['version'], file['id'])
                         path = temporary / ('package.' + args.type)
                         with requests.get(url, auth=auth, timeout=60, stream=True) as download:
                             download.raise_for_status()
                             with path.open('wb') as output:
                                 for chunk in download.iter_content(1024 * 1024):
                                     output.write(chunk)
+                        if args.type == 'apk' and native['apk_control_checksum'](path.read_bytes()) != published['published_checksum']['value']:
+                            raise RuntimeError('Published APK differs from its native index checksum: ' + name)
                         actual_name, actual_version, actual_arch = helper['package_metadata'](path, package_type)
                         if actual_name != name or actual_version != item['version']:
                             raise RuntimeError('Published package headers do not match registry')

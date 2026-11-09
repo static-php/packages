@@ -235,6 +235,7 @@ class RuntimeHarness(unittest.TestCase):
             def mapped(value):
                 return root / str(value).lstrip('/') if str(value).startswith('/usr/') else Path(value)
             with patch.dict(scope, {'Path': mapped}):
+                self.assertEqual(harness['required_payloads']('8.4', ['php-zts-lib-zlib', 'php-zts-runtime-layout'], 'deb'), [])
                 for name in ('php-zts-cli', 'php-zts-cgi', 'php-zts-fpm', 'frankenphp', 'php-zts-devel', 'php-zts-embed'):
                     with self.assertRaisesRegex(RuntimeError, 'required .*payload missing'):
                         harness['required_payloads']('8.2', [name], 'deb')

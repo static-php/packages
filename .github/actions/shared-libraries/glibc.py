@@ -171,7 +171,7 @@ def package_libraries(kind):
         selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
         run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(selected_sdk),
              *selection, '--debuginfo', *revision_flags()], env=environment)
-    if list((ROOT / 'dist' / kind).glob('*.' + kind)):
+    if kind in FORMATS and list((ROOT / 'dist' / kind).glob('*.' + kind)):
         run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', selected_sdk,
              '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', directory / 'payload-archive-receipt.json'])
     run(['php', 'bin/build-payload', 'manifest', '--root', selected_sdk, '--type', kind,
@@ -318,6 +318,13 @@ def test_libraries():
     candidates.mkdir(exist_ok=True)
     for source in [directory / 'test-dependencies' / kind, ROOT / 'dist' / kind]:
         for archive in source.glob('*.' + kind):
+            shutil.copy2(archive, candidates / archive.name)
+    if not list(candidates.glob('php-zts-runtime-layout*.' + kind)):
+        layout = read(directory / 'baseline/shared-libraries.json').get('runtime_layout', {})
+        if layout.get('archive'):
+            archive = (directory / 'baseline' / layout['archive']).resolve()
+            if directory.resolve() not in archive.parents or hashlib.sha256(archive.read_bytes()).hexdigest() != layout.get('archive_sha256'):
+                raise RuntimeError('Captured runtime layout archive changed')
             shutil.copy2(archive, candidates / archive.name)
     runtime = {'rpm': 'alma8', 'deb': 'debian', 'apk': 'alpine'}[kind]
     run(['python3', 'tests/shared-runtime-containers.py', '--os', runtime, '--php', os.environ['PHPV'],

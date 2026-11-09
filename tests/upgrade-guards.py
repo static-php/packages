@@ -33,12 +33,15 @@ class UpgradeGuards(unittest.TestCase):
             upload.assert_not_called()
 
     def test_forgejo_pagination(self):
-        responses = [Mock(json=lambda: [{'name': 'x', 'version': '1'}]), Mock(json=lambda: [{'name': 'x', 'version': '2'}]), Mock(json=lambda: [])]
-        with patch.object(requests, 'get', side_effect=responses) as get:
-            result = forgejo['get_remote_packages']('https://example.com', '86', 'test', 'debian')
-            self.assertEqual(len(result), 2)
-            self.assertEqual([call[1]['params']['page'] for call in get.call_args_list], [1, 2, 3])
-            self.assertTrue(all(call[1]['auth'] == ('86', 'test') for call in get.call_args_list))
+        for query in [None, 'php-zts-lib-']:
+            with self.subTest(query=query):
+                responses = [Mock(json=lambda: [{'name': 'x', 'version': '1'}]), Mock(json=lambda: [{'name': 'x', 'version': '2'}]), Mock(json=lambda: [])]
+                with patch.object(requests, 'get', side_effect=responses) as get:
+                    result = forgejo['get_remote_packages']('https://example.com', '86', 'test', 'debian', query)
+                    self.assertEqual(len(result), 2)
+                    self.assertEqual([call[1]['params']['page'] for call in get.call_args_list], [1, 2, 3])
+                    self.assertTrue(all(call[1]['auth'] == ('86', 'test') for call in get.call_args_list))
+                    self.assertTrue(all(call[1]['params'].get('q') == query for call in get.call_args_list))
 
     def test_public_forgejo_reads_omit_empty_credentials(self):
         for password in ('', None):

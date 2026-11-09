@@ -436,7 +436,7 @@ def extension_inventory(data, sapi, reference=None, builtins=(), disabled=()):
 
 
 def required_payloads(php, names, kind=None):
-    consumers = {name for name in names if not name.startswith('php-zts-lib-') and not name.endswith('-debuginfo')}
+    consumers = {name for name in names if name != 'php-zts-runtime-layout' and not name.startswith('php-zts-lib-') and not name.endswith('-debuginfo')}
     requirements = {
         'php-zts-cli': '/usr/bin/php-zts', 'php-zts-cgi': '/usr/bin/php-cgi-zts',
         'php-zts-fpm': '/usr/sbin/php-fpm-zts', 'frankenphp': '/usr/bin/frankenphp',
