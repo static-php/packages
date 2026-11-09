@@ -512,13 +512,17 @@ void php_embed_shutdown(void) {
             artifact.write_bytes(harness['tar_gz']({'.SIGN.RSA.fixture.rsa.pub': b'fixture signature'}) + artifact.read_bytes())
             original = artifact.read_bytes()
             commands = []
-            with patch.dict(scope, {'run': lambda command, **kwargs: commands.append(command)}):
+            def native(command, **kwargs):
+                commands.append(command)
+                return SimpleNamespace(stdout='aarch64\n')
+            with patch.dict(scope, {'run': native}):
                 harness['index_repo']('apk', repo)
-            indexed = repo / 'x86_64' / canonical.name
+            indexed = repo / 'aarch64' / canonical.name
             self.assertEqual(indexed.read_bytes(), original)
             self.assertEqual(artifact.read_bytes(), original)
-            self.assertFalse((repo / 'x86_64' / artifact.name).exists())
-            self.assertEqual(commands, [['apk', 'index', '--allow-untrusted', '-o', repo / 'x86_64/APKINDEX.tar.gz', indexed]])
+            self.assertFalse((repo / 'aarch64' / artifact.name).exists())
+            self.assertFalse((repo / 'x86_64').exists())
+            self.assertEqual(commands, [['apk', '--print-arch'], ['apk', 'index', '--allow-untrusted', '-o', repo / 'aarch64/APKINDEX.tar.gz', indexed]])
             self.assertEqual(harness['metadata']('apk', indexed), 'php-zts-lib-fixture')
 
     @unittest.skipUnless(shutil.which('apk'), 'Native Alpine tools required')

@@ -149,7 +149,10 @@ def index_repo(kind, directory):
         (directory / 'Packages').write_text(content)
         (directory / 'Packages.gz').write_bytes(gzip.compress(content.encode()))
     elif kind == 'apk':
-        arch = directory / 'x86_64'
+        architecture = run(['apk', '--print-arch']).stdout.strip()
+        if architecture not in ('x86_64', 'aarch64'):
+            raise RuntimeError('Unsupported native APK architecture: ' + architecture)
+        arch = directory / architecture
         arch.mkdir(exist_ok=True)
         packages = {}
         for package in sorted(directory.glob('*.apk')):
