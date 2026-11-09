@@ -5,6 +5,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -280,7 +281,7 @@ def select(root, version):
     if entry is None:
         entry = bootstrap(root, version)
     source = verified_record(downloads, version, entry)
-    records = extension_records(downloads, load_index(downloads), version_stream(version))
+    records = {} if os.environ.get('SPP_LIBRARY_SOURCES_ONLY') == 'true' else extension_records(downloads, load_index(downloads), version_stream(version))
     path = downloads / CACHE
     cache = read(path, {})
     wrapper = dict(cache.get('php-src', {}))

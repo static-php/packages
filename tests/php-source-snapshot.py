@@ -3,10 +3,12 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import subprocess
 import sys
 
@@ -269,6 +271,20 @@ namespace {
         (self.downloads / 'ext-apcu/README').write_text('Unrecorded change\n')
         with self.assertRaisesRegex(RuntimeError, 'Git tree changed'):
             source.select(self.root, '8.6.0RC4')
+
+    def test_library_selection_requires_php_bytes_but_not_unused_extensions(self):
+        archive = self.record('8.4.27')
+        source.capture(self.root, '8.4.27')
+        extension = self.stable_extension()
+        source.capture_extensions(self.root, 'stable')
+        (self.downloads / extension['filename']).unlink()
+        with self.assertRaises(RuntimeError):
+            source.select(self.root, '8.4.27')
+        with patch.dict(os.environ, {'SPP_LIBRARY_SOURCES_ONLY': 'true'}):
+            self.assertEqual(source.select(self.root, '8.4.27')['source']['version'], '8.4.27')
+            archive.write_bytes(archive.read_bytes() + b'changed')
+            with self.assertRaisesRegex(RuntimeError, 'SHA1 differs'):
+                source.select(self.root, '8.4.27')
 
     def test_custom_capture_rejects_wrong_recipe(self):
         self.custom_extension()

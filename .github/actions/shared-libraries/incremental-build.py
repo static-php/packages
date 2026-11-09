@@ -351,7 +351,8 @@ def execute(root, buildroot, plan, package_type, command=None):
             command.append("--libraries=" + ",".join(selected))
     try:
         if ran:
-            subprocess.run(['python3', str(Path(__file__).with_name('source-snapshot.py')), 'materialize', '--root', str(root)], check=True)
+            if plan['full']:
+                subprocess.run(['python3', str(Path(__file__).with_name('source-snapshot.py')), 'materialize', '--root', str(root)], check=True)
             spec = importlib.util.spec_from_file_location("pinned_library_source", Path(__file__).with_name("pinned-source.py"))
             pinned = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(pinned)
@@ -361,7 +362,7 @@ def execute(root, buildroot, plan, package_type, command=None):
             artifacts &= plan["effective_sources"].keys()
             pinned.ensure_sources(root, plan["effective_sources"], sorted(artifacts))
             write(cache_path, plan["effective_sources"])
-            subprocess.run(command, cwd=root, check=True)
+            subprocess.run(command, cwd=root, check=True, env={**os.environ, 'SPP_LIBRARY_SOURCES_ONLY': 'true'})
             observed = read(cache_path)
             for name in force:
                 artifact = graph[name].get("artifact")
