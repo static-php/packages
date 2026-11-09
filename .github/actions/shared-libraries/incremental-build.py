@@ -279,11 +279,15 @@ def invalid_libraries(root, manifest):
     return invalid
 
 
-def retire_owned_symlinks(root, selected):
-    ownership = read(root / '.shared-library-ownership.json', {}).get('libraries', {})
-    links = []
+def order_owned_outputs(root, selected):
+    root = root.resolve()
+    metadata = read(root / '.shared-library-ownership.json', {})
+    ownership = metadata.get('libraries', {})
+    ordered = {}
     for name in selected:
-        for relative in ownership.get(name, {}).get('files', []):
+        files = ownership.get(name, {}).get('files', [])
+        paths, targets = {}, {}
+        for relative in files:
             if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '..' in Path(relative).parts or '\\' in relative:
                 raise RuntimeError('Invalid SDK ownership path: ' + repr(relative))
             path = root / relative
@@ -294,10 +298,32 @@ def retire_owned_symlinks(root, selected):
             if path.is_symlink():
                 if any(other != name and relative in record.get('files', []) for other, record in ownership.items()):
                     raise RuntimeError('Conflicting SDK ownership: ' + relative)
-                links.append(path)
-    # Retiring a DSO must not leave its owned aliases dangling during SPC cleanup.
-    for path in links:
-        path.unlink()
+                target = Path(os.path.normpath(os.path.join(str(path.parent.resolve()), os.readlink(path))))
+                try:
+                    target.parent.resolve().relative_to(root)
+                except (OSError, ValueError):
+                    raise RuntimeError('Escaping SDK symlink target: ' + relative) from None
+                targets[relative] = target.parent.resolve() / target.name
+            paths[path.parent.resolve() / path.name] = relative
+        depths, visiting = {}, set()
+        def depth(relative):
+            if relative in visiting:
+                raise RuntimeError('Cyclic SDK ownership links: ' + relative)
+            if relative not in depths:
+                visiting.add(relative)
+                target = paths.get(targets.get(relative))
+                depths[relative] = 1 + depth(target) if target is not None else int(relative in targets)
+                visiting.remove(relative)
+            return depths[relative]
+        # SPC retires files in this order; aliases must precede their targets.
+        ordered[name] = sorted(files, key=lambda relative: -depth(relative))
+    changed = False
+    for name, files in ordered.items():
+        if files != ownership.get(name, {}).get('files', []):
+            ownership[name]['files'] = files
+            changed = True
+    if changed:
+        write(root / '.shared-library-ownership.json', metadata)
 
 
 def record_state(plan, manifest):
@@ -384,7 +410,7 @@ def execute(root, buildroot, plan, package_type, command=None):
             pinned.ensure_sources(root, plan["effective_sources"], sorted(artifacts))
             write(cache_path, plan["effective_sources"])
             if not plan['full']:
-                retire_owned_symlinks(buildroot, selected)
+                order_owned_outputs(buildroot, selected)
             subprocess.run(command, cwd=root, check=True, env={**os.environ, 'SPP_LIBRARY_SOURCES_ONLY': 'true'})
             observed = read(cache_path)
             for name in force:

@@ -36,7 +36,7 @@ $autoload = $argv[1] . '/vendor/autoload.php';
 require is_file($autoload) ? $autoload : dirname($argv[1], 2) . '/autoload.php';
 require $argv[1] . '/src/bootstrap.php';
 logger()->setLevel('error');
-$names = ['base', 'consumer', 'other'];
+$names = ['base', 'consumer', 'peer', 'other'];
 $configs = $artifacts = $packages = [];
 foreach ($names as $short) {
     $name = 'transition-' . $short;
@@ -50,8 +50,9 @@ foreach ($names as $short) {
         $cache = json_decode(file_get_contents(DOWNLOAD_PATH . '/.cache.json'), true, 512, JSON_THROW_ON_ERROR);
         $version = $short === 'base' ? $cache[$name]['source']['version'] : '1';
         $soname = 'libtransition-' . $short . '-' . $version . '.so.1';
+        $realname = $soname . '.0';
         $command = [getenv('CC'), '-shared', '-fPIC', '-g', '-gdwarf-4', '-Wl,-soname,' . $soname,
-            '-o', BUILD_LIB_PATH . '/' . $soname, WORKING_DIR . '/native-sources/' . $name . '/fixture.c'];
+            '-o', BUILD_LIB_PATH . '/' . $realname, WORKING_DIR . '/native-sources/' . $name . '/fixture.c'];
         if ($short === 'consumer') {
             $command[] = '-L' . BUILD_LIB_PATH;
             $command[] = '-ltransition-base';
@@ -63,7 +64,14 @@ foreach ($names as $short) {
         if (proc_close($process) !== 0) {
             throw new RuntimeException('Native fixture compile failed: ' . $output);
         }
+        symlink($realname, BUILD_LIB_PATH . '/' . $soname);
         symlink($soname, BUILD_LIB_PATH . '/libtransition-' . $short . '.so');
+        // libtool refreshes neighboring SONAME links during installation.
+        foreach (glob(BUILD_LIB_PATH . '/libtransition-*.so.1.0') as $dso) {
+            $link = substr($dso, 0, -2);
+            @unlink($link);
+            symlink(basename($dso), $link);
+        }
         file_put_contents(WORKING_DIR . '/compiled.jsonl', json_encode($short) . "\n", FILE_APPEND);
     });
     $packages[$name] = $package;
@@ -101,6 +109,7 @@ class InstallerTransitionTests(unittest.TestCase):
             cache = {}
             bodies = {'base': 'int transition_base(void) { return 1; }',
                       'consumer': 'extern int transition_base(void); int transition_consumer(void) { return transition_base(); }',
+                      'peer': 'int transition_peer(void) { return 55; }',
                       'other': 'int transition_other(void) { return 77; }'}
             for short, body in bodies.items():
                 directory = root / 'native-sources' / ('transition-' + short)
@@ -115,7 +124,7 @@ class InstallerTransitionTests(unittest.TestCase):
 
             def run(action, selected, success=True):
                 if action == 'build':
-                    incremental.retire_owned_symlinks(root / 'buildroot', ['transition-' + name for name in selected.split(',')])
+                    incremental.order_owned_outputs(root / 'buildroot', ['transition-' + name for name in selected.split(',')])
                 environment = dict(os.environ, SPC_LIBC='musl' if Path('/etc/alpine-release').is_file() else 'glibc', SPC_TARGET='', SPC_TOOLCHAIN='StaticPHP\\Toolchain\\GccNativeToolchain',
                                    SPC_SKIP_TOOLCHAIN_CHECK='yes', SPC_ENABLE_LOG_FILE='0',
                                    CC='/usr/bin/gcc' if Path('/usr/bin/gcc').is_file() else shutil.which('cc'),
@@ -140,9 +149,9 @@ class InstallerTransitionTests(unittest.TestCase):
                 return [json.loads(line) for line in (root / 'compiled.jsonl').read_text().splitlines()]
 
             save_cache()
-            initial = run('build', 'base,consumer,other')
+            initial = run('build', 'base,consumer,peer,other')
             self.assertNotIn('pending_rebuilds', initial)
-            self.assertEqual(compiled(), ['base', 'consumer', 'other'])
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other'])
             consumer = signature('lib/libtransition-consumer-1.so.1')
             other = signature('lib/libtransition-other-1.so.1')
             source = root / 'native-sources/transition-base/fixture.c'
@@ -151,25 +160,25 @@ class InstallerTransitionTests(unittest.TestCase):
             save_cache()
 
             transition = run('build', 'base')
-            self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base'])
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base'])
             self.assertFalse((root / 'buildroot/lib/libtransition-base-1.so.1').exists())
             self.assertEqual(transition['pending_rebuilds'], {'transition-consumer': {'libtransition-base-1.so.1': 'transition-base'}})
             self.assertEqual(signature('lib/libtransition-consumer-1.so.1'), consumer)
             self.assertEqual(signature('lib/libtransition-other-1.so.1'), other)
             rejection = run('reuse', 'consumer', success=False)
             self.assertRegex(rejection, r'(?:incomplete|pending|LIBRARY_REUSE|invalid)')
-            self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base'])
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base'])
 
-            final = run('build', 'consumer')
+            final = run('build', 'consumer,peer')
             self.assertNotIn('pending_rebuilds', final)
-            self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base', 'consumer'])
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base', 'consumer', 'peer'])
             self.assertEqual(signature('lib/libtransition-other-1.so.1'), other)
             self.assertEqual(final['libraries']['transition-consumer']['depends'], ['transition-base'])
-            consumer_elf = final['libraries']['transition-consumer']['elf']['lib/libtransition-consumer-1.so.1']
+            consumer_elf = final['libraries']['transition-consumer']['elf']['lib/libtransition-consumer-1.so.1.0']
             self.assertIn('libtransition-base-2.so.1', consumer_elf['needed'])
             self.assertNotIn('libtransition-base-1.so.1', consumer_elf['needed'])
             run('reuse', 'consumer')
-            self.assertEqual(compiled(), ['base', 'consumer', 'other', 'base', 'consumer'])
+            self.assertEqual(compiled(), ['base', 'consumer', 'peer', 'other', 'base', 'consumer', 'peer'])
             (root / 'check.c').write_text('extern int transition_consumer(void); int main(void) { return transition_consumer() == 2 ? 0 : 1; }')
             compiler = '/usr/bin/gcc' if Path('/usr/bin/gcc').is_file() else shutil.which('cc')
             subprocess.run([compiler, str(root / 'check.c'), '-L' + str(root / 'buildroot/lib'),
