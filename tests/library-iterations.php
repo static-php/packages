@@ -14,7 +14,7 @@ foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
         foreach (['82', '83', '84', '85', '86'] as $owner) {
             $ownerRevision = $owner === '85' ? $revision + 4 : $revision;
             $suffix = $type === 'deb' ? '-' . $ownerRevision : '-r' . $ownerRevision;
-            foreach (['php-zts-lib-', 'php-zts-runtime-layout'] as $query) {
+            foreach (['php-zts-lib-openssl', 'php-zts-runtime-layout'] as $query) {
                 $url = "https://{$host}.invalid/api/v1/packages/{$owner}?type={$registryType}&q={$query}&limit=1000&page=";
                 $pages[$url . '1'] = [200, json_encode([['name' => 'unrelated', 'version' => '1.0-999']])];
                 $pages[$url . '2'] = [200, json_encode(array_map(static fn (string $name): array => ['name' => $name, 'version' => '3.6.0' . $suffix], $names))];
