@@ -3,6 +3,7 @@
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -75,7 +76,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'No match'):
             harness['prepare'](SimpleNamespace(exec=broken), 'test', 'rpm')
 
-    def test_broken_old_index_does_not_block_complete_replacement_validation(self):
+    def test_broken_old_index_does_not_block_replacement_validation(self):
         old = [{'name': 'php-zts-cli', 'version': '8.3.36-r3'}]
         def broken_index(*args):
             raise RuntimeError('old CLI: v2 package format error')
@@ -83,8 +84,11 @@ class MigrationUpgradeHarness(unittest.TestCase):
             packages, failure = harness['index_baseline']('apk', '8.3', 'arm64', False)
             self.assertEqual(packages, old)
             self.assertIn('v2 package format error', failure)
-            with self.assertRaisesRegex(RuntimeError, 'v2 package format error'):
-                harness['index_baseline']('apk', '8.3', 'arm64', True)
+            self.assertEqual(harness['index_baseline']('apk', '8.3', 'arm64', True), (old, failure))
+        with patch.dict(scope, {'index_generation': broken_index, 'inspect_directory': broken_index}):
+            packages, failure = harness['index_baseline']('apk', '8.3', 'arm64', True)
+            self.assertEqual(packages, [])
+            self.assertIn('v2 package format error', failure)
 
     def test_legacy_apk_upgrade_requires_the_actual_candidate_transaction(self):
         before = {'php-zts-imagick': '3.8.1p85-r1'}
@@ -94,6 +98,19 @@ class MigrationUpgradeHarness(unittest.TestCase):
             harness['assert_upgrade'](before, before, candidate, list(before))
         reason = harness['failure_reason']('Command failed: apk version -t 3.8.1p85-r1 3.8.1.0_p85-r5')
         self.assertIn('3.8.1p85-r1 3.8.1.0_p85-r5', reason)
+
+    def test_partial_candidate_validation_does_not_require_a_parseable_old_apk_version(self):
+        old = [{'name': 'php-zts-imagick', 'version': '3.8.1p85-r1'}]
+        incoming = [{'name': 'php-zts-imagick', 'version': '3.8.1.0_p85-r5'}]
+        def compare(kind, before, after):
+            if before == '3.8.1p85-r1' or after == 'invalid-new-version':
+                raise RuntimeError('apk version rejected version')
+            return False
+        with patch.dict(scope, {'newer': compare}):
+            self.assertEqual(harness['validate_partial_candidates']('apk', old, incoming), ['php-zts-imagick'])
+            incoming[0]['version'] = 'invalid-new-version'
+            with self.assertRaisesRegex(RuntimeError, 'rejected version'):
+                harness['validate_partial_candidates']('apk', old, incoming)
 
     def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
         error = ('Command failed: apk add php-zts\n' + 'Installing a package\n' * 2000
@@ -106,7 +123,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             packages = {'php-zts-cli': '8.2.35-r2', 'php-zts-devel': '8.2.35-r2'}
-            (root / 'inventory.json').write_text(json.dumps({'incoming': [{'name': name, 'version': version} for name, version in packages.items()]}))
+            (root / 'inventory.json').write_text(json.dumps({'new': [{'name': name, 'version': version} for name, version in packages.items()]}))
             (root / 'selected.json').write_text(json.dumps(list(packages)))
             args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine', inside='replacement'))
             def mapped(path):
@@ -115,7 +132,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 packages['gcc'] = '14.2.0-r4'
                 return {'phpize': 'passed'}
             runtime = {'assert_elf': lambda *_: {}, 'sapi_checks': lambda *_: {}, 'development_checks': development}
-            with patch.dict(scope, {'Path': mapped, 'configure_client': lambda *_: None, 'run': lambda *_: None,
+            with patch.dict(scope, {'Path': mapped, 'configure_client': lambda *a, **k: None, 'run': lambda *_: None,
                                    'installed': lambda *_: dict(packages), 'ordinary_upgrade': lambda *_: None}), \
                     patch.object(scope['runpy'], 'run_path', return_value=runtime), patch('sys.stdout', new_callable=io.StringIO) as output:
                 harness['inside'](args)
@@ -129,15 +146,22 @@ class MigrationUpgradeHarness(unittest.TestCase):
     def test_broken_old_install_uses_clean_replacement_but_candidate_failures_still_block(self):
         for old_broken, candidate_broken, partial, tampered in [
                 (True, False, False, False), (True, True, False, False),
-                (False, True, False, False), (True, False, True, False), (True, False, False, True)]:
+                (False, True, False, False), (True, False, True, False), (True, False, 'library', False),
+                ('missing', False, True, False),
+                (True, True, True, False), (True, True, 'library', False), (True, False, False, True)]:
             with self.subTest(old=old_broken, candidate=candidate_broken, partial=partial, tampered=tampered), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine',
-                                                         profile='cli', partial_consumers=partial))
+                                                         profile='cli', partial_consumers=partial is True, library_only=partial == 'library'))
                 mirror = object.__new__(harness['PreparedMirror'])
                 mirror.args, mirror.scratch, mirror.client_image = args, root, 'clean-client'
                 mirror.baseline = {'origin': {}, 'packages': [{'name': 'php-zts-cli'}]}
-                mirror.inventory = {'old': mirror.baseline['packages'], 'incoming': mirror.baseline['packages']}
+                if partial == 'library':
+                    mirror.baseline['packages'].append({'name': 'php-zts-lib-zlib'})
+                incoming = list(mirror.baseline['packages'])
+                if old_broken == 'missing':
+                    mirror.baseline['packages'] = [{'name': 'php-zts-lib-zlib'}]
+                mirror.inventory = {'old': mirror.baseline['packages'], 'incoming': incoming}
                 mirror.report = {'ledger_sha256': 'test', 'profiles_started': 0}
                 generations, executions = [], []
                 mirror.select_generation = generations.append
@@ -168,17 +192,49 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 resources.start, resources.exec = start, execute
                 with patch.dict(scope, {'run': lambda *a, **k: SimpleNamespace(returncode=0, stderr='')}), patch('sys.stdout', new_callable=io.StringIO):
                     result = mirror.execute(args)
-                expected = old_broken and not candidate_broken and not partial and not tampered
+                expected = old_broken and not candidate_broken and not tampered
                 self.assertEqual(result['ok'], expected)
                 if expected:
-                    self.assertIn('old package dependency missing', result['baseline_failure'])
-                    old_client = next(client for client, phase in executions if phase == 'old')
+                    self.assertIn('baseline packages missing' if old_broken == 'missing' else 'old package dependency missing', result['baseline_failure'])
                     new_client = next(client for client, phase in executions if phase == 'replacement')
-                    self.assertNotEqual(old_client, new_client)
-                if not old_broken or partial or tampered:
+                    if old_broken == 'missing':
+                        self.assertFalse(any(phase == 'old' for _, phase in executions))
+                    else:
+                        old_client = next(client for client, phase in executions if phase == 'old')
+                        self.assertNotEqual(old_client, new_client)
+                if not old_broken or tampered:
                     self.assertFalse(any(phase == 'replacement' for _, phase in executions))
                 if tampered:
                     self.assertTrue(result['prepared_inputs_invalid'])
+
+    def test_partial_replacement_checks_the_complete_installed_dependency_closure(self):
+        for libraries_only in (False, True):
+            with self.subTest(libraries=libraries_only), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                versions = {'php-zts-lib-zlib': '1.3.2-r2', 'php-zts-runtime-layout': '1-r0'}
+                if not libraries_only:
+                    versions.update({'php-zts-cli': '8.2.35-r2', 'php-zts-curl': '8.2.35-r2'})
+                incoming = [{'name': 'php-zts-lib-zlib', 'version': '1.3.2-r2'}]
+                (root / 'inventory.json').write_text(json.dumps({'incoming': incoming,
+                    'new': [{'name': name, 'version': version} for name, version in versions.items()]}))
+                (root / 'selected.json').write_text(json.dumps(['php-zts-lib-zlib'] if libraries_only else ['php-zts-cli', 'php-zts-curl']))
+                args = harness['options'](SimpleNamespace(type='apk', php='8.2', arch='arm64', runtime='alpine',
+                    inside='replacement', library_only=libraries_only, partial_consumers=not libraries_only))
+                def mapped(path):
+                    return root / Path(path).name if str(path).startswith('/spp/') else Path(path)
+                checked = []
+                runtime = {'assert_elf': lambda kind, names: checked.extend(names) or {},
+                           'sapi_checks': lambda *_: {}, 'development_checks': lambda *_: {}}
+                installed = dict(versions)
+                with patch.dict(scope, {'Path': mapped, 'configure_client': lambda *a, **k: None,
+                        'run': lambda *_: None, 'installed': lambda *_: dict(installed), 'ordinary_upgrade': lambda *_: None}), \
+                        patch.object(scope['runpy'], 'run_path', return_value=runtime), patch('sys.stdout', new_callable=io.StringIO) as output:
+                    harness['inside'](args)
+                    self.assertTrue(json.loads(output.getvalue().split('SPP_MIGRATION_RESULT=')[-1])['ok'])
+                    self.assertEqual(set(checked), set(versions))
+                    installed['php-zts-lib-zlib'] = '1.3.2-r1'
+                    with self.assertRaisesRegex(RuntimeError, 'candidate version: php-zts-lib-zlib'):
+                        harness['inside'](args)
 
     def test_auto_runs_only_the_frozen_affected_profiles(self):
         baseline = {'selection': {'mode': 'affected', 'complete': False},
@@ -208,8 +264,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         common, instrumentation = profiles['profiles']
         self.assertEqual(common['packages'], ['frankenphp', 'php-zts-cli', 'php-zts-fpm'])
         self.assertEqual(instrumentation['packages'], ['frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-xdebug'])
-        with self.assertRaisesRegex(RuntimeError, 'complete'):
-            harness['all_profiles'](baseline)
+        self.assertTrue(harness['all_profiles'](baseline)['candidate_profiles'])
         with self.assertRaisesRegex(RuntimeError, 'changed packages'):
             harness['affected_profiles']({'packages': baseline['packages']})
 
@@ -287,9 +342,27 @@ class MigrationUpgradeHarness(unittest.TestCase):
                        'disabled_extension': 'imagick'}, plan['profiles'])
         self.assertNotIn('independent-php-zts-imagick', [p['id'] for p in plan['profiles']])
 
-    def test_representative_baseline_cannot_claim_full_profile_coverage(self):
-        with self.assertRaisesRegex(RuntimeError, 'representative subset'):
-            harness['all_profiles']({'packages': [{'name': 'php-zts-cli'}]})
+    def test_representative_baseline_uses_candidate_profile_coverage(self):
+        self.assertTrue(harness['all_profiles']({'packages': [{'name': 'php-zts-cli'}]})['candidate_profiles'])
+
+    def test_missing_old_profiles_use_the_new_native_inventory(self):
+        for library_only in (False, True):
+            with self.subTest(libraries=library_only):
+                names = ['php-zts-lib-zlib'] if library_only else ['php-zts-cli', 'php-zts-curl', 'php-zts-fpm', 'php-zts-xdebug']
+                packages = [{'name': name} for name in names]
+                class Shared(PreparedStub):
+                    inventory = {'incoming': packages, 'new': packages}
+                calls = []
+                def check(args, prepared=None):
+                    calls.append(args.profile.split(','))
+                    return {'ok': True, 'applicable': True}
+                args = SimpleNamespace(tls=False, services=False, library_only=library_only, partial_consumers=False)
+                baseline = {'packages': [], 'selection': {'mode': 'affected'}}
+                with patch.dict(scope, {'PreparedMirror': Shared, 'cell': check}), patch('sys.stdout', new_callable=io.StringIO):
+                    result = harness['suite'](args, baseline, {'profiles': [], 'candidate_profiles': True})
+                self.assertTrue(result['ok'])
+                self.assertEqual({name for selected in calls for name in selected}, set(names))
+                self.assertEqual(len(calls), 1 if library_only else 2)
 
     def test_candidate_only_extensions_get_fresh_install_profiles_without_fake_old_packages(self):
         baseline = {'packages': [{'name': 'php-zts-cli'}, {'name': 'php-zts-imagick'}]}
@@ -677,7 +750,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
             isolated = mirror / 'isolated.rpm'
             isolated.write_bytes(original.read_bytes())
             shared = mirror / 'hardlink.rpm'
-            shared.hardlink_to(original)
+            os.link(original, shared)
             symlink = mirror / 'symlink.rpm'
             symlink.symlink_to(isolated)
             calls = []

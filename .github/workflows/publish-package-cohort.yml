@@ -43,7 +43,7 @@ permissions:
     actions: read
 
 concurrency:
-    group: shared-publish-${{ inputs.format }}-${{ inputs.target }}
+    group: shared-publish-${{ inputs.format }}-${{ inputs.target }}${{ inputs.mirror && '-mirror' || '' }}
     cancel-in-progress: false
     queue: max
 

@@ -52,6 +52,7 @@ jobs:
                         for format in ${FORMATS//,/ }; do php tests/package-versions.php --type="$format"; done
                         python3 tests/payload-profile.py
                         python3 tests/upgrade-guards.py
+                        python3 tests/migration-upgrade-harness.py
                         python3 tests/forgejo-publication.py
                         python3 tests/abi-dump-cache.py
                         python3 tests/shared-library-plan.py

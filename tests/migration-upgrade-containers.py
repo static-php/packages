@@ -141,8 +141,8 @@ def load_baseline(root, kind, stream, arch):
     packages = record.get('packages', [])
     if isinstance(packages, dict):
         packages = [dict(value, name=name) for name, value in packages.items()]
-    if not packages:
-        raise RuntimeError('Frozen baseline contains no packages')
+    if not isinstance(packages, list):
+        raise RuntimeError('Frozen baseline package inventory must be a list')
     checked = []
     for item in packages:
         path = (root / item['path']).resolve()
@@ -206,7 +206,7 @@ def library_old_profile(baseline, incoming_changes, requested, expand_consumers=
 def all_profiles(baseline):
     selection = baseline.get('selection', {})
     if selection.get('profile') != 'all' or selection.get('complete') is not True:
-        raise RuntimeError('--profile all requires a complete --profile all frozen baseline, not a representative subset')
+        return {'profiles': [], 'candidate_profiles': True}
     return package_profiles(baseline)
 
 
@@ -225,7 +225,7 @@ def package_profiles(baseline):
                     if managed(p['name']) and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))})
     if 'php-zts-cli' not in names:
-        raise RuntimeError('Baseline has no CLI package')
+        return {'profiles': [], 'candidate_profiles': True}
     # Keep VM instrumentation profiles independent while testing ordinary modules together.
     isolated = {'php-zts-xdebug', 'php-zts-pcov', 'php-zts-spx', 'php-zts-xhprof'} & set(names)
     profiles = [{'id': 'common', 'packages': [name for name in names if name not in isolated]}]
@@ -486,10 +486,11 @@ def index_baseline(kind, stream, arch, partial):
     try:
         return index_generation(kind, 'old', stream, arch), None
     except RuntimeError as error:
-        if partial:
-            raise
-        # A malformed published archive must not prevent validating its replacement.
-        return inspect_directory(kind, Path('/spp/repository/generations/old')), str(error)
+        try:
+            packages = inspect_directory(kind, Path('/spp/repository/generations/old'))
+        except RuntimeError:
+            packages = []
+        return packages, str(error)
 
 
 def copy_historical(old, new):
@@ -672,10 +673,17 @@ def validate_partial_candidates(kind, old, incoming):
         elif package['version'] == previous['version']:
             if sha256(package['path']) != sha256(previous['path']):
                 raise RuntimeError('Equal-version partial candidate differs from the frozen archive: ' + package['name'])
-        elif newer(kind, previous['version'], package['version']):
-            changed.append(package['name'])
         else:
-            raise RuntimeError('Partial candidate is lower than the frozen version: ' + package['name'])
+            try:
+                increased = newer(kind, previous['version'], package['version'])
+            except RuntimeError:
+                if kind != 'apk':
+                    raise
+                newer(kind, package['version'], package['version'])
+                increased = True
+            if not increased:
+                raise RuntimeError('Partial candidate is lower than the frozen version: ' + package['name'])
+            changed.append(package['name'])
     return sorted(changed)
 
 
@@ -729,7 +737,10 @@ def inside(args):
         partial = args.library_only or args.partial_consumers
         incoming_changes = [p['name'] for p in incoming]
         if partial:
-            frozen = inspect_directory(kind, Path('/spp/repository/generations/old'))
+            try:
+                frozen = inspect_directory(kind, Path('/spp/repository/generations/old'))
+            except RuntimeError:
+                frozen = []
             if args.library_only:
                 validate_library_only_candidates(incoming)
             incoming_changes = validate_partial_candidates(kind, frozen, incoming)
@@ -768,11 +779,12 @@ def inside(args):
         return
     if args.inside == 'replacement':
         inventory = json.loads(Path('/spp/inventory.json').read_text())
-        candidate = {p['name']: p for p in inventory['incoming']}
+        candidate = {p['name']: p for p in inventory['new']}
         names = json.loads(Path('/spp/selected.json').read_text())
-        if args.library_only or args.partial_consumers or not names or set(names) - set(candidate):
-            raise RuntimeError('Broken-baseline recovery requires a complete replacement for the selected profile')
-        configure_client(kind, args.php, args.arch, args.runtime)
+        if not names or set(names) - set(candidate):
+            raise RuntimeError('Replacement repository does not contain the selected packages')
+        libraries_only = args.library_only and all(name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout' for name in names)
+        configure_client(kind, args.php, args.arch, args.runtime, modules=not libraries_only)
         command = {'rpm': ['dnf', 'install', '-y'], 'deb': ['apt-get', 'install', '-y'], 'apk': ['apk', 'add']}[kind]
         run(command + names)
         after = installed(kind)
@@ -782,7 +794,8 @@ def inside(args):
         runtime = runpy.run_path('/spp/shared-runtime-containers.py')
         managed_names = sorted(name for name in after if managed(name))
         elf = runtime['assert_elf'](kind, managed_names)
-        smokes = runtime['sapi_checks'](args.php, managed_names, kind)
+        has_php = any(not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout' for name in managed_names)
+        smokes = runtime['sapi_checks'](args.php, managed_names, kind) if has_php else {}
         development = runtime['development_checks'](kind, managed_names)
         before_upgrade = installed(kind)
         ordinary_upgrade(kind)
@@ -1180,12 +1193,13 @@ class PreparedMirror:
         resources.exec(helper, ['chmod', '0644', '/spp/public-key/' + keyname])
         native_inventory = json.loads((scratch / 'inventory.json').read_text())
         for package in native_inventory['old']:
-            frozen = old_by_name[package['name']]
+            frozen = old_by_name.get(package['name'])
             native_version = package['version']
-            if args.type == 'rpm' and ':' not in frozen['version']:
+            if frozen is not None and args.type == 'rpm' and ':' not in frozen['version']:
                 native_version = native_version.split(':', 1)[-1]
-            if native_version != frozen['version']:
-                raise RuntimeError('Frozen archive header differs from recorded published version: ' + package['name'])
+            if frozen is None or native_version != frozen['version']:
+                native_inventory['baseline_index_failure'] = 'Frozen archive header differs from recorded published version: ' + package['name']
+        (scratch / 'inventory.json').write_text(json.dumps(native_inventory))
         (repository / 'keys').symlink_to('../keys', target_is_directory=True)
         run(['docker', 'exec', '-d', '-w', '/spp/repository', helper, 'python3', '-m', 'http.server', '8080'])
         self.inventory = native_inventory
@@ -1279,11 +1293,14 @@ class PreparedMirror:
             if args.fresh_package and args.fresh_package not in allowed:
                 raise RuntimeError('Fresh profile does not name a candidate-only optional package')
             missing = set(names) - {p['name'] for p in baseline['packages']} if not args.fresh_package else set()
-            if missing:
-                raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
             if args.library_only:
-                expanded = library_old_profile(baseline, [package['name'] for package in self.inventory['incoming']], names,
-                    expand_consumers=baseline.get('selection', {}).get('mode') != 'affected')
+                libraries = [package['name'] for package in self.inventory['incoming'] if package['name'].startswith('php-zts-lib-')
+                             and not package['name'].endswith('-debuginfo')]
+                try:
+                    expanded = library_old_profile(baseline, libraries, names,
+                        expand_consumers=baseline.get('selection', {}).get('mode') != 'affected')
+                except RuntimeError:
+                    expanded = sorted(set(names) | set(libraries))
                 result['library_profile_expansion'] = sorted(set(expanded) - set(names))
                 names = expanded
                 result['profile'] = names
@@ -1304,12 +1321,12 @@ class PreparedMirror:
                 return result
             try:
                 phase = 'published baseline installation/load'
+                if missing:
+                    raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
                 if self.inventory.get('baseline_index_failure'):
                     raise RuntimeError(self.inventory['baseline_index_failure'])
                 resources.exec(client, common + ['--inside', 'old'])
             except RuntimeError as error:
-                if args.library_only or args.partial_consumers:
-                    raise
                 self.assert_bound(args)
                 result['baseline_failure'] = str(error)
                 annotation('warning', 'Published baseline unavailable; trying a fresh replacement. ' + failure_reason(error))
@@ -1403,7 +1420,14 @@ def suite(args, baseline, profiles):
     result = dict(profiles, schema=1, ok=False, cells=results)
     try:
         mirror.prepare()
-        fresh = candidate_only_profiles(baseline, getattr(mirror, 'inventory', {})) if not args.library_only else []
+        candidate_profiles = profiles.get('candidate_profiles', False)
+        if candidate_profiles:
+            replacement = dict(baseline, packages=mirror.inventory['new'])
+            profiles = affected_profiles(replacement) if args.library_only else package_profiles(replacement)
+            if profiles.get('candidate_profiles'):
+                raise RuntimeError('Replacement repository has no CLI package')
+            result.update(profiles)
+        fresh = candidate_only_profiles(baseline, getattr(mirror, 'inventory', {})) if not args.library_only and not candidate_profiles else []
         execution_profiles = list(profiles['profiles']) + fresh
         result['profiles'] = execution_profiles
         result['fresh_install_packages'] = [p['fresh_package'] for p in fresh]
