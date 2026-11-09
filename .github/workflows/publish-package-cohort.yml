@@ -128,6 +128,13 @@ jobs:
                     RPM_SIGNING_KEY: ${{ secrets.DEB_GPG_PRIVATE_KEY }}
                     RPM_SIGNING_PASSWORD: ${{ secrets.DEB_GPG_PASSWORD }}
                 run: python3 .github/actions/shared-libraries/publication.py publish-available
+            -   name: Upload publication diagnostics
+                if: ${{ !cancelled() }}
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: publication-${{ inputs.format }}-${{ inputs.target }}
+                    path: log/publication-*.log
+                    retention-days: 7
 
     publish-apk:
         name: Publish Alpine cohort

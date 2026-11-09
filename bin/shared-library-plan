@@ -1816,7 +1816,7 @@ def cohort(args):
     missing = set(plan.get('expected_members', [])) - members
     missing_streams = {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') and (not selected_streams or stream in selected_streams)} - streams
     missing_consumers = {stream: sorted(set(names) - consumer_members[stream]) for stream, names in plan.get('expected_consumers', {}).items()
-                         if (not selected_streams or stream in selected_streams) and set(names) - consumer_members[stream]}
+                         if not selected_streams and set(names) - consumer_members[stream]}
     if missing or missing_streams or missing_consumers:
         raise RuntimeError('Incomplete shared-library cohort; missing packages {}, full PHP streams {}, consumers {}'.format(', '.join(sorted(missing)), ', '.join(sorted(missing_streams)), json.dumps(missing_consumers, sort_keys=True)))
     if baseline_changed and not any(candidate_progress(current_baseline, previous, plan, candidate_versions, candidate_archives) for previous in plan.get('baseline_states', [])):

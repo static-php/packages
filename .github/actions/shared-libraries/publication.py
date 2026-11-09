@@ -129,8 +129,16 @@ def publish_available(source, kind, target):
         for scope in scopes:
             label = ','.join(scope) if scope else 'libraries'
             environment = dict(os.environ, PUBLICATION_PHP_STREAMS=','.join(scope or []), SIGNED_RPM_CACHE=signed)
+            log = Path('log') / f'publication-{kind}-{target}-php{label}.log'
+            log.parent.mkdir(exist_ok=True)
             def run(*arguments):
-                subprocess.run(list(arguments), check=True, env=environment)
+                print(f'{kind.upper()} {target} PHP {label}: {arguments[-1]}', flush=True)
+                try:
+                    with log.open('a') as output:
+                        subprocess.run(list(arguments), check=True, env=environment, stdout=output, stderr=subprocess.STDOUT)
+                except subprocess.CalledProcessError as error:
+                    detail = ' | '.join(log.read_text(errors='replace').splitlines()[-4:])[-800:]
+                    raise RuntimeError((detail or str(error)) + f' (details: {log})') from error
             try:
                 verify_upgrades(source, library, kind, scope)
                 destination = Path('dist') / kind

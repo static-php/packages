@@ -189,7 +189,7 @@ REMOTE
             python3 .github/actions/shared-libraries/workflow.py assemble --source cohort --destination "dist/$TYPE" --type "$TYPE" "${scope_args[@]}"
         fi
         if [[ "$command" == assemble ]]; then exit 0; fi
-        if [[ ! -f current-baseline/shared-libraries.json ]]; then
+        if [[ -z "${PUBLICATION_PHP_STREAMS:-}" && ! -f current-baseline/shared-libraries.json ]]; then
             python3 - <<'PY'
 import os, runpy
 from pathlib import Path
@@ -198,7 +198,9 @@ helper['baseline'](os.environ['TYPE'], Path('current-baseline'))
 PY
         fi
         baseline_args=()
-        [[ -f current-baseline/shared-libraries.json ]] && baseline_args+=(--baseline-manifest current-baseline/shared-libraries.json)
+        if [[ -z "${PUBLICATION_PHP_STREAMS:-}" && -f current-baseline/shared-libraries.json ]]; then
+            baseline_args+=(--baseline-manifest current-baseline/shared-libraries.json)
+        fi
         python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" "${scope_args[@]}" --output cohort-result.json
         if [[ "$TYPE" == rpm ]]; then
             python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --baseline-directory "${RPM_DIRECTORY%/el8}/el9" --baseline-directory "${RPM_DIRECTORY%/el8}/el10"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"

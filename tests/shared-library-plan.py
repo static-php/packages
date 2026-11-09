@@ -564,7 +564,7 @@ class SharedLibraryPlan(unittest.TestCase):
                 archive.addfile(member, io.BytesIO(metadata))
             plan = {'schema': 1, 'abi_break': True, 'baseline_fingerprint': 'original',
                     'php_requests': {'8.2': {'full': True}, '8.3': {'full': True}},
-                    'expected_consumers': {'8.2': ['php-zts-cli'], '8.3': ['php-zts-cli']}}
+                    'expected_consumers': {'8.2': ['php-zts-cli'], '8.3': ['php-zts-cli', 'php-zts-redis']}}
             (temporary / 'plan.json').write_text(json.dumps(plan))
             args = argparse.Namespace(plan=str(temporary / 'plan.json'), baseline_manifest=None,
                 artifacts=str(artifacts), type='apk', output=str(temporary / 'result.json'), php_streams='8.3')
