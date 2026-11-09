@@ -153,7 +153,7 @@ def publish_available(source, kind, target):
                 if kind != 'rpm':
                     try:
                         run('bash', '.github/actions/shared-libraries/run.sh', 'upload-2')
-                    except subprocess.CalledProcessError:
+                    except (RuntimeError, subprocess.CalledProcessError):
                         print(f'::warning::{kind} PHP {label}: primary published; secondary mirror failed', flush=True)
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 results.append((label, 'failed: ' + str(error)))
