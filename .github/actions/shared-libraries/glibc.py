@@ -294,6 +294,11 @@ def rebuild_library_consumers(roots, rebuilt, kind):
     return True
 
 
+def pending_library_roots(sdk):
+    return {provider for dependencies in read(sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values()
+            for provider in dependencies.values()}
+
+
 def classify():
     formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
     glibc = formats == FORMATS
@@ -306,6 +311,9 @@ def classify():
              '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
+    pending = pending_library_roots(sdk)
+    if pending:
+        rebuild_library_consumers(pending, rebuilt, formats[0])
     scope = None
     if os.environ.get('LIBRARIES'):
         graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
@@ -320,8 +328,7 @@ def classify():
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
     for phase in range(100):
-        pending = {provider for dependencies in read(sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values()
-                   for provider in dependencies.values()}
+        pending = pending_library_roots(sdk)
         if pending and rebuild_library_consumers(pending, rebuilt, formats[0]):
             shared = False
             variants_ready = not glibc

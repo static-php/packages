@@ -158,7 +158,7 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer'), ('rpm', 'breaking', False, False), ('apk', 'breaking', False, False), ('rpm', 'pending', False, False), ('apk', 'pending', False, False)]:
+        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer'), ('rpm', 'breaking', False, False), ('apk', 'breaking', False, False), ('rpm', 'pending', False, False), ('apk', 'pending', False, False), ('rpm', 'pending', False, True), ('apk', 'pending', False, True)]:
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
@@ -175,6 +175,8 @@ class Pipeline(unittest.TestCase):
                 formats = ('apk',) if kind == 'apk' else ('rpm', 'deb')
                 packaging = Barrier(len(formats))
                 def baseline(kind, destination, consumers=False, abi_libraries=(), libraries=None):
+                    if rebuilt == 'pending':
+                        self.assertNotIn('pending_rebuilds', glibc.read(sdk / 'shared-libraries.json'))
                     scans.append((kind, consumers, set(abi_libraries)))
                     scopes.append(libraries)
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
@@ -200,7 +202,7 @@ class Pipeline(unittest.TestCase):
                     elif args[:2] == ['php', 'bin/spp']:
                         kind = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--type='))
                         selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
-                        self.assertEqual(Path(selected), sdk if kind == 'apk' or manual else stage / ('sdk-' + kind))
+                        self.assertEqual(Path(selected), sdk if kind == 'apk' or manual and not rebuilt else stage / ('sdk-' + kind))
                         self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
                         archives = root / 'dist' / kind
                         archives.mkdir(parents=True, exist_ok=True)
@@ -218,9 +220,11 @@ class Pipeline(unittest.TestCase):
                 self.assertCountEqual(scans, expected_scans)
                 if manual == 'consumer':
                     self.assertEqual(scopes, [[] for _ in formats])
+                if manual is True:
+                    self.assertEqual([set(scope) for scope in scopes], [{'fixture', 'consumer'} if rebuilt else {'fixture'} for _ in formats])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
-                self.assertEqual(any('seal' in call for call in calls), not manual)
+                self.assertEqual(any('seal' in call for call in calls), not manual or bool(rebuilt))
                 prepares = [call for call in calls if 'prepare' in call]
                 self.assertEqual(len(prepares), len(formats) * (2 if rebuilt == 'breaking' else 1))
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('consumer,fixture' if rebuilt == 'pending' else 'fixture' if rebuilt else '') for call in prepares))
