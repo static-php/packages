@@ -178,6 +178,16 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual(get.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_server_failure_reports_registry_reason_without_dumping_response(self):
+        failed = response(status=500, payload={'message': 'database is locked\nretry later', 'stack': 'long internal traceback'})
+        failed.raise_for_status.side_effect = helper_globals['requests'].HTTPError('HTTP 500')
+        printed = io.StringIO()
+        with patch.object(helper_globals['requests'], 'get', side_effect=[failed, response(payload=[])]), \
+                patch.object(helper_globals['time'], 'sleep'), contextlib.redirect_stdout(printed):
+            helper['get_remote_packages']('https://example.com', '84', 'test', 'alpine')
+        self.assertIn('HTTP 500; registry: database is locked retry later', printed.getvalue())
+        self.assertNotIn('long internal traceback', printed.getvalue())
+
     def test_package_progress_is_flushed_before_each_upload(self):
         paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-lib-ssl')]
         printed = io.StringIO()
