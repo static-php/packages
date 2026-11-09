@@ -488,7 +488,6 @@ def payload():
         elif not restored:
             raise RuntimeError('No sealed PHP payload available for packaging')
         run(['php', 'bin/build-payload', 'refresh-assets', '--root', root, '--downloads', 'downloads'])
-        run(['php', 'bin/build-payload', 'seal', '--root', root])
         write(STAGE / 'payload-provenance.json', {'schema': 1, 'target': os.environ['TARGET'],
               'php_stream': stream, 'source_run_id': os.environ['SOURCE_RUN_ID'],
               'compiled_source_run_id': compiled_source, 'reused_payload': restored,

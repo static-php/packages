@@ -614,8 +614,8 @@ class WorkflowContractTests(unittest.TestCase):
         for workflow_name, data in self.workflows():
             artifact_names = []
             groups = [job.get('steps', []) for job in data['jobs'].values()]
-            if 'rpm' in workflow_name:
-                groups.append(yaml.safe_load((ROOT / '.github/actions/php-payload/action.yml').read_text())['runs']['steps'])
+            action = 'php-payload' if 'rpm' in workflow_name else 'apk-packages'
+            groups.append(yaml.safe_load((ROOT / '.github/actions' / action / 'action.yml').read_text())['runs']['steps'])
             for steps in groups:
                 for step in steps:
                     if step.get('name') in names:

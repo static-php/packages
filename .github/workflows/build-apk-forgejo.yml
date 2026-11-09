@@ -257,8 +257,23 @@ jobs:
                 run: |
                     bash .github/actions/shared-libraries/run.sh classify
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
+                    python3 .github/actions/shared-libraries/workflow.py inline --plan stage/shared-library-plan.json >> "$GITHUB_OUTPUT"
+            -   name: Build single PHP stream in the restored SDK workspace
+                if: steps.classification.outputs.inline-stream != ''
+                uses: ./.github/actions/apk-packages
+                env:
+                    PHPV: ${{ steps.classification.outputs.inline-stream }}
+                    LIBRARY_ONLY: false
+                    PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).packages }}
+                    COMPILE: ${{ fromJson(steps.classification.outputs.inline-request).compile }}
+                    COMPILE_PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request).compile-packages }}
+                    ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request).abi-rebuild-libraries }}
+                    ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request).abi-break }}
+                    ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request).abi-core-rebuild }}
+                    RUNTIME_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request).runtime-checks }}
+                    TLS_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request).tls-checks }}
             -   name: Pack buildroot
-                if: inputs.publish == true || steps.classification.outputs.php-required == 'true'
+                if: inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
                 run: tar --zstd -cf buildroot.tar.zst buildroot
             -   name: Save buildroot cache
                 if: inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
@@ -282,7 +297,7 @@ jobs:
                         stage/target.json
                     retention-days: 7
             -   name: Stage common SDK buildroot
-                if: steps.classification.outputs.php-required == 'true'
+                if: steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
@@ -376,6 +391,10 @@ jobs:
             PACKAGES: ${{ matrix.packages }}
             COMPILE: ${{ matrix.compile }}
             COMPILE_PACKAGES: ${{ matrix.compile-packages }}
+            ABI_BREAK: ${{ matrix.abi-break }}
+            ABI_CORE_REBUILD: ${{ matrix.abi-core-rebuild }}
+            RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
+            TLS_CHECKS: ${{ matrix.tls-checks }}
             ABI_REBUILD_LIBRARIES: ${{ matrix.abi-rebuild-libraries }}
             LIBRARY_ONLY: ${{ matrix.library-only || false }}
             PHPV: ${{ matrix.php-version || '' }}
@@ -418,10 +437,8 @@ jobs:
                     path: stage
             -   name: Copy matching library archives
                 run: |
-                    mkdir -p dist/apk
+                    mkdir -p dist/apk stage/libraries
                     find stage/libraries -maxdepth 1 -name '*.apk' -exec cp -a {} dist/apk/ \;
-            -   name: Select native validation baseline
-                run: echo "BUILD_ONLY=$(jq -r '.build_only // false' stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Download exact common SDK
                 if: matrix.library-only != true
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -441,87 +458,8 @@ jobs:
                     path: ~/.cache/composer
                     key: composer-${{ hashFiles('**/composer.lock') }}
                     restore-keys: composer-
-            -   name: Compute sealed PHP cache identity
-                if: matrix.library-only != true
-                id: payload-cache-key
-                run: |
-                    cp stage/shared-libraries.json buildroot/shared-libraries.json
-                    bash .github/actions/shared-libraries/run.sh payload-key | tee stage/payload-cache-inputs
-                    key=$(sed -n 's/^key=//p' stage/payload-cache-inputs)
-                    seed=$(sed -n 's/^seed-key=//p' stage/payload-cache-inputs)
-                    printf '%s\n' "$key" > stage/payload-cache-key
-                    printf '%s\n' "$seed" > stage/payload-cache-seed-key
-                    cat stage/payload-cache-inputs >> "$GITHUB_OUTPUT"
-                    echo "cache-key=$key" >> "$GITHUB_OUTPUT"
-            -   name: Restore sealed PHP payload
-                if: matrix.library-only != true
-                id: payload-cache
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: restore
-                    key: ${{ steps.payload-cache-key.outputs.cache-key }}
-                    seed-key: ${{ (!matrix.abi-break || (matrix.compile && !matrix.abi-core-rebuild)) && steps.payload-cache-key.outputs.seed-key || '' }}
-                    path: php-payload-cache.tar.zst
-            -   name: Freeze actual published baseline
-                if: env.BUILD_ONLY != 'true'
-                run: bash .github/actions/shared-libraries/run.sh freeze-baseline
-            -   name: Build and test PHP packages
-                if: matrix.library-only != true
-                env:
-                    EXPORT_PAYLOAD_CACHE: ${{ inputs.publish == true && steps.payload-cache.outputs.cache-current != 'true' }}
-                run: bash .github/actions/shared-libraries/run.sh php
-            -   name: Save sealed PHP payload cache
-                if: ${{ !cancelled() && inputs.publish == true && matrix.library-only != true && steps.payload-cache.outputs.cache-current != 'true' && hashFiles('php-payload-cache-ready.tar.zst') != '' }}
-                uses: ./.github/actions/buildroot-cache
-                with:
-                    mode: save
-                    key: ${{ steps.payload-cache-key.outputs.cache-key }}
-                    seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
-                    path: php-payload-cache-ready.tar.zst
-            -   name: Prepare real library revision for service validation
-                if: matrix.runtime-checks == true && env.BUILD_ONLY != 'true'
-                run: bash .github/actions/shared-libraries/run.sh prepare-runtime
-            -   name: Verify unpublished package installation
-                if: env.BUILD_ONLY == 'true'
-                run: python3 .github/actions/shared-libraries/glibc.py test-packages
-            -   name: Verify ordinary APK upgrade
-                if: env.BUILD_ONLY != 'true'
-                env:
-                    RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
-                    TLS_CHECKS: ${{ matrix.tls-checks }}
-                run: |
-                    args=()
-                    if [[ "$RUNTIME_CHECKS" == true ]]; then args+=(--services --library-artifacts stage/runtime-libraries); fi
-                    if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
-                    profile=auto
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
-                    else
-                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json)
-                        if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
-                    fi
-                    python3 tests/migration-upgrade-containers.py --type apk --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/apk --baseline-dir stage/published-baseline --report dist/apk/native-upgrade-receipt.json --profile "$profile" "${args[@]}"
-                    native_args=()
-                    if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
-                    python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type apk --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report dist/apk/native-upgrade-receipt.json --plan stage/shared-library-plan.json --packages dist/apk --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output dist/apk/shared-library-upgrade-receipt.json "${native_args[@]}"
-            -   name: Report skipped shared extensions
-                if: ${{ !cancelled() }}
-                env:
-                    PHPV: ${{ matrix.php-version }}
-                run: |
-                    for manifest in "build/$PHPV/skipped-shared-extensions.json" buildroot/skipped-shared-extensions.json; do
-                        if [[ -f "$manifest" ]]; then
-                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "::warning::\($target): skipped \(.extension) (\(.phase)): \(.message)"' "$manifest"
-                            jq -r --arg target "$TARGET php$PHPV" '.skipped[]? | "- \($target): \(.extension) (\(.phase)): \(.message | gsub("[\r\n]"; " "))"' "$manifest" >> "$GITHUB_STEP_SUMMARY"
-                            break
-                        fi
-                    done
-            -   name: Stage consumer packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-apk-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: dist/apk
-                    retention-days: 7
+            -   name: Build and validate native APK packages
+                uses: ./.github/actions/apk-packages
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

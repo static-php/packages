@@ -316,8 +316,9 @@ def main():
             raise RuntimeError("Incremental builds require downloads/build-plan.json; run spc-download or select full mode")
     elif args.command == "inline":
         plan = json.loads(args.plan.read_text())
-        requests = [consumer_target({}, plan, stream, request) for stream, request in plan.get('php_requests', {}).items()
+        requests = [consumer_target({'target': ''}, plan, stream, request) for stream, request in plan.get('php_requests', {}).items()
                     if request.get('full') or request.get('packages')]
+        runtime_checks(requests)
         selected = requests[0] if len(requests) == 1 else {}
         emit('inline-stream', selected.get('php-version', ''))
         emit('inline-request', selected)

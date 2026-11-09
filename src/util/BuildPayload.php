@@ -256,6 +256,9 @@ final class BuildPayload
                 throw new RuntimeException('Cannot stage frozen PIE assets');
             }
             self::stageSpxAssets($payload, $downloads, $stage);
+            if (is_dir($target) && self::equal(self::assets($stage, ['.'], false), self::assets($target, ['.'], false))) {
+                return $payload;
+            }
             if (is_dir($target) && !rename($target, $backup)) {
                 throw new RuntimeException('Cannot preserve previous package assets');
             }
@@ -779,10 +782,10 @@ final class BuildPayload
         return ['path' => substr($file, strlen($root) + 1), 'sha256' => hash_file('sha256', $file), 'mode' => fileperms($file) & 0777];
     }
 
-    private static function assets(string $root): array
+    private static function assets(string $root, array $directories = ['packaging', 'include', 'lib/php/build'], bool $helpers = true): array
     {
         $files = [];
-        foreach (['packaging', 'include', 'lib/php/build'] as $directory) {
+        foreach ($directories as $directory) {
             if (!is_dir($root . '/' . $directory)) {
                 continue;
             }
@@ -799,7 +802,7 @@ final class BuildPayload
                     : ['sha256' => hash_file('sha256', $path), 'mode' => fileperms($path) & 0777];
             }
         }
-        foreach (['bin/php-config', 'bin/phpize'] as $relative) {
+        foreach ($helpers ? ['bin/php-config', 'bin/phpize'] : [] as $relative) {
             $path = $root . '/' . $relative;
             if (is_file($path)) {
                 $files[$relative] = ['sha256' => hash_file('sha256', $path), 'mode' => fileperms($path) & 0777];

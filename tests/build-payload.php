@@ -96,7 +96,7 @@ try {
     check($assetPayload->metadata()['packaging_assets']['packaging/pie/pie.phar']['sha256'] === $pie['sha256'], 'Frozen PIE hash was not recorded');
     check($assetPayload->metadata()['asset_updates'][0]['version'] === '1.5.3', 'PIE source update provenance is missing');
     BuildPayload::refreshAssets($root, $root . '/downloads');
-    check(BuildPayload::load($root)->metadata()['asset_updates'][1]['previous_sha256'] === $pie['sha256'], 'Repeated PIE refresh lost previous asset identity');
+    check(count(BuildPayload::load($root)->metadata()['asset_updates']) === 1, 'Unchanged package assets should keep the sealed payload unchanged');
     file_put_contents($root . '/downloads/pie.phar', 'wrong asset', FILE_APPEND);
     rejected(static fn () => BuildPayload::refreshAssets($root, $root . '/downloads'), 'does not match');
     check(hash_file('sha256', $root . '/packaging/pie/pie.phar') === $pie['sha256'], 'Rejected PIE source changed the sealed package asset');

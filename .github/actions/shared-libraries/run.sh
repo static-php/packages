@@ -103,6 +103,9 @@ case "$command" in
     record)
         jq -n --arg type "$TYPE" --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
             '{type: $type, arch: $arch, alma: $alma, target: $target, image: $image, source_run_id: $source}' > stage/target.json
+        if [[ -f stage/payload-provenance.json ]]; then
+            python3 -c 'import json,pathlib; p=pathlib.Path("stage/target.json"); t=json.loads(p.read_text()); t["payload_stream"]=json.load(open("stage/payload-provenance.json"))["php_stream"]; p.write_text(json.dumps(t))'
+        fi
         printf '%s\n' "$CACHE_KEY" > stage/cache-key
         python3 .github/actions/shared-libraries/workflow.py receipt --kind libraries \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \

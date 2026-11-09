@@ -86,13 +86,24 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual([entry['php-version'] for entry in selected if entry['runtime-checks']], ['8.6'])
                 self.assertEqual([entry['php-version'] for entry in selected if entry['tls-checks']], ['8.6'])
 
+    def test_alpine_inline_completion_removes_the_transfer_job_only_for_successful_sdks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            glibc.write(root / 'plan/shared-library-plan.json', {'libraries': [], 'php_requests': {'8.5': {'packages': ['curl'], 'compile': False}}})
+            glibc.write(root / 'plan/target.json', {'type': 'apk', 'target': 'arm64', 'arch': 'arm64',
+                        'image': 'producer', 'payload_stream': '8.5'})
+            for successful in ['arm64', '']:
+                result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'matrix', '--plans', root,
+                                                  '--succeeded', successful], text=True)
+                outputs = dict(line.split('=', 1) for line in result.splitlines())
+                self.assertEqual(json.loads(outputs['matrix'])['include'], [])
+                self.assertEqual(outputs['publish-any'], 'true' if successful else 'false')
+
     def test_packaging_uses_native_stream_baseline_before_creating_candidates(self):
         import yaml
-        for filename, package_step in [('build-apk-forgejo.yml', 'Build and test PHP packages'),
-                                       ('build-rpm-modular-packages.yml', 'Package sealed payload without compilation')]:
-            data = yaml.safe_load((ROOT / '.github/workflows' / filename).read_text())
-            steps = next(job['steps'] for job in data['jobs'].values()
-                         if any(step.get('name') == package_step for step in job.get('steps', [])))
+        apk = yaml.safe_load((ROOT / '.github/actions/apk-packages/action.yml').read_text())['runs']['steps']
+        glibc = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())['jobs']['package']['steps']
+        for steps, package_step in [(apk, 'Build and test PHP packages'), (glibc, 'Package sealed payload without compilation')]:
             names = [step.get('name') for step in steps]
             self.assertLess(names.index('Freeze actual published baseline'), names.index(package_step))
 
