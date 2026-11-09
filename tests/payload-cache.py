@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -152,6 +153,17 @@ class PayloadCache(unittest.TestCase):
         subprocess.run(verify, check=True, stdout=subprocess.DEVNULL)
         with self.assertRaisesRegex(RuntimeError, 'cannot replace the complete PHP cache'):
             cache.export(argparse.Namespace(root=self.root, payload=selected))
+        recorded = self.root / 'selected-before-sealing'
+        shutil.copytree(payload, recorded, symlinks=True)
+        script = '''define('BASE_PATH', $argv[1]); require BASE_PATH . '/vendor/autoload.php';
+            $payload = \\staticphp\\util\\BuildPayload::load($argv[2], true)->metadata();
+            \\staticphp\\util\\BuildPayload::record($argv[2], $payload['configuration'], $payload['php_version'],
+                $payload['architecture'], $payload['source_version'], ['kind' => 'partial-consumer-build']);'''
+        subprocess.run(['php', '-r', script, ROOT, recorded], env=dict(os.environ, SPP_PACKAGING_SELECTION='imagick'), check=True)
+        self.assertEqual(cache.read(recorded / 'build-payload.json')['packaging_selection']['packages'], ['imagick'])
+        self.assertFalse((recorded / 'modules/unselected-zts-86.so').exists())
+        subprocess.run(['php', ROOT / 'bin/build-payload', 'seal', '--root', recorded], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(['php', ROOT / 'bin/build-payload', 'verify', '--root', recorded], check=True, stdout=subprocess.DEVNULL)
         cache.project_payload(payload, {'imagick'})
         self.assertEqual(cache.read(payload / 'build-payload.json'), cache.read(selected / 'build-payload.json'))
         self.assertFalse((payload / 'modules/unselected-zts-86.so').exists())

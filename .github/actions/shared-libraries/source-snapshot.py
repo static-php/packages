@@ -18,7 +18,7 @@ import zipfile
 MARKER = '.source-snapshot.json'
 
 
-def inputs(downloads, output):
+def inputs(downloads, output, php=False):
     metadata = json.loads((downloads / '.spc-meta.json').read_text())
     index = json.loads((downloads / '.php-sources.json').read_text())
     cache = json.loads((downloads / '.cache.json').read_text())
@@ -27,14 +27,21 @@ def inputs(downloads, output):
     spx = cache.get('ext-spx', {}).get('source', {}).get('filename')
     if spx:
         names.add(spx)
+    if php:
+        sources = [value.get('source', {}) for name, value in cache.items()
+                   if name.startswith('ext-') or name in {'frankenphp', 'go', 'go-xcaddy'}]
+        sources.extend(source for profile in index.get('extensions', {}).values() for source in profile.values())
+        names.update(source.get('dirname') if source.get('cache_type') == 'git' else source.get('filename')
+                     for source in sources if source)
     with tarfile.open(output, 'w:gz', compresslevel=1) as archive:
         for name in sorted(names - {MARKER}):
-            if Path(name).name != name or not (downloads / name).is_file() or (downloads / name).is_symlink():
+            if (not isinstance(name, str) or Path(name).name != name or (downloads / name).is_symlink()
+                    or not ((downloads / name).is_file() or php and (downloads / name).is_dir())):
                 raise RuntimeError('Missing frozen source input: ' + name)
             archive.add(downloads / name, arcname=name)
 
 
-def fetch(root, repository, run_id, full=False):
+def fetch(root, repository, run_id, full=False, php=False):
     if not re.fullmatch(r'[1-9][0-9]*', str(run_id)):
         raise RuntimeError('Source snapshots require a pinned workflow run')
     helper = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'buildroot-cache/cache.py'))
@@ -47,10 +54,12 @@ def fetch(root, repository, run_id, full=False):
         if len(batch) < 100:
             break
     name = 'downloads-tarball' if full or 'downloads-inputs' not in artifacts else 'downloads-inputs'
+    if php:
+        name = 'downloads-php' if 'downloads-php' in artifacts else 'downloads-tarball'
     artifact = artifacts.get(name)
     if artifact is None:
         raise RuntimeError('Pinned source snapshot is missing: ' + name)
-    filename = 'downloads.tar.gz' if name == 'downloads-tarball' else 'downloads-inputs.tar.gz'
+    filename = 'downloads.tar.gz' if name == 'downloads-tarball' else name + '.tar.gz'
     downloads = root / 'downloads'
     downloads.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='spp-source-') as temporary:
@@ -65,16 +74,17 @@ def fetch(root, repository, run_id, full=False):
         with zipfile.ZipFile(zipped) as archive, archive.open(filename) as source, (Path(temporary) / filename).open('wb') as output:
             shutil.copyfileobj(source, output)
         subprocess.run(['tar', '--no-same-owner', '-xzf', str(Path(temporary) / filename), '-C', str(downloads)], check=True)
-    (downloads / MARKER).write_text(json.dumps({'repository': repository, 'run_id': str(run_id), 'complete': name == 'downloads-tarball'}))
+    (downloads / MARKER).write_text(json.dumps({'repository': repository, 'run_id': str(run_id),
+                                              'complete': name == 'downloads-tarball', 'php': name == 'downloads-php'}))
     print('Restored ' + name + ' from source run ' + str(run_id), flush=True)
 
 
-def materialize(root):
+def materialize(root, php=False):
     marker = root / 'downloads' / MARKER
     if marker.is_file():
         snapshot = json.loads(marker.read_text())
-        if not snapshot['complete']:
-            fetch(root, snapshot['repository'], snapshot['run_id'], full=True)
+        if not snapshot['complete'] and not (php and snapshot.get('php')):
+            fetch(root, snapshot['repository'], snapshot['run_id'], full=not php, php=php)
 
 
 if __name__ == '__main__':
@@ -84,10 +94,11 @@ if __name__ == '__main__':
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY'))
     parser.add_argument('--run-id', default=os.environ.get('SOURCE_RUN_ID'))
     parser.add_argument('--output', type=Path, default=Path('downloads-inputs.tar.gz'))
+    parser.add_argument('--php', action='store_true')
     args = parser.parse_args()
     if args.command == 'inputs':
-        inputs(args.root / 'downloads', args.output)
+        inputs(args.root / 'downloads', args.output, args.php)
     elif args.command == 'fetch':
         fetch(args.root, args.repository, args.run_id)
     else:
-        materialize(args.root)
+        materialize(args.root, args.php)

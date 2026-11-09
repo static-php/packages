@@ -123,6 +123,12 @@ final class BuildPayload
         }
         $payload = new self($root, $data);
         $payload->save();
+        $selection = getenv('SPP_PACKAGING_SELECTION');
+        if ($selection && in_array($buildContext['kind'] ?? null, ['full-consumer-build', 'partial-consumer-build'], true)) {
+            self::command(['python3', BASE_PATH . '/.github/actions/shared-libraries/payload-cache.py', 'project',
+                '--payload', $root, '--packages', $selection]);
+            return self::load($root, true, false);
+        }
         return $payload;
     }
 

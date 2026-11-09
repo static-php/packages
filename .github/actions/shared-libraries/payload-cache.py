@@ -536,8 +536,8 @@ def packaging_projection(payload, record, manifest, packages, library_selection=
 
 def project_payload(payload, packages):
     record = read(payload / 'build-payload.json')
-    if record.get('state') != 'sealed':
-        raise RuntimeError('Packaging requires a sealed producer payload')
+    if record.get('state') not in ('recorded', 'sealed'):
+        raise RuntimeError('Packaging requires a recorded producer payload')
     if record.get('packaging_selection') or not packages or 'devel' in packages:
         return
     record, manifest, excluded = packaging_projection(payload, record, read(payload / 'shared-libraries.json'), packages)
@@ -547,7 +547,8 @@ def project_payload(payload, packages):
         path.unlink()
     write(payload / 'build-payload.json', record)
     write(payload / 'shared-libraries.json', manifest)
-    subprocess.run(['php', 'bin/build-payload', 'verify', '--root', str(payload)], check=True)
+    if record['state'] == 'sealed':
+        subprocess.run(['php', 'bin/build-payload', 'verify', '--root', str(payload)], check=True)
     print(json.dumps({'packaging_packages': sorted(packages), 'library_count': len(manifest['libraries']),
                       'elf_count': len(record['files'])}), flush=True)
 
@@ -589,6 +590,10 @@ def main():
     key = sub.add_parser('key')
     export_parser = sub.add_parser('export')
     restore_parser = sub.add_parser('restore')
+    project_parser = sub.add_parser('project')
+    project_parser.add_argument('--root', type=Path, default=Path('.'))
+    project_parser.add_argument('--payload', type=Path, required=True)
+    project_parser.add_argument('--packages', required=True)
     package_parser = sub.add_parser('package-archive')
     package_parser.add_argument('--root', type=Path, default=Path('.'))
     package_parser.add_argument('--payload', type=Path, required=True)
@@ -619,7 +624,8 @@ def main():
         for name in ('key', 'seed-key'):
             print(name + '=' + state[name])
     else:
-        {'export': export, 'restore': restore, 'package-archive': package_archive}[args.command](args)
+        {'export': export, 'restore': restore, 'package-archive': package_archive,
+         'project': lambda args: project_payload(args.payload, set(filter(None, args.packages.split(','))))}[args.command](args)
 
 
 if __name__ == '__main__':

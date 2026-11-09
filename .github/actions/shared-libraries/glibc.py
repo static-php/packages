@@ -529,7 +529,7 @@ def payload():
         else:
             compile_packages = ''
         if compile_requested:
-            run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize'])
+            run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize', '--php'])
             preflight_consumers(stream, package_type, compile_packages)
             if compile_packages and not (ROOT / 'source/php-src').is_dir():
                 release = read(STAGE / 'consumer-source-versions.json')['candidates'][0]['php_version']
@@ -538,13 +538,11 @@ def payload():
             flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + package_type, '--debuginfo']
             if compile_packages:
                 flags += ['--packages=' + compile_packages]
-            run(['php', 'bin/spp', 'build', *flags])
+            environment = dict(os.environ, SPP_PACKAGING_SELECTION=os.environ.get('PACKAGES', '') if os.environ.get('PUBLISH') == 'false' else '')
+            run(['php', 'bin/spp', 'build', *flags], env=environment)
             compiled_source = os.environ['SOURCE_RUN_ID']
         elif not restored:
             raise RuntimeError('No sealed PHP payload available for packaging')
-        if compile_requested and os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES'):
-            graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
-            graph['project_payload'](root, set(filter(None, os.environ['PACKAGES'].split(','))))
         run(['php', 'bin/build-payload', 'refresh-assets', '--root', root, '--downloads', 'downloads'])
         write(STAGE / 'payload-provenance.json', {'schema': 1, 'target': os.environ['TARGET'],
               'php_stream': stream, 'source_run_id': os.environ['SOURCE_RUN_ID'],
