@@ -393,7 +393,7 @@ def execute(root, buildroot, plan, package_type, command=None):
         previous = manifest.get('libraries', {}).get(name, {})
         entry = current['libraries'][name]
         if previous.get('abi_dump'):
-            for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty']:
+            for field in ['abi_epoch', 'abi_capability', 'abi_capabilities', 'abi_dump', 'abi_dump_hashes', 'abi_empty']:
                 if field in previous:
                     entry[field] = previous[field]
             entry['abi_reference_version'] = previous.get('abi_reference_version', previous.get('version'))
