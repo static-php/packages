@@ -152,6 +152,12 @@ class PayloadCache(unittest.TestCase):
         subprocess.run(verify, check=True, stdout=subprocess.DEVNULL)
         with self.assertRaisesRegex(RuntimeError, 'cannot replace the complete PHP cache'):
             cache.export(argparse.Namespace(root=self.root, payload=selected))
+        cache.project_payload(payload, {'imagick'})
+        self.assertEqual(cache.read(payload / 'build-payload.json'), cache.read(selected / 'build-payload.json'))
+        self.assertFalse((payload / 'modules/unselected-zts-86.so').exists())
+        self.assertFalse((payload / 'lib/unneeded.a').exists())
+        (payload / 'modules/imagick-zts-86.so').write_bytes(b'changed')
+        self.assertNotEqual(subprocess.run(['php', ROOT / 'bin/build-payload', 'verify', '--root', payload], capture_output=True).returncode, 0)
         (selected / 'modules/imagick-zts-86.so').write_bytes(b'changed')
         self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
 

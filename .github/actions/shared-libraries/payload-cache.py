@@ -534,6 +534,24 @@ def packaging_projection(payload, record, manifest, packages, library_selection=
     return record, manifest, excluded
 
 
+def project_payload(payload, packages):
+    record = read(payload / 'build-payload.json')
+    if record.get('state') != 'sealed':
+        raise RuntimeError('Packaging requires a sealed producer payload')
+    if record.get('packaging_selection') or not packages or 'devel' in packages:
+        return
+    record, manifest, excluded = packaging_projection(payload, record, read(payload / 'shared-libraries.json'), packages)
+    for name in excluded:
+        (payload / safe(name)).unlink(missing_ok=True)
+    for path in payload.rglob('*.a'):
+        path.unlink()
+    write(payload / 'build-payload.json', record)
+    write(payload / 'shared-libraries.json', manifest)
+    subprocess.run(['php', 'bin/build-payload', 'verify', '--root', str(payload)], check=True)
+    print(json.dumps({'packaging_packages': sorted(packages), 'library_count': len(manifest['libraries']),
+                      'elf_count': len(record['files'])}), flush=True)
+
+
 def package_archive(args):
     payload = args.payload.resolve()
     record = read(payload / 'build-payload.json')

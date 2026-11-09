@@ -542,6 +542,9 @@ def payload():
             compiled_source = os.environ['SOURCE_RUN_ID']
         elif not restored:
             raise RuntimeError('No sealed PHP payload available for packaging')
+        if compile_requested and os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES'):
+            graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+            graph['project_payload'](root, set(filter(None, os.environ['PACKAGES'].split(','))))
         run(['php', 'bin/build-payload', 'refresh-assets', '--root', root, '--downloads', 'downloads'])
         write(STAGE / 'payload-provenance.json', {'schema': 1, 'target': os.environ['TARGET'],
               'php_stream': stream, 'source_run_id': os.environ['SOURCE_RUN_ID'],

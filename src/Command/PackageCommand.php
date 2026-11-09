@@ -45,7 +45,9 @@ class PackageCommand extends BaseCommand
             throw new \InvalidArgumentException('--bump and --iteration are mutually exclusive; pass only one.');
         }
 
-        if ($packageNames) {
+        if ($libsOnly) {
+            $output->writeln('Creating library packages for: ' . ($libraries === null ? 'all libraries' : implode(', ', $libraries)) . '...');
+        } elseif ($packageNames) {
             $packageNames = explode(',', $packageNames);
             $output->writeln("Creating packages for: " . implode(', ', $packageNames) . "...");
         } else {
