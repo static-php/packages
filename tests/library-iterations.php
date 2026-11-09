@@ -61,6 +61,7 @@ foreach (['DIST_RPM_PATH', 'DIST_DEB_PATH', 'DIST_APK_PATH'] as $constant) {
     define($constant, $directory);
 }
 $previousPlan = getenv('SPP_SHARED_LIBRARY_PLAN');
+$previousPublish = getenv('PUBLISH');
 $override = new ReflectionProperty(CreatePackages::class, 'iterationOverride');
 try {
     foreach (['rpm' => '0:1.26.0-7.el8', 'deb' => '1.26.0-7', 'apk' => '1.26.0-r7'] as $type => $published) {
@@ -81,11 +82,35 @@ try {
         }
         $override->setValue(null, null);
     }
+    $path = $directory . '/publication.json';
+    file_put_contents($path, json_encode(['schema' => 1, 'type' => 'apk', 'libraries' => ['ngtcp2'],
+        'published_versions' => ['ngtcp2' => '1.26.0-r1']], JSON_THROW_ON_ERROR));
+    putenv('SPP_SHARED_LIBRARY_PLAN=' . $path);
+    putenv('PUBLISH=true');
+    $pages = [];
+    foreach (['82', '83', '84', '85', '86'] as $owner) {
+        $url = "https://first.invalid/api/v1/packages/{$owner}?type=alpine&q=php-zts-lib-ngtcp2&limit=1000&page=";
+        $pages[$url . '1'] = [200, json_encode([
+            ['name' => 'php-zts-lib-ngtcp2', 'version' => '1.26.0-r' . ($owner === '82' ? '6' : '1')],
+            ['name' => 'php-zts-lib-ngtcp2-debuginfo', 'version' => '1.26.0-r' . ($owner === '82' ? '7' : '1')],
+        ])];
+        $pages[$url . '2'] = [200, '[]'];
+    }
+    $cache->setValue(null, $pages);
+    (new ReflectionProperty(CreatePackages::class, 'resolvedIterations'))->setValue(null, []);
+    (new ReflectionProperty(CreatePackages::class, 'debuginfo'))->setValue(null, true);
+    foreach (['php-zts-lib-ngtcp2', 'php-zts-lib-ngtcp2-debuginfo'] as $name) {
+        if (CreatePackages::resolveIteration($name, '1.26.0', 'aarch64', 'apk') !== '8') {
+            throw new RuntimeException('Selected library publication ignored a higher revision in another PHP stream');
+        }
+    }
 } finally {
     putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
+    putenv($previousPublish === false ? 'PUBLISH' : 'PUBLISH=' . $previousPublish);
     foreach (glob($directory . '/*') as $path) {
         unlink($path);
     }
     rmdir($directory);
 }
 echo "Passed library repack revision floors and runtime/debuginfo pairing without remote queries.\n";
+echo "Passed selected library publication above every primary stream's runtime and debug revisions.\n";

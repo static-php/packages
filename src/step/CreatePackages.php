@@ -2455,7 +2455,15 @@ class CreatePackages
         $base = preg_replace('/-debuginfo$/', '', $name);
         $key = "{$base}|{$version}|{$architecture}|{$packageType}";
         if (!isset(self::$resolvedIterations[$key])) {
-            if (self::$bump) {
+            $publishingLibrary = false;
+            if (str_starts_with($base, 'php-zts-lib-') && getenv('PUBLISH') === 'true' && ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN'))) {
+                $plan = self::migrationBaseline($planPath);
+                $publishingLibrary = ($plan['type'] ?? null) === $packageType && !($plan['build_only'] ?? false)
+                    && in_array(substr($base, strlen('php-zts-lib-')), $plan['libraries'] ?? [], true);
+            }
+            // Only selected libraries reach packaging. Their captured baseline may
+            // belong to a PHP stream with a lower revision than another live stream.
+            if (self::$bump || $publishingLibrary) {
                 $next = self::getRemoteNextIteration($base, $version, $architecture, $packageType);
                 if (self::$debuginfo) {
                     // Heal existing drift: jump past the highest published iteration of either
