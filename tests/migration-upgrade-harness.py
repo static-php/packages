@@ -167,6 +167,14 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'rejected version'):
                         harness['validate_partial_candidates'](kind, old, incoming)
 
+    def test_partial_frankenphp_update_accepts_its_matching_debug_archive(self):
+        packages = [{'name': name, 'version': '1.13.5.0_p83_p36-r1'}
+                    for name in ('frankenphp', 'frankenphp-debuginfo')]
+        self.assertEqual(harness['validate_partial_candidates']('apk', [], packages),
+                         ['frankenphp', 'frankenphp-debuginfo'])
+        with self.assertRaisesRegex(RuntimeError, 'managed runtime'):
+            harness['validate_partial_candidates']('apk', [], [{'name': 'unrelated', 'version': '1-r0'}])
+
     def test_failure_reason_keeps_native_error_after_verbose_command_output(self):
         error = ('Command failed: apk add php-zts\n' + 'Installing a package\n' * 2000
                  + 'ERROR: unable to select packages:\n  missing-runtime (no such package)\n')

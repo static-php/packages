@@ -168,7 +168,7 @@ def profile_names(profile, require_php=True):
 
 
 def managed(name):
-    return name in ('php-zts', 'frankenphp') or name.startswith(('php-zts-', 'pie-zts'))
+    return name in ('php-zts', 'frankenphp', 'frankenphp-debuginfo') or name.startswith(('php-zts-', 'pie-zts'))
 
 
 def resolve_profile(baseline, names):
@@ -679,7 +679,7 @@ def validate_partial_candidates(kind, old, incoming):
     changed = []
     for package in incoming:
         if not managed(package['name']):
-            raise RuntimeError('Partial candidates must be managed runtime packages')
+            raise RuntimeError('Partial candidate is not a managed package: ' + package['name'])
         previous = frozen.get(package['name'])
         if previous is None:
             changed.append(package['name'])
