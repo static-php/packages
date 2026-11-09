@@ -75,6 +75,16 @@ def get_remote_packages_for_owners(host, owners, password, pkg_type):
     return [dict(package, owner=owner) for owner in owners
             for package in get_remote_packages(host, owner, password, pkg_type)]
 
+def get_remote_candidates(host, owner, password, pkg_type, files):
+    metadata = package_metadata if pkg_type in ('debian', 'alpine') else get_package_info
+    names = sorted({metadata(path, pkg_type)[0] for path in files})
+    packages = []
+    for index, name in enumerate(names, 1):
+        print(f"Listing versions {index}/{len(names)}: {host} {owner}/{name}", flush=True)
+        packages.extend(package for package in get_remote_packages(host, owner, password, pkg_type, name)
+                        if package['name'] == name)
+    return packages
+
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
     response = requests.get(url, auth=registry_auth(owner, password), timeout=30)
@@ -265,6 +275,7 @@ def remote_package_archives(host, owner, password, pkg_type, name, version):
                 continue
             path = Path(temporary) / ('archive' + extension)
             digest = hashlib.sha256()
+            print(f"Reading archive: {host} {owner}/{name} {version} {file['name']}", flush=True)
             with requests.get(url, auth=registry_auth(owner, password), timeout=60, stream=True) as response:
                 response.raise_for_status()
                 with path.open('wb') as archive:
@@ -349,8 +360,9 @@ def version_is_newer(pkg_type, left, right):
 def verify_upload_versions(host, owner, password, pkg_type, files, packages):
     candidates = []
     skipped = {}
-    for pkg_file in files:
+    for index, pkg_file in enumerate(files, 1):
         name, version, arch = package_metadata(pkg_file, pkg_type)
+        print(f"Checking {index}/{len(files)}: {host} {owner}/{name} {version} {arch}", flush=True)
         key = (re.sub(r'-debuginfo$', '', name), version, arch)
         candidates.append((pkg_file, key))
         for published in packages:
@@ -502,11 +514,9 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
     return 0
 
 def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", branch="main"):
-    # Build set of name-version strings that exist remotely
-    remote_names = set()
-    packages = get_remote_packages(host, owner, password, pkg_type)
-    remote_names = {f"{p['name']}-{p['version']}" for p in packages}
     files = [path for path in Path('.').glob(pattern) if path.is_file()]
+    packages = get_remote_candidates(host, owner, password, pkg_type, files)
+    remote_names = {f"{p['name']}-{p['version']}" for p in packages}
     skipped = 0
     if pkg_type in ['debian', 'alpine']:
         allowed = verify_upload_versions(host, owner, password, pkg_type, files, packages)
@@ -567,10 +577,10 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
 def check_packages(host, owner, password, pkg_type, pattern):
     if pkg_type not in ['debian', 'alpine']:
         raise RuntimeError('Upload checks are supported for DEB and APK; use check-rpm-upgrades for RPM.')
-    packages = get_remote_packages(host, owner, password, pkg_type)
     files = [path for path in Path('.').glob(pattern) if path.is_file()]
     if not files:
         raise RuntimeError('No packages to verify: ' + pattern)
+    packages = get_remote_candidates(host, owner, password, pkg_type, files)
     allowed = verify_upload_versions(host, owner, password, pkg_type, files, packages)
     print(f'Verified upgrade ordering for {len(allowed)} package files; skipped {len(files) - len(allowed)}.')
     return 0 if len(allowed) == len(files) else 3

@@ -61,6 +61,17 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual([record['owner'] for record in records], list(publisher['STREAM_OWNERS']))
         self.assertEqual(listing.call_count, 5)
 
+    def test_candidate_lookup_only_queries_unique_selected_names(self):
+        first = self.archive(name='php-zts-cli')
+        second = self.archive(name='php-zts-cli', arch='aarch64')
+        third = self.archive(name='frankenphp')
+        listing = Mock(side_effect=lambda host, owner, password, kind, name:
+                       [{'name': name, 'version': '1'}, {'name': name + '-unrelated', 'version': '2'}])
+        with patch.dict(helper_globals, {'get_remote_packages': listing}):
+            records = helper['get_remote_candidates']('https://example.com', '85', 'test', 'alpine', [first, second, third])
+        self.assertEqual([call.args[-1] for call in listing.call_args_list], ['frankenphp', 'php-zts-cli'])
+        self.assertEqual([record['name'] for record in records], ['frankenphp', 'php-zts-cli'])
+
     def test_signed_apk_header_and_sha_are_read_from_file_id(self):
         data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'aarch64', signed=True)
         calls = []
@@ -257,7 +268,7 @@ class ForgejoPublication(unittest.TestCase):
     def test_last_owner_preflight_failure_prevents_all_uploads(self):
         path = self.archive()
         upload = Mock()
-        helpers = dict(helper, get_remote_packages=lambda *args: [],
+        helpers = dict(helper, get_remote_candidates=lambda *args: [],
                        verify_upload_versions=lambda host, owner, password, kind, paths, remote: [] if owner == '86' else paths,
                        upload_verified_archive=upload)
         groups = {owner: [path] for owner in publisher['STREAM_OWNERS']}
@@ -279,7 +290,7 @@ class ForgejoPublication(unittest.TestCase):
             path.write_bytes(path.read_bytes() + b'changed')
             return paths
         upload = Mock()
-        helpers = dict(helper, get_remote_packages=lambda *args: [], verify_upload_versions=preflight, upload_verified_archive=upload)
+        helpers = dict(helper, get_remote_candidates=lambda *args: [], verify_upload_versions=preflight, upload_verified_archive=upload)
         with self.assertRaisesRegex(RuntimeError, 'changed during'):
             publisher['publish']('upload', 'https://example.com', 'test', 'alpine', {'86': [path]}, helpers, True)
         upload.assert_not_called()

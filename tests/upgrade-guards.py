@@ -39,7 +39,7 @@ class UpgradeGuards(unittest.TestCase):
             rpm['verify_package'](local, [remote], '8.6')
 
     def test_forgejo_preflight_does_not_upload(self):
-        with patch.dict(forgejo_globals, {'get_remote_packages': Mock(return_value=[]), 'verify_upload_versions': Mock(return_value=[])}), patch.object(Path, 'glob', return_value=[root / 'library.deb']), patch.object(Path, 'is_file', return_value=True), patch.object(requests, 'put') as upload, contextlib.redirect_stdout(io.StringIO()):
+        with patch.dict(forgejo_globals, {'get_remote_candidates': Mock(return_value=[]), 'verify_upload_versions': Mock(return_value=[])}), patch.object(Path, 'glob', return_value=[root / 'library.deb']), patch.object(Path, 'is_file', return_value=True), patch.object(requests, 'put') as upload, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(forgejo['check_packages']('https://example.com', 'libs', 'test', 'debian', '*.deb'), 3)
             upload.assert_not_called()
 
@@ -88,7 +88,7 @@ class UpgradeGuards(unittest.TestCase):
         self.assertIn('::error::Skipped 2 package files', output.getvalue())
 
     def test_forgejo_read_failure_prevents_upload(self):
-        with patch.dict(forgejo_globals, {'get_remote_packages': Mock(side_effect=requests.HTTPError('offline'))}), patch.object(requests, 'put') as put:
+        with patch.dict(forgejo_globals, {'get_remote_candidates': Mock(side_effect=requests.HTTPError('offline'))}), patch.object(requests, 'put') as put:
             with self.assertRaises(requests.HTTPError):
                 forgejo['upload_packages']('https://example.com', '86', 'test', 'debian', '*.deb')
             put.assert_not_called()

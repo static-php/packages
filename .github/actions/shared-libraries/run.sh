@@ -180,8 +180,6 @@ PY
         python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" "${scope_args[@]}" --output cohort-result.json
         if [[ "$TYPE" == rpm ]]; then
             python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --baseline-directory "${RPM_DIRECTORY%/el8}/el9" --baseline-directory "${RPM_DIRECTORY%/el8}/el10"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"
-        else
-            (cd "dist/$TYPE"; python3 ../../.github/actions/shared-libraries/publish-forgejo.py check "$TYPE" 1)
         fi
         ;;
     *) echo "Unknown shared-library workflow command: $command" >&2; exit 1 ;;

@@ -90,7 +90,7 @@ def publish(action, host, password, kind, groups, helper, bootstrap):
     digests = {path: helper['archive_sha256'](path) for paths in groups.values() for path in paths}
     for owner, paths in sorted(groups.items()):
         print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
-        remote = helper['get_remote_packages'](host, owner, password, kind)
+        remote = helper['get_remote_candidates'](host, owner, password, kind, paths)
         allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
         if len(allowed) != len(paths):
             raise RuntimeError('A version/archive identity guard rejected the cohort for owner ' + owner)
