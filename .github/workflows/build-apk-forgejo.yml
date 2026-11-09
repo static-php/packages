@@ -309,7 +309,6 @@ jobs:
                 shell: bash
         strategy:
             fail-fast: false
-            max-parallel: 2
             matrix: ${{ fromJson(needs.compute-build-matrix.outputs.matrix) }}
         env:
             SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
