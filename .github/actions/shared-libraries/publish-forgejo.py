@@ -155,7 +155,7 @@ def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=No
                         planner = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
                     cache = cohort / '.mirror-dependencies' / normalize(arch)
                     cache.mkdir(parents=True, exist_ok=True)
-                    copied = Path(planner['stage_debug_archive'](debug, cache)['path'])
+                    copied = Path(planner['stage_debug_archive'](debug, cache, archives=matching, helper=helper)['path'])
                     shutil.copy2(copied, directory / copied.name)
                     present.add(name + '-debuginfo')
                 except Exception as error:
