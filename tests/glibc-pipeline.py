@@ -158,11 +158,14 @@ class Pipeline(unittest.TestCase):
         self.assertLess(names.index('Stage sealed common payload'), names.index('Export PHP-only sealed cache'))
 
     def test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild(self):
-        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer'), ('rpm', 'breaking', False, False), ('apk', 'breaking', False, False)]:
+        for kind, rebuilt, cached_variants, manual in [('rpm', False, False, False), ('rpm', False, True, False), ('rpm', True, False, False), ('apk', False, False, False), ('apk', True, False, False), ('rpm', False, False, True), ('rpm', False, False, 'consumer'), ('rpm', 'breaking', False, False), ('apk', 'breaking', False, False), ('rpm', 'pending', False, False), ('apk', 'pending', False, False)]:
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
                 value = {'libraries': {'fixture': {'abi_epoch': 1}}}
+                if rebuilt == 'pending':
+                    value['libraries']['consumer'] = {'abi_epoch': 1}
+                    value['pending_rebuilds'] = {'consumer': {'libfixture.so.1': 'fixture'}}
                 glibc.write(sdk / 'shared-libraries.json', value)
                 glibc.write(stage / 'library-build-plan.json', {'full': False, 'rebuilt_libraries': ['fixture'] if rebuilt else []})
                 glibc.write(stage / 'effective-source-plan.json', {})
@@ -185,7 +188,13 @@ class Pipeline(unittest.TestCase):
                         glibc.write(option('--manifest-output'), value)
                         glibc.write(option('--output'), {'libraries': [], 'php_requests': {}, 'abi_break': rebuilt == 'breaking', 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
                     elif 'expand' in args:
-                        glibc.write(option('--output'), {'selected': []})
+                        glibc.write(option('--output'), {'selected': ['consumer'] if value.get('pending_rebuilds') else []})
+                    elif 'run' in args and '.github/actions/shared-libraries/incremental-build.py' in args:
+                        self.assertTrue(value.pop('pending_rebuilds'))
+                        glibc.write(sdk / 'shared-libraries.json', value)
+                        glibc.write(option('--plan'), {'rebuilt_libraries': ['consumer', 'fixture']})
+                    elif '.github/actions/shared-libraries/openssl-variants.py' in args:
+                        self.assertNotIn('pending_rebuilds', glibc.read(sdk / 'shared-libraries.json'))
                     elif 'stage-publication-retries' in args:
                         glibc.write(option('--output'), {'remaining_libraries': ['fixture']})
                     elif args[:2] == ['php', 'bin/spp']:
@@ -214,7 +223,13 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(any('seal' in call for call in calls), not manual)
                 prepares = [call for call in calls if 'prepare' in call]
                 self.assertEqual(len(prepares), len(formats) * (2 if rebuilt == 'breaking' else 1))
-                self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('fixture' if rebuilt else '') for call in prepares))
+                self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('consumer,fixture' if rebuilt == 'pending' else 'fixture' if rebuilt else '') for call in prepares))
+                if rebuilt == 'pending':
+                    rebuild = next(index for index, call in enumerate(calls) if 'run' in call and '.github/actions/shared-libraries/incremental-build.py' in call)
+                    self.assertLess(rebuild, calls.index(prepares[0]))
+                    if kind == 'rpm':
+                        profile = next(index for index, call in enumerate(calls) if '.github/actions/shared-libraries/openssl-variants.py' in call)
+                        self.assertLess(rebuild, profile)
                 self.assertEqual(packaging.n_waiting, 0)
                 archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]
                 self.assertEqual(len(archive_checks), 0 if kind == 'apk' else 2)

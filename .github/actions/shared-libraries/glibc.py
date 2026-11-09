@@ -280,6 +280,20 @@ def test_dependencies(kind, sdk, directory, consumers=False):
              '--libraries=' + ','.join(needed), '--iteration=1'], env=environment)
 
 
+def rebuild_library_consumers(roots, rebuilt, kind):
+    run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
+         '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(roots)),
+         '--output', STAGE / 'library-reverse-plan.json'])
+    if not read(STAGE / 'library-reverse-plan.json').get('selected'):
+        return False
+    run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'run', '--root', '.',
+         '--plan', STAGE / 'library-reverse-plan.json', '--type', kind])
+    rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
+    shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
+    (STAGE / 'sdk-rebuilt').touch()
+    return True
+
+
 def classify():
     formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
     glibc = formats == FORMATS
@@ -306,6 +320,12 @@ def classify():
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
     for phase in range(100):
+        pending = {provider for dependencies in read(sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values()
+                   for provider in dependencies.values()}
+        if pending and rebuild_library_consumers(pending, rebuilt, formats[0]):
+            shared = False
+            variants_ready = not glibc
+            continue
         if not variants_ready:
             run(variants('build', sdk))
             variants_ready = True
@@ -357,19 +377,10 @@ def classify():
                 share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
             consumers_ready = True
             continue
-        if reverse_roots:
-            run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'expand', '--root', '.',
-                 '--plan', STAGE / 'library-build-plan.json', '--libraries', ','.join(sorted(reverse_roots)),
-                 '--output', STAGE / 'library-reverse-plan.json'])
-            if read(STAGE / 'library-reverse-plan.json').get('selected'):
-                run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'run', '--root', '.',
-                     '--plan', STAGE / 'library-reverse-plan.json', '--type', formats[0]])
-                rebuilt.update(read(STAGE / 'library-reverse-plan.json').get('rebuilt_libraries', []))
-                shutil.copy2(STAGE / 'library-reverse-plan.json', STAGE / 'library-build-plan.json')
-                (STAGE / 'sdk-rebuilt').touch()
-                shared = False
-                variants_ready = not glibc
-                continue
+        if reverse_roots and rebuild_library_consumers(reverse_roots, rebuilt, formats[0]):
+            shared = False
+            variants_ready = not glibc
+            continue
         break
     else:
         raise RuntimeError('Library ABI planning did not converge')
