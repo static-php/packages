@@ -875,6 +875,11 @@ def prepare(args):
                 entry['compile_full'] |= affected['full'] or bool(set(affected['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'}))
                 entry['compile_packages'] = [] if entry['compile_full'] else sorted(set(entry['compile_packages']) | set(affected['packages']))
     selected = [identifier for identifier in selected if identifier in current['libraries']]
+    retry_libraries = (set(old.get('publication_drift', [])) & set(selected)) - set(sources) - metadata_libraries
+    retry_libraries = {identifier for identifier in retry_libraries if identifier not in abi_roots or (
+        os.environ.get('BUMP') != 'true' and not os.environ.get('ITERATION')
+        and all(annotated['libraries'][identifier].get(key) == old['libraries'][identifier].get(key)
+                for key in ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']))}
     plan = {'schema': 1, 'type': args.type, 'libraries': selected, 'removed_libraries': sorted(set(old['libraries']) - set(current['libraries'])),
             'abi_break': breaking, 'abi_rebuild_roots': sorted(abi_roots), 'bootstrap': comparison['bootstrap'], 'build_only': build_only, 'baseline_fingerprint': fingerprint(baselines[0][0]),
             'baseline_fingerprints': sorted(set(fingerprint(value) for value, _ in baselines)),
@@ -890,7 +895,7 @@ def prepare(args):
             'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes', 'abi_empty']} for identifier in selected},
             'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
             'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']}
-                                    for identifier in old.get('publication_drift', []) if identifier in selected and identifier not in sources and identifier not in abi_roots and identifier not in metadata_libraries},
+                                    for identifier in sorted(retry_libraries)},
             'library_package_requests': sorted(metadata_libraries.intersection(selected)),
             'published_consumers': {stream: {name: version for name, version in versions.items()
                                            if force_all or name in abi_requests.get(stream, {}).get('consumers', [])}

@@ -437,6 +437,7 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
     if not consumers or len(consumers) != len(components):
         return False
     planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
+    compare = lru_cache(maxsize=None)(planner['native_compare'])
     normalize = lambda arch: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(arch, arch)
     latest = {}
     def version(package):
@@ -448,7 +449,7 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
                 or package['name'].endswith(('-debuginfo', '-dbgsym'))):
             continue
         previous = latest.get(package['name'])
-        if previous is None or version(package) != version(previous) and planner['native_compare'](plan['type'], version(package), version(previous)) > 0:
+        if previous is None or version(package) != version(previous) and compare(plan['type'], version(package), version(previous)) > 0:
             latest[package['name']] = package
     libraries = set(plan.get('libraries', []))
     owners = {capability: library for library in libraries for capability in
