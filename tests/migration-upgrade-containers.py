@@ -325,7 +325,17 @@ def prepare(resources, name, kind, helper=False):
         packages = ['python3', 'python3-rpm', 'binutils', 'ca-certificates']
         if helper:
             packages += ['createrepo_c', 'rpm-sign', 'gnupg2', 'python3-pyyaml']
-        resources.exec(name, ['dnf', 'install', '-y'] + packages)
+        for attempt in range(3):
+            try:
+                resources.exec(name, ['dnf', 'install', '-y'] + packages)
+                break
+            except RuntimeError as error:
+                if attempt == 2 or not any(message in str(error) for message in (
+                        'Failed to download metadata', 'Cannot download repomd.xml', 'repomd.xml parser error')):
+                    raise
+                annotation('warning', f'AlmaLinux test-tool metadata fetch failed; retrying ({attempt + 2}/3)')
+                resources.exec(name, ['dnf', 'clean', 'metadata'])
+
     elif kind == 'deb':
         resources.exec(name, ['sh', '-ec', "sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list; apt-get update"])
         resources.exec(name, ['apt-get', 'install', '-y', '--no-install-recommends', 'python3', 'binutils', 'ca-certificates', 'gnupg'] + (['dpkg-dev', 'apt-utils'] if helper else []))

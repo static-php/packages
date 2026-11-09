@@ -62,6 +62,19 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual(saved['cells'][0]['baseline_failure'], baseline)
             self.assertEqual(len(saved['cells'][0]['inventory']), 2000)
 
+    def test_native_test_bootstrap_retries_only_metadata_download_failures(self):
+        calls = []
+        def execute(name, command):
+            calls.append(command)
+            if len(calls) == 1:
+                raise RuntimeError("Failed to download metadata for repo 'baseos': Document is empty")
+        harness['prepare'](SimpleNamespace(exec=execute), 'test', 'rpm')
+        self.assertEqual([command[:3] for command in calls], [['dnf', 'install', '-y'], ['dnf', 'clean', 'metadata'], ['dnf', 'install', '-y']])
+        def broken(*args):
+            raise RuntimeError('No match for argument: missing-tool')
+        with self.assertRaisesRegex(RuntimeError, 'No match'):
+            harness['prepare'](SimpleNamespace(exec=broken), 'test', 'rpm')
+
     def test_broken_old_index_does_not_block_complete_replacement_validation(self):
         old = [{'name': 'php-zts-cli', 'version': '8.3.36-r3'}]
         def broken_index(*args):
