@@ -582,6 +582,16 @@ class MigrationUpgradeHarness(unittest.TestCase):
             harness['assert_upgrade'](before, {'php-zts-cli': '1-2'},
                                       {'php-zts-cli': {'version': '1-2'}}, ['php-zts-cli'])
 
+    def test_full_upgrade_keeps_unchanged_layout_and_libraries(self):
+        before = {'php-zts-cli': '8.5.12-r3', 'php-zts-runtime-layout': '1-r0', 'php-zts-lib-zlib': '1.4-r5'}
+        after = dict(before, **{'php-zts-cli': '8.5.12-r4'})
+        candidates = {name: {'version': version} for name, version in after.items()}
+        harness['assert_upgrade'](before, after, candidates, list(before))
+        with self.assertRaisesRegex(RuntimeError, 'held back'):
+            harness['assert_upgrade'](before, before, candidates, list(before))
+        with self.assertRaisesRegex(RuntimeError, 'php-zts-runtime-layout'):
+            harness['assert_upgrade'](before, dict(after, **{'php-zts-runtime-layout': '2-r0'}), candidates, list(before))
+
     def test_native_library_profile_has_no_artificial_php_dependency(self):
         names = ['php-zts-lib-zlib', 'php-zts-runtime-layout']
         baseline = {'selection': {'mode': 'affected'}, 'packages': [{'name': name} for name in names]}

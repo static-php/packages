@@ -617,7 +617,7 @@ def assert_upgrade(before, after, candidate, names):
             raise RuntimeError('Requested old package was not actually installed: ' + name)
         if name not in candidate:
             raise RuntimeError('Installed package has no migration candidate: ' + name)
-        if after.get(name) != candidate[name]['version'] or after[name] == before[name]:
+        if after.get(name) != candidate[name]['version']:
             raise RuntimeError('Ordinary upgrade held back or failed to advance ' + name)
     removed = {name for name in set(before) - set(after) if managed(name)}
     if removed:
@@ -923,7 +923,7 @@ def inside(args):
         actual_updates = assert_partial_upgrade(before['installed'], after, incoming, changed, args.allow_unaffected_profile)
         library_updates = assert_library_upgrade(before['installed'], after, {name: incoming[name] for name in changed}) if args.library_only and actual_updates else []
     else:
-        actual_updates = comparison_names
+        actual_updates = [name for name in comparison_names if before['installed'][name] != candidate[name]['version']]
         library_updates = None
         assert_upgrade(before['installed'], after, candidate, names)
     for field in ('config', 'key', 'php_ini'):
