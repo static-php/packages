@@ -46,7 +46,7 @@ permissions:
     packages: read
 
 concurrency:
-    group: shared-packages-apk
+    group: ${{ inputs.publish == true && 'shared-packages-apk' || format('shared-packages-apk-test-{0}', github.run_id) }}
     cancel-in-progress: false
 
 jobs:

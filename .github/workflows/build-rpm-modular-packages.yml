@@ -86,7 +86,7 @@ permissions:
     packages: read
 
 concurrency:
-    group: shared-packages-glibc
+    group: ${{ inputs.publish == true && 'shared-packages-glibc' || format('shared-packages-glibc-test-{0}', github.run_id) }}
     cancel-in-progress: false
 
 jobs:
