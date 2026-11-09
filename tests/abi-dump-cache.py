@@ -138,6 +138,17 @@ class AbiDumpCache(unittest.TestCase):
                 self.assertTrue(planner['needs_abi_check']({'version': old}, {'version': new}))
         self.assertFalse(planner['needs_abi_check'](None, {'version': '1.2.4', 'abi_reference_version': '1.2.3'}))
 
+    def test_cold_patch_rebuild_retains_the_last_checked_reference(self):
+        baseline, previous = self.baseline()
+        previous['libraries']['fixture']['version'] = '1.2.3'
+        candidate = copy.deepcopy(previous)
+        candidate['libraries']['fixture'] = dict(library(), version='1.2.4')
+        with TemporaryDirectory() as temporary, patch.dict(namespace, {'dump_abi': Mock(side_effect=AssertionError('Patch ABI scan'))}):
+            updated, _ = planner['compare'](previous, candidate, baseline, temporary, rebuilt_libraries={'fixture'})
+            entry = updated['libraries']['fixture']
+            self.assertEqual(entry['abi_reference_version'], '1.2.3')
+            self.assertTrue((Path(temporary) / entry['abi_dump']['libfixture.so.1']).is_file())
+
     def test_minor_upgrade_checks_only_its_rebuilt_library(self):
         baseline, previous = self.baseline()
         previous['libraries']['fixture']['version'] = '1.2.3'

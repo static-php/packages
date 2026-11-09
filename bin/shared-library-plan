@@ -487,6 +487,15 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
         rebuilt = rebuilt_libraries is None or identifier in rebuilt_libraries
         analyze = rebuilt and needs_abi_check(previous, library)
         if rebuilt and not analyze:
+            if not library.get('abi_dump') and previous and previous.get('abi_dump'):
+                for relative in previous['abi_dump'].values():
+                    source, destination = rooted(old_root, relative), rooted(new_root, relative)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if source.resolve() != destination.resolve():
+                        shutil.copy2(source, destination)
+                for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_reference_version']:
+                    if field in previous:
+                        library[field] = copy.deepcopy(previous[field])
             epoch = (previous or library).get('abi_epoch', 1)
             library['abi_epoch'] = epoch
             library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
@@ -790,7 +799,8 @@ def prepare(args):
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
         candidates = current['libraries'].keys() if getattr(args, 'rebuilt_libraries', None) is None else rebuilt
         checked = {name for name in candidates if name in current['libraries']
-                   and any(needs_abi_check(value['libraries'].get(name), current['libraries'][name]) for value, _ in baselines)}
+                   and (not current['libraries'][name].get('abi_dump')
+                        or any(needs_abi_check(value['libraries'].get(name), current['libraries'][name]) for value, _ in baselines))}
         old, divergent = merge_baselines(baselines, args.type, temporary,
                                          checked)
         consumer_scope = bool(args.packages and old.get('metadata_scope') == [] and not rebuilt)
