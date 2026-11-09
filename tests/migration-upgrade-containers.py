@@ -94,20 +94,22 @@ def report_summary(args, result):
             stream.write('<pre>' + html.escape(summary) + '</pre>\n')
 
 
-def run(command, *, check=True, input=None, cwd=None, env=None):
+def run(command, *, check=True, input=None, cwd=None, env=None, timeout=600):
     process = subprocess.Popen([str(x) for x in command], cwd=cwd, env=env,
                                stdin=subprocess.PIPE if input is not None else None,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
     try:
-        stdout, stderr = process.communicate(input)
-    except BaseException:
+        stdout, stderr = process.communicate(input, timeout=timeout)
+    except BaseException as error:
         process.terminate()
         try:
             process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
+        if isinstance(error, subprocess.TimeoutExpired):
+            raise RuntimeError('Command timed out after {}s: {}'.format(timeout, ' '.join(map(str, command)))) from error
         raise
     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode:
@@ -1343,7 +1345,7 @@ class PreparedMirror:
                     raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
                 if self.inventory.get('baseline_index_failure'):
                     raise RuntimeError(self.inventory['baseline_index_failure'])
-                resources.exec(client, common + ['--inside', 'old'])
+                resources.exec(client, common + ['--inside', 'old'], timeout=300)
             except RuntimeError as error:
                 self.assert_bound(args)
                 result['baseline_failure'] = str(error)

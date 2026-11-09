@@ -29,6 +29,18 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_native_command_timeout_terminates_the_process(self):
+        processes = []
+        popen = subprocess.Popen
+        def start(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        with patch.object(subprocess, 'Popen', side_effect=start):
+            with self.assertRaisesRegex(RuntimeError, 'Command timed out after 0.05s'):
+                harness['run']([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=.05)
+        self.assertIsNotNone(processes[0].returncode)
+
     def test_runner_can_update_read_only_container_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'inventory.json'
@@ -218,7 +230,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         for old_broken, candidate_broken, partial, tampered in [
                 (True, False, False, False), (True, True, False, False),
                 (False, True, False, False), (True, False, True, False), (True, False, 'library', False),
-                ('missing', False, True, False),
+                ('missing', False, True, False), ('timeout', False, False, False), ('timeout', True, False, False),
                 (True, True, True, False), (True, True, 'library', False), (True, False, False, True)]:
             with self.subTest(old=old_broken, candidate=candidate_broken, partial=partial, tampered=tampered), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -249,12 +261,15 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     resources.containers.append(name)
                     resources.runtime_evidence.append({'container': name})
                     return name
-                def execute(client, command):
+                def execute(client, command, **kwargs):
                     if command == ['true']:
                         raise RuntimeError('Broken old container cannot execute commands')
                     phase = command[-1]
                     executions.append((client, phase))
                     if phase == 'old':
+                        self.assertEqual(kwargs.get('timeout'), 300)
+                        if old_broken == 'timeout':
+                            raise RuntimeError('Command timed out after 300s: old installation')
                         if old_broken:
                             raise RuntimeError('old package dependency missing')
                         (root / 'client-before.json').write_text(json.dumps({'installed': {}, 'probe': {}, 'module_state': {},
@@ -268,7 +283,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 expected = old_broken and not candidate_broken and not tampered
                 self.assertEqual(result['ok'], expected)
                 if expected:
-                    self.assertIn('baseline packages missing' if old_broken == 'missing' else 'old package dependency missing', result['baseline_failure'])
+                    reason = ('baseline packages missing' if old_broken == 'missing' else
+                              'timed out after 300s' if old_broken == 'timeout' else 'old package dependency missing')
+                    self.assertIn(reason, result['baseline_failure'])
                     new_client = next(client for client, phase in executions if phase == 'replacement')
                     if old_broken == 'missing':
                         self.assertFalse(any(phase == 'old' for _, phase in executions))
