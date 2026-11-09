@@ -213,6 +213,33 @@ class Publication(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'supported glibc'):
             self.state('deb')
 
+    def test_retry_selects_only_requested_architecture_and_stream_artifacts(self):
+        self.plan()
+        self.plan(arch='arm64')
+        selected, = publication.publication_matrix(self.state('deb'), self.plans, 'arm64', '8.6')
+        self.assertEqual(selected['arch'], 'arm64')
+        ids = set(selected['artifact-ids'].split(','))
+        names = {a['name'] for a in self.artifacts if str(a['id']) in ids}
+        self.assertEqual(names, {'shared-libs-deb-alma8-arm64', 'shared-consumers-deb-alma8-arm64-php8.6'})
+
+    def test_selected_stream_retry_never_publishes_other_streams(self):
+        source = self.plans / 'cohort'
+        library = source / 'shared-libs-apk-arm64'
+        library.mkdir(parents=True)
+        (library / 'shared-library-plan.json').write_text(json.dumps({'php_requests': {'8.2': {'full': True}, '8.3': {'full': True}}}))
+        previous = Path.cwd()
+        try:
+            os.chdir(self.plans)
+            with patch.object(publication, 'prune_consumers'), patch.object(publication, 'assemble'), \
+                    patch.object(publication, 'verify_upgrades') as verify, patch.object(publication, 'run_logged') as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(publication.publish_available(source, 'apk', 'arm64', selected_php='8.2'))
+            verify.assert_called_once_with(source, library, 'apk', ['8.2'])
+            self.assertEqual([call.args[1]['PUBLICATION_PHP_STREAMS'] for call in run.call_args_list], ['8.2', '8.2'])
+            self.assertEqual(json.loads((self.plans / 'log/publication-apk-arm64.json').read_text()), ['8.2'])
+        finally:
+            os.chdir(previous)
+
     def test_publication_digest_rejects_tags_and_malformed_hashes(self):
         image = 'ghcr.io/static-php/packages-packager-debian'
         self.assertEqual(publication.image_digest(image + '@sha256:' + 'a' * 64), 'a' * 64)
@@ -335,7 +362,9 @@ class WorkflowContracts(unittest.TestCase):
     def test_format_dispatch_and_existing_builds_use_the_same_publisher(self):
         inputs = self.workflow[True]['workflow_dispatch']['inputs']
         self.assertEqual(inputs['format']['options'], ['rpm', 'deb', 'apk'])
-        self.assertEqual(set(inputs), {'format', 'build_run_id', 'mirror_run_id', 'skip_mirror'})
+        self.assertEqual(set(inputs), {'format', 'build_run_id', 'mirror_run_id', 'skip_mirror', 'arch', 'php_version'})
+        self.assertEqual(inputs['arch']['default'], 'all')
+        self.assertEqual(inputs['php_version']['default'], 'all')
         self.assertFalse(inputs['skip_mirror']['default'])
         self.assertIn('!inputs.skip_mirror', self.workflow['jobs']['mirror']['if'])
         self.assertIn("inputs.mirror_run_id == ''", self.workflow['jobs']['publish']['if'])

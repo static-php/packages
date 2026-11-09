@@ -11,6 +11,10 @@ on:
                 description: Existing primary publication results for a mirror-only retry
                 type: string
                 default: ""
+            php-version:
+                description: Optional single PHP stream to retry
+                type: string
+                default: all
             format:
                 type: string
                 required: true
@@ -57,6 +61,7 @@ defaults:
 
 env:
     TYPE: ${{ inputs.format }}
+    PUBLISH_PHP_VERSION: ${{ inputs.php-version }}
     TARGET: ${{ inputs.target }}
     MATRIX_ARCH: ${{ inputs.arch }}
     IMAGE: ${{ inputs.image }}

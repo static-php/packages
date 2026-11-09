@@ -56,7 +56,7 @@ def pinned_image(image, name):
     return image
 
 
-def publication_matrix(state, plans):
+def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
     includes = []
     kind, family = state['type'], state['family']
     for name in state['plans']:
@@ -67,6 +67,8 @@ def publication_matrix(state, plans):
         identity = ('alma8-' if family == 'glibc' else '') + str(arch)
         if arch not in ('x86_64', 'arm64') or target.get('target') != identity or name != 'shared-plans-' + family + '-' + identity:
             raise RuntimeError('Build plan target does not match its artifact')
+        if selected_arch not in ('all', arch):
+            continue
         source_run = str(target.get('source_run_id', ''))
         if not re.fullmatch('[0-9]+', source_run):
             raise RuntimeError('Missing pinned source-download run')
@@ -77,6 +79,10 @@ def publication_matrix(state, plans):
         streams = sorted(stream for stream, request in selection.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
         if not set(streams) <= set(STREAMS):
             raise RuntimeError('Unsupported PHP stream in build plan')
+        if selected_php != 'all':
+            if selected_php not in streams:
+                continue
+            streams = [selected_php]
         required = ['shared-libs-' + kind + '-' + identity]
         if streams:
             consumers = ['shared-consumers-' + kind + '-' + identity + '-php' + stream for stream in streams]
@@ -155,11 +161,15 @@ def failure_reason(lines):
     return ' | '.join(reasons[-8:] if reasons else lines[-4:])[:2400]
 
 
-def publish_available(source, kind, target, mirror=False):
+def publish_available(source, kind, target, mirror=False, selected_php='all'):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
     prune_consumers(source, library)
     streams = sorted(stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
+    if selected_php != 'all':
+        if selected_php not in streams:
+            raise RuntimeError('Selected PHP stream is not in the retained build plan: ' + selected_php)
+        streams = [selected_php]
     scopes = [[stream] for stream in streams] or [None]
     results = []
     outcomes = Path('log') / f'publication-{kind}-{target}.json'
@@ -237,9 +247,13 @@ def main():
     matrix = sub.add_parser('matrix')
     matrix.add_argument('--state', type=Path, required=True)
     matrix.add_argument('--plans', type=Path, required=True)
+    matrix.add_argument('--arch', choices=('all', 'x86_64', 'arm64'), default='all')
+    matrix.add_argument('--php', choices=('all', *STREAMS), default='all')
     verify = sub.add_parser('verify-target')
     verify.add_argument('--directory', type=Path, required=True)
-    sub.add_parser('publish-available').add_argument('--mirror', action='store_true', default=os.environ.get('MIRROR') == 'true')
+    publish = sub.add_parser('publish-available')
+    publish.add_argument('--mirror', action='store_true', default=os.environ.get('MIRROR') == 'true')
+    publish.add_argument('--php', choices=('all', *STREAMS), default=os.environ.get('PUBLISH_PHP_VERSION') or 'all')
     artifacts = sub.add_parser('artifact-ids')
     artifacts.add_argument('--run-id', required=True)
     args = parser.parse_args()
@@ -254,7 +268,7 @@ def main():
         emit('plan-artifact-ids', ','.join(str(state['artifacts'][name]) for name in state['plans']))
     elif args.command == 'matrix':
         state = json.loads(args.state.read_text())
-        includes = publication_matrix(state, args.plans)
+        includes = publication_matrix(state, args.plans, args.arch, args.php)
         emit('matrix', {'include': includes})
         emit('any', 'true')
     elif args.command == 'artifact-ids':
@@ -266,7 +280,7 @@ def main():
             raise RuntimeError('No staged native packages available')
         emit('ids', ','.join(ids))
     elif args.command == 'publish-available':
-        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], args.mirror):
+        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], args.mirror, args.php):
             raise SystemExit(1)
     else:
         verify_target(args.directory, *(os.environ[name] for name in ['TYPE', 'TARGET', 'MATRIX_ARCH', 'IMAGE', 'SOURCE_RUN_ID']))

@@ -21,6 +21,16 @@ on:
                 description: "Publish to host 1 only; mirror its results afterward"
                 type: boolean
                 default: false
+            arch:
+                description: "Architecture to retry"
+                type: choice
+                options: [all, x86_64, arm64]
+                default: all
+            php_version:
+                description: "PHP stream to retry"
+                type: choice
+                options: [all, '8.2', '8.3', '8.4', '8.5', '8.6']
+                default: all
 
 permissions:
     contents: read
@@ -58,9 +68,13 @@ jobs:
                     path: plans
             -   name: Select complete package cohorts
                 id: matrix
+                env:
+                    SELECTED_ARCH: ${{ inputs.arch }}
+                    SELECTED_PHP: ${{ inputs.php_version }}
                 run: |
                     python3 .github/actions/shared-libraries/publication.py matrix \
-                        --state publication.json --plans plans >> "$GITHUB_OUTPUT"
+                        --state publication.json --plans plans \
+                        --arch "$SELECTED_ARCH" --php "$SELECTED_PHP" >> "$GITHUB_OUTPUT"
 
     publish:
         name: Publish (${{ matrix.type }} ${{ matrix.target }})
@@ -76,6 +90,7 @@ jobs:
         uses: ./.github/workflows/publish-package-cohort.yml
         with:
             format: ${{ matrix.type }}
+            php-version: ${{ inputs.php_version }}
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}
@@ -100,6 +115,7 @@ jobs:
         uses: ./.github/workflows/publish-package-cohort.yml
         with:
             mirror: true
+            php-version: ${{ inputs.php_version }}
             primary-run-id: ${{ inputs.mirror_run_id }}
             format: ${{ matrix.type }}
             target: ${{ matrix.target }}
