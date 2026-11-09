@@ -86,21 +86,46 @@ def publication_order(groups, helper, kind, bootstrap):
     return sorted(ordered, key=lambda item: (item[0], item[1], item[2].name))
 
 
-def publish(action, host, password, kind, groups, helper, bootstrap):
+def mirror_candidates(paths, remote, host, owner, password, kind, helper):
+    metadata = {path: helper['package_metadata'](path, kind) for path in paths}
+    newer = set()
+    for name, version, arch in metadata.values():
+        for package in remote:
+            if package['name'] != name or not helper['version_is_newer'](kind, package['version'], version):
+                continue
+            architectures = helper['get_remote_package_archs'](host, owner, password, kind, name, package['version'], strict=True)
+            if not architectures:
+                raise RuntimeError(f'Cannot verify newer mirror package: {owner}/{name}/{package["version"]}')
+            if arch in architectures:
+                newer.add(name.removesuffix('-debuginfo'))
+    selected = []
+    for path, (name, version, arch) in metadata.items():
+        if name.removesuffix('-debuginfo') in newer:
+            print(f'Keeping newer mirror package: {owner}/{path.name}', flush=True)
+        else:
+            selected.append(path)
+    return selected
+
+
+def publish(action, host, password, kind, groups, helper, bootstrap, mirror=False):
     if action not in ('check', 'upload'):
         raise RuntimeError('Unknown publication action: ' + action)
     digests = {path: helper['archive_sha256'](path) for paths in groups.values() for path in paths}
+    selected = {}
     for owner, paths in sorted(groups.items()):
         print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
         remote = helper['get_remote_candidates'](host, owner, password, kind, paths)
+        if mirror:
+            paths = mirror_candidates(paths, remote, host, owner, password, kind, helper)
         allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
         if len(allowed) != len(paths):
             raise RuntimeError('A version/archive identity guard rejected the cohort for owner ' + owner)
+        selected[owner] = allowed
     if any(helper['archive_sha256'](path) != digest for path, digest in digests.items()):
         raise RuntimeError('A cohort archive changed during publication preflight')
     if action == 'check':
         return
-    ordered = publication_order(groups, helper, kind, bootstrap)
+    ordered = publication_order(selected, helper, kind, bootstrap)
     def upload(item):
         index, (_, owner, path) = item
         print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
@@ -135,7 +160,8 @@ def main(argv=None):
         raise RuntimeError('Invalid publication PHP streams')
     groups = package_groups(args.directory, args.package_type, owners, helper, selected)
     bootstrap, _ = publication_mode(cohort, args.package_type, args.plan)
-    publish(args.action, helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap)
+    publish(args.action, helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap,
+            mirror=args.host_number == '2')
 
 
 if __name__ == "__main__":

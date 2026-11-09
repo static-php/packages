@@ -13,6 +13,10 @@ on:
                 description: "Existing package build run ID (shared EL8 for RPM/DEB, Alpine for APK)"
                 type: string
                 required: true
+            mirror_run_id:
+                description: "Optional: retry only mirrors using this run's completed primary publication results"
+                type: string
+                default: ""
 
 permissions:
     contents: read
@@ -57,7 +61,7 @@ jobs:
     publish:
         name: Publish (${{ matrix.type }} ${{ matrix.target }})
         needs: prepare
-        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && inputs.mirror_run_id == '' }}
         permissions:
             contents: read
             packages: read
@@ -87,10 +91,12 @@ jobs:
             actions: read
         strategy:
             fail-fast: false
+            max-parallel: 1
             matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
         uses: ./.github/workflows/publish-package-cohort.yml
         with:
             mirror: true
+            primary-run-id: ${{ inputs.mirror_run_id }}
             format: ${{ matrix.type }}
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}

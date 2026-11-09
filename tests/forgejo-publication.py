@@ -428,6 +428,41 @@ class ForgejoPublication(unittest.TestCase):
             publisher['publish']('upload', 'https://example.com', 'test', 'alpine', groups, helpers, True)
         upload.assert_not_called()
 
+    def test_mirror_retry_keeps_newer_architecture_and_still_uploads_missing_libraries(self):
+        cli = self.archive(name='php-zts-cli', version='8.5.12-r1')
+        debug = self.archive(name='php-zts-cli-debuginfo', version='8.5.12-r1')
+        library = self.archive()
+        paths = [cli, debug, library]
+        remote = [{'name': 'php-zts-cli', 'version': '8.5.12-r2'}]
+        uploaded = []
+        helpers = dict(helper, get_remote_candidates=lambda *args: remote,
+                       version_is_newer=lambda kind, left, right: left > right,
+                       get_remote_package_archs=lambda *args, **kwargs: {'x86_64'},
+                       verify_upload_versions=lambda host, owner, password, kind, paths, remote: [p for p in paths if p == library],
+                       upload_verified_archive=lambda host, owner, password, kind, path: uploaded.append(path))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'guard rejected'):
+                publisher['publish']('upload', 'https://primary.test', 'test', 'alpine', {'85': paths}, helpers, True)
+            self.assertEqual(uploaded, [])
+            publisher['publish']('upload', 'https://mirror.test', 'test', 'alpine', {'85': paths}, helpers, True, mirror=True)
+        self.assertEqual(uploaded, [library])
+        helpers['get_remote_package_archs'] = lambda *args, **kwargs: {'aarch64'}
+        self.assertEqual(publisher['mirror_candidates'](paths, remote, 'https://mirror.test', '85', 'test', 'alpine', helpers), paths)
+        helpers['get_remote_package_archs'] = lambda *args, **kwargs: set()
+        with self.assertRaisesRegex(RuntimeError, 'Cannot verify newer mirror package'):
+            publisher['mirror_candidates'](paths, remote, 'https://mirror.test', '85', 'test', 'alpine', helpers)
+
+    def test_mirror_retry_does_not_bypass_equal_version_identity_errors(self):
+        path = self.archive()
+        remote = [{'name': 'php-zts-lib-ssl', 'version': '3.6.0-r1'}]
+        upload = Mock()
+        helpers = dict(helper, get_remote_candidates=lambda *args: remote,
+                       version_is_newer=lambda kind, left, right: left > right,
+                       verify_upload_versions=lambda *args: [], upload_verified_archive=upload)
+        with self.assertRaisesRegex(RuntimeError, 'guard rejected'):
+            publisher['publish']('upload', 'https://mirror.test', 'test', 'alpine', {'85': [path]}, helpers, True, mirror=True)
+        upload.assert_not_called()
+
     def test_parallel_uploads_finish_dependencies_before_cli(self):
         libraries = {'php-zts-lib-' + str(i) for i in range(4)}
         paths = [self.archive(name=name) for name in sorted(libraries | {'php-zts-cli', 'php-zts-runtime-layout'})]

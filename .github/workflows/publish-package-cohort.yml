@@ -7,6 +7,10 @@ on:
                 description: Mirror packages already published to host 1
                 type: boolean
                 default: false
+            primary-run-id:
+                description: Existing primary publication results for a mirror-only retry
+                type: string
+                default: ""
             format:
                 type: string
                 required: true
@@ -133,6 +137,8 @@ jobs:
                 continue-on-error: true
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.primary-run-id || github.run_id }}
                     name: publication-${{ inputs.format }}-${{ inputs.target }}
                     path: log
             -   name: Publish each validated PHP stream independently
