@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -31,8 +32,18 @@ DEFAULT_PROFILE = 'cli,cgi,fpm,embed,devel,curl,fileinfo,pdo,pdo_sqlite,sqlite3,
 
 def fetch(url):
     request = urllib.request.Request(url, headers={'User-Agent': AGENT})
-    with urllib.request.urlopen(request, timeout=90) as response:
-        return response.read()
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read()
+        except (urllib.error.URLError, TimeoutError) as error:
+            retry = not isinstance(error, urllib.error.HTTPError) or error.code in (408, 429, 500, 502, 503, 504, 522, 524)
+            if not retry:
+                raise
+            if attempt == 2:
+                raise RuntimeError(f'Baseline download failed after 3 attempts: {url}: {error}') from error
+            print(f'Baseline download retry {attempt + 1}/2: {url}: {error}', flush=True)
+            time.sleep(attempt + 1)
 
 
 def decompress(data):
@@ -280,7 +291,7 @@ def download_package(package, kind, output, stage):
     return dict(package, path=str(destination.relative_to(output)), sha256=hashlib.sha256(data).hexdigest())
 
 
-def freeze(args):
+def published_inventory(args):
     architecture = ('aarch64' if args.arch == 'arm64' else 'x86_64')
     if args.type == 'deb':
         architecture = 'arm64' if args.arch == 'arm64' else 'amd64'
@@ -294,6 +305,30 @@ def freeze(args):
         inventory, metadata, keys = (deb_index if args.type == 'deb' else apk_index)(base, architecture)
         if args.type == 'apk' and not args.base_url:
             inventory = registered_apk_packages(inventory, owner)
+    return base, inventory, metadata, keys
+
+
+def snapshot_inventory(args):
+    base, inventory, metadata, keys = published_inventory(args)
+    return {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
+            'base': base, 'inventory': inventory,
+            'metadata': {name: base64.b64encode(content).decode() for name, content in metadata.items()},
+            'keys': [(name, base64.b64encode(content).decode()) for name, content in keys]}
+
+
+def freeze(args):
+    snapshot = getattr(args, 'inventory', None)
+    if snapshot:
+        captured = json.loads(snapshot.read_text())
+        if (captured.get('schema'), captured.get('type'), captured.get('php_stream'), captured.get('architecture')) != (1, args.type, args.php, args.arch):
+            raise RuntimeError('Published inventory snapshot does not match this target')
+        if captured.get('error'):
+            raise RuntimeError('Published inventory capture failed: ' + captured['error'])
+        base, inventory = captured['base'], captured['inventory']
+        metadata = {name: base64.b64decode(content) for name, content in captured['metadata'].items()}
+        keys = [(name, base64.b64decode(content)) for name, content in captured['keys']]
+    else:
+        base, inventory, metadata, keys = published_inventory(args)
     profile = {name.strip().removeprefix('php-zts-').replace('_', '-') for name in args.profile.split(',') if name.strip()}
     requested = {name.strip() for name in getattr(args, 'packages', '').split(',') if name.strip()}
     library_plan = getattr(args, 'library_plan', None)
@@ -323,8 +358,13 @@ def freeze(args):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             key_paths.append(str(target.relative_to(output)))
-        with ThreadPoolExecutor(max_workers=4) as downloads:
+        (output / 'artifacts').mkdir(exist_ok=True)
+        with ThreadPoolExecutor(max_workers=2) as downloads:
             packages = list(downloads.map(lambda package: download_package(package, args.type, output, stage), selected.values()))
+        retained = {package['path'] for package in packages}
+        for path in (output / 'artifacts').iterdir():
+            if str(path.relative_to(output)) not in retained:
+                path.unlink()
         result = {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
                   'origin': {'publication_url': base, 'real_published': True},
                   'packages': packages, 'published_packages': inventory, 'keys': key_paths, 'defects': defects,
@@ -354,12 +394,19 @@ def main():
     parser.add_argument('--arch', choices=('x86_64', 'arm64'), required=True)
     parser.add_argument('--el', choices=('el8', 'el9', 'el10'), default='el8')
     parser.add_argument('--base-url')
+    parser.add_argument('--inventory', type=Path, help='Use the run-pinned published metadata without reading the live indexes')
     parser.add_argument('--profile', default=DEFAULT_PROFILE)
     parser.add_argument('--packages', default='', help='Limit the baseline to these changed consumers and runtime hosts')
     parser.add_argument('--library-plan', type=Path, help='Limit a library-only baseline to affected published consumers and dependencies')
     parser.add_argument('--include-debug', action='store_true', help='Include debug packages with --profile=all')
     parser.add_argument('--output', type=Path, required=True)
-    freeze(parser.parse_args())
+    args = parser.parse_args()
+    try:
+        freeze(args)
+    except Exception as error:
+        message = f'{args.type.upper()} PHP {args.php} / {args.arch}: baseline capture failed: {error}'
+        print('::error::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

@@ -44,6 +44,49 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_snapshot_reuses_verified_archives_without_live_reads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / 'inventory.json'
+            output = root / 'baseline'
+            args = SimpleNamespace(type='apk', php='8.6', arch='x86_64', base_url=None,
+                                   profile='all', output=output, include_debug=False, inventory=snapshot)
+            for version in ('8.6.0_rc4-r0', '8.6.0_rc5-r0'):
+                data = apk_fixture('php-zts-cli', version)
+                url = f'https://example.test/php-zts-cli-{version}.apk'
+                package = {'name': 'php-zts-cli', 'version': version, 'architecture': 'x86_64',
+                           'publication_url': url, 'published_checksum': {'algorithm': 'apk-control-sha1',
+                           'value': helper['apk_control_checksum'](data)}}
+                snapshot.write_text(json.dumps({'schema': 1, 'type': 'apk', 'php_stream': '8.6',
+                    'architecture': 'x86_64', 'base': 'https://example.test/', 'inventory': [package],
+                    'metadata': {}, 'keys': []}))
+                with patch.dict(helper['freeze'].__globals__, {'published_inventory': lambda *_: self.fail('Live inventory read')}):
+                    with patch.dict(helper['freeze'].__globals__, {'fetch': lambda value: data if value == url else self.fail(value)}):
+                        helper['freeze'](args)
+                    with patch.dict(helper['freeze'].__globals__, {'fetch': lambda *_: self.fail('Cached archive downloaded again')}):
+                        helper['freeze'](args)
+                self.assertEqual([p.name for p in (output / 'artifacts').iterdir()], [url.rsplit('/', 1)[-1]])
+            archive = next((output / 'artifacts').iterdir())
+            archive.write_bytes(apk_fixture('php-zts-cli', 'wrong-version'))
+            with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                helper['freeze'](args)
+            args.arch = 'arm64'
+            with self.assertRaisesRegex(RuntimeError, 'does not match'):
+                helper['freeze'](args)
+
+    def test_transient_download_retries_are_bounded_and_keep_the_url(self):
+        url = 'https://example.test/failed.rpm'
+        request = helper['fetch'].__globals__['urllib'].request
+        with patch.object(request, 'urlopen', side_effect=urllib.error.HTTPError(url, 522, 'timeout', {}, None)) as opened, \
+                patch.object(helper['fetch'].__globals__['time'], 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'after 3 attempts: https://example.test/failed.rpm'):
+                helper['fetch'](url)
+            self.assertEqual(opened.call_count, 3)
+        with patch.object(request, 'urlopen', side_effect=urllib.error.HTTPError(url, 404, 'missing', {}, None)) as opened:
+            with self.assertRaises(urllib.error.HTTPError):
+                helper['fetch'](url)
+            self.assertEqual(opened.call_count, 1)
+
     def test_partial_extension_downloads_only_runtime_hosts_and_dependency_closure(self):
         rows = [
             ('php-zts-cli', [], []),

@@ -231,6 +231,7 @@ jobs:
                 id: classification
                 run: |
                     bash .github/actions/shared-libraries/run.sh glibc-classify
+                    bash .github/actions/shared-libraries/run.sh native-inventories
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
                     echo "inline-package=$(jq -s 'all(.[]; .build_only == true)' stage/rpm/shared-library-plan.json stage/deb/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
@@ -533,6 +534,7 @@ jobs:
             actions: read
         strategy:
             fail-fast: false
+            max-parallel: 4
             matrix: ${{ fromJson(needs.compute-package-matrix.outputs.matrix || needs.compute-build-matrix.outputs.package-matrix) }}
         env:
             IMAGE: ${{ matrix.image }}
@@ -593,10 +595,7 @@ jobs:
                 if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
-                run: |
-                    args=(--packages "$PACKAGES")
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-plan "stage/$TYPE/shared-library-plan.json"); fi
-                    python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline "${args[@]}"
+                uses: ./.github/actions/native-baseline
             -   name: Package sealed payload without compilation
                 if: matrix.library-only != true && matrix.packaged != true
                 run: |

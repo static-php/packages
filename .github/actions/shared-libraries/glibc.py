@@ -3,6 +3,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 import shutil
 import runpy
 import subprocess
+from types import SimpleNamespace
 
 
 ROOT = Path.cwd()
@@ -405,6 +407,33 @@ def classify():
             copy_tree(source, common / kind / 'baseline')
 
 
+def capture_native_inventories():
+    formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
+    freezer = runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+    freezer['published_inventory'].__globals__['fetch'] = lru_cache(maxsize=None)(freezer['fetch'])
+    wanted = set(os.environ.get('PHP_VERSIONS', '').split(',')) - {''} or set(STREAMS)
+    for kind in formats:
+        plan = read(format_stage(kind) / 'shared-library-plan.json')
+        output = (STAGE if kind == 'apk' else STAGE / 'common' / kind) / 'native-inventories'
+        output.mkdir(parents=True, exist_ok=True)
+        if plan.get('build_only'):
+            continue
+        streams = [stream for stream, request in plan.get('php_requests', {}).items()
+                   if (request.get('full') or request.get('packages'))
+                   and (stream in wanted or plan.get('abi_break') or plan.get('bootstrap'))]
+        if not streams and plan.get('libraries'):
+            streams = ['8.5']
+        for stream in streams:
+            args = SimpleNamespace(type=kind, php=stream, arch=os.environ['MATRIX_ARCH'], el='el8', base_url=None)
+            try:
+                snapshot = freezer['snapshot_inventory'](args)
+                print(f'Captured {kind} PHP {stream} published inventory', flush=True)
+            except Exception as error:
+                snapshot = dict(schema=1, type=kind, php_stream=stream, architecture=args.arch, error=str(error))
+                print(f'::warning::{kind} PHP {stream} inventory unavailable: {error}', flush=True)
+            write(output / (stream + '.json'), snapshot)
+
+
 def test_packages():
     kind = os.environ['TYPE']
     directory = format_stage(kind)
@@ -616,9 +645,9 @@ def package_inline():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['classify', 'record', 'payload', 'package', 'inline-package', 'test-packages', 'test-dependencies'])
+    parser.add_argument('command', choices=['classify', 'native-inventories', 'record', 'payload', 'package', 'inline-package', 'test-packages', 'test-dependencies'])
     args = parser.parse_args()
-    {'classify': classify, 'record': record, 'payload': payload, 'package': package, 'inline-package': package_inline, 'test-packages': test_packages,
+    {'classify': classify, 'native-inventories': capture_native_inventories, 'record': record, 'payload': payload, 'package': package, 'inline-package': package_inline, 'test-packages': test_packages,
      'test-dependencies': lambda: test_dependencies(os.environ['TYPE'], ROOT / 'build' / os.environ['PHPV'], format_stage(os.environ['TYPE']), consumers=True)}[args.command]()
 
 

@@ -1,0 +1,37 @@
+name: Restore and freeze native baseline
+description: Reuse verified package archives against the architecture job's published inventory.
+runs:
+    using: composite
+    steps:
+        -   name: Identify native baseline cache
+            id: identity
+            shell: bash
+            run: |
+                python3 - <<'PY'
+                import hashlib, os
+                from pathlib import Path
+                directory = Path('stage') if os.environ['TYPE'] == 'apk' else Path('stage') / os.environ['TYPE']
+                digest = hashlib.sha256((directory / 'native-inventories' / (os.environ['PHPV'] + '.json')).read_bytes())
+                digest.update((directory / 'shared-library-plan.json').read_bytes())
+                digest.update(os.environ.get('PACKAGES', '').encode())
+                digest.update(os.environ.get('LIBRARY_ONLY', '').encode())
+                prefix = 'native-baseline-v1-' + '-'.join(os.environ[name] for name in ('TYPE', 'MATRIX_ARCH', 'PHPV')) + '-'
+                with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                    output.write('prefix=' + prefix + '\nkey=' + prefix + digest.hexdigest() + '\n')
+                PY
+        -   name: Restore published package archives
+            id: cache
+            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+            with:
+                path: stage/published-baseline/artifacts
+                key: ${{ steps.identity.outputs.key }}
+                restore-keys: ${{ steps.identity.outputs.prefix }}
+        -   name: Verify cached archives and download missing baseline packages
+            shell: bash
+            run: bash .github/actions/shared-libraries/run.sh freeze-baseline
+        -   name: Save verified published package archives
+            if: steps.cache.outputs.cache-hit != 'true'
+            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+            with:
+                path: stage/published-baseline/artifacts
+                key: ${{ steps.identity.outputs.key }}

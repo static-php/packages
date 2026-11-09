@@ -184,6 +184,7 @@ jobs:
                 id: classification
                 run: |
                     bash .github/actions/shared-libraries/run.sh classify
+                    bash .github/actions/shared-libraries/run.sh native-inventories
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py inline --plan stage/shared-library-plan.json >> "$GITHUB_OUTPUT"
             -   name: Build single PHP stream in the restored SDK workspace
@@ -307,6 +308,7 @@ jobs:
                 shell: bash
         strategy:
             fail-fast: false
+            max-parallel: 2
             matrix: ${{ fromJson(needs.compute-build-matrix.outputs.matrix) }}
         env:
             SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}

@@ -30,8 +30,7 @@ runs:
                 path: php-payload-cache.tar.zst
         -   name: Freeze actual published baseline
             if: env.BUILD_ONLY != 'true'
-            shell: bash
-            run: bash .github/actions/shared-libraries/run.sh freeze-baseline
+            uses: ./.github/actions/native-baseline
         -   name: Build and test PHP packages
             if: env.LIBRARY_ONLY != 'true'
             env:

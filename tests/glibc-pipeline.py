@@ -31,6 +31,29 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_native_inventory_capture_skips_unpublished_plans_and_isolates_stream_failures(self):
+        freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+        captured = []
+        def snapshot(args):
+            captured.append((args.type, args.php))
+            if args.php == '8.6':
+                raise RuntimeError('HTTP 522 for this stream')
+            return {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch}
+        freezer['snapshot_inventory'] = snapshot
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            plan = {'php_requests': {stream: {'full': True} for stream in ('8.4', '8.5', '8.6')}}
+            glibc.write(stage / 'rpm/shared-library-plan.json', plan)
+            glibc.write(stage / 'deb/shared-library-plan.json', dict(plan, build_only=True))
+            with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path', return_value=freezer), \
+                    patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='x86_64', PHP_VERSIONS='8.5,8.6'):
+                glibc.capture_native_inventories()
+            self.assertEqual(captured, [('rpm', '8.5'), ('rpm', '8.6')])
+            snapshots = stage / 'common/rpm/native-inventories'
+            self.assertNotIn('error', glibc.read(snapshots / '8.5.json'))
+            self.assertIn('HTTP 522', glibc.read(snapshots / '8.6.json')['error'])
+            self.assertEqual(list((stage / 'common/deb/native-inventories').iterdir()), [])
+
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
         data = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())

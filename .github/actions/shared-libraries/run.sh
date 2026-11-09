@@ -52,6 +52,9 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
 fi
 
 case "$command" in
+    native-inventories)
+        python3 .github/actions/shared-libraries/glibc.py native-inventories
+        ;;
     classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-inline-package)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
@@ -89,9 +92,12 @@ case "$command" in
         python3 .github/actions/shared-libraries/runtime-checks.py --type "$TYPE" --payload "build/$PHPV"             --candidates "dist/$TYPE" --baseline-dir stage/published-baseline --output stage/runtime-libraries
         ;;
     freeze-baseline)
+        baseline_stage=stage
+        if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi
         baseline_args=(--packages "${PACKAGES:-}")
-        if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan stage/shared-library-plan.json); fi
-        python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline "${baseline_args[@]}"
+        if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json"); fi
+        python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
+            --inventory "$baseline_stage/native-inventories/$PHPV.json" "${baseline_args[@]}"
         ;;
     upload-1|upload-2)
         host=${command##*-}
