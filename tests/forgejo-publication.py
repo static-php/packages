@@ -259,18 +259,44 @@ class ForgejoPublication(unittest.TestCase):
             get_remote_package_files=lambda *_: [{'sha256': 'a' * 64}])
         with patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), contextlib.redirect_stdout(io.StringIO()), \
                 patch.object(publisher['stage_mirror_dependencies'].__globals__['runpy'], 'run_path') as loader:
-            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', mirrored_debug, ['85'])
+            deferred = publisher['stage_mirror_dependencies'](cohort, destination, 'apk', mirrored_debug, ['85'])
+            self.assertEqual(publisher['stage_mirror_debug'](cohort, destination, 'apk', mirrored_debug, ['85'], deferred), [])
         loader.assert_not_called()
+        debug_archive = self.archive(name='php-zts-lib-ssl-debuginfo')
+        missing_on_mirror = dict(mirrored_debug, get_remote_package_files=lambda *_: [])
+        with patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(publisher['stage_mirror_debug'].__globals__['runpy'], 'run_path',
+                    return_value={'stage_debug_archive': lambda *a, **kw: {'path': str(debug_archive)}}):
+            self.assertEqual(publisher['stage_mirror_debug'](cohort, destination, 'apk', missing_on_mirror, ['85'], deferred), [])
+        self.assertTrue((destination / debug_archive.name).is_file())
+        (destination / debug_archive.name).unlink()
         ssl.unlink()
         missing_debug = dict(mirrored_debug, remote_package_archives=lambda *_: [])
         with contextlib.redirect_stdout(io.StringIO()):
-            failures = publisher['stage_mirror_dependencies'](cohort, destination, 'apk', missing_debug, ['85'])
+            deferred = publisher['stage_mirror_dependencies'](cohort, destination, 'apk', missing_debug, ['85'])
+            failures = publisher['stage_mirror_debug'](cohort, destination, 'apk', missing_debug, ['85'], deferred)
         self.assertEqual(len(failures), 1)
         self.assertTrue(ssl.is_file())
         ssl.unlink()
         (baseline / libraries['ssl']['published_archive']).write_bytes(b'changed captured archive')
         with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
             publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper)
+
+    def test_runtime_mirror_upload_precedes_large_retained_debug_downloads(self):
+        self.archive(name='php-zts-lib-ssl')
+        self.archive(name='php-zts-lib-ssl-debuginfo')
+        events = []
+        def publish(action, host, password, kind, groups, helpers, bootstrap, mirror):
+            events.append([helper['package_metadata'](path, kind)[0] for paths in groups.values() for path in paths])
+        def debug(*args):
+            events.append('fetch retained debug')
+            return ['debug download failed']
+        with patch.dict(publisher['publish_mirror'].__globals__, {'publish': publish,
+                'stage_mirror_dependencies': lambda *_: [], 'stage_mirror_debug': debug}), \
+                patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'debug download failed'):
+                publisher['publish_mirror']('upload', self.root, self.root, 'apk', {}, ['85'], helper, True)
+        self.assertEqual(events, [['php-zts-lib-ssl'], 'fetch retained debug', ['php-zts-lib-ssl-debuginfo']])
 
     def test_candidate_lookup_only_queries_unique_selected_names(self):
         first = self.archive(name='php-zts-cli')
