@@ -93,7 +93,7 @@ Deliver the simpler implementation and measured evidence. Report remaining limit
 
 ## Implementation checkpoint — 2026-11-09
 
-The goal remains active while the final compilation runs finish. Every dispatch uses `publish=false`; no packages or compiled release caches have been published.
+The goal remains active: functional selective rebuild coverage passes, but actual extension compilation still exceeds the five-minute overhead target. Every dispatch uses `publish=false`; no packages or compiled release caches have been published.
 
 The routine flow shares SDK planning and library packaging between producers. One PHP stream stays in the restored SDK job; selected RPM/DEB packages are produced concurrently there, followed by native installation/load checks. Multiple streams retain successful-target filtering. Selected payloads contain their required runtime hosts and library closure. Unchanged selections and revision-only bumps do not compile. Obsolete Alpine classification and baseline wrappers were deleted.
 
@@ -124,3 +124,9 @@ Actual extension compilation uses a test-only `ds` recipe identity change on bra
 Native EL8 tests pass: 36 ABI-cache/policy cases (including patch skips and rebuilt-minor selection), 59 planner cases, and 12 payload-cache cases including recorded/sealed subset packaging and tamper rejection. The separate code-check workflow passes both builders. Required workflow suites pass (5 entrypoint, 51 shared-library, 22 pipeline and 19 publication cases).
 
 Published PHP streams still use static payloads, so fresh subset tests establish installation/loading of the proposed shared packages, not an upgrade from an already-published shared PHP cohort. APK ARM64 library cases additionally test the actual published private libraries. No live repository repair or package publication was performed.
+
+### Latest timing follow-up
+
+Commit `18756c8` adds a PHP compilation source bundle and selects build-only payload files before sealing. Source run [42566339737](https://github.com/static-php/packages/actions/runs/42566339737) passed with package builds and publication disabled: `downloads-php` is 160,559,067 bytes, versus 960,507,168 bytes for the complete snapshot. An actual offline `ds` rebuild passed with the smaller bundle. All 12 native payload tests pass, including selection before sealing and tamper rejection. Commit `54fc983` gives build/test-only runs independent concurrency groups while preserving the publication locks.
+
+The latest actual `ds` rebuilds passed native tests in [APK 42566768339](https://github.com/static-php/packages/actions/runs/42566768339) and [EL8 RPM/DEB 42566764363](https://github.com/static-php/packages/actions/runs/42566764363), both `publish=false`, on fixture branch `ci/simplify-extension-compile`. PHP source transfer took 8–9s. Compilation took 33.3s (APK) and 32.3s (EL8). Summing active critical-path jobs, including artifact staging and filters, leaves approximately 5m10s overhead on APK and 6m08s on EL8. These exceed the target; do not mark the goal complete. SDK restoration, full workspace copying and separate native-test job setup remain material costs. Neither the fixture branch nor these runs published packages or wrote compiled release caches.
