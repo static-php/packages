@@ -20,6 +20,11 @@ rpm_globals = rpm['published_packages'].__globals__
 
 
 class UpgradeGuards(unittest.TestCase):
+    def setUp(self):
+        client = patch.dict(forgejo_globals, {'registry_session': lambda: requests})
+        client.start()
+        self.addCleanup(client.stop)
+
     def test_rpm_metadata_retries_connection_resets_without_hiding_failures(self):
         response = contextlib.nullcontext(io.BytesIO(b'verified metadata'))
         with patch.object(rpm_globals['urllib'].request, 'urlopen', side_effect=[ConnectionResetError('reset'), response]) as request, \

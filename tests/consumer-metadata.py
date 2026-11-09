@@ -44,6 +44,9 @@ def response(payload=None, content=b''):
 
 class ConsumerMetadata(unittest.TestCase):
     def setUp(self):
+        client = patch.dict(helper_globals, {'registry_session': lambda: helper_globals['requests']})
+        client.start()
+        self.addCleanup(client.stop)
         self.temporary = TemporaryDirectory(prefix='spp-consumer-metadata-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

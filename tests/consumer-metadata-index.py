@@ -27,6 +27,9 @@ def response(status=200, content=b'', payload=None):
 
 class ConsumerIndexes(unittest.TestCase):
     def setUp(self):
+        client = patch.dict(namespace, {'registry_session': lambda: namespace['requests']})
+        client.start()
+        self.addCleanup(client.stop)
         self.consumer = {'schema': 1, 'name': 'php-zts-imagick', 'php_stream': '8.6',
                          'architecture': 'x86_64', 'libraries': ['imagemagick', 'zlib']}
         self.digest = 'a' * 64

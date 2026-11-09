@@ -46,6 +46,10 @@ def response(status=200, payload=None, data=b''):
 class ForgejoPublication(unittest.TestCase):
     def setUp(self):
         helper_globals['VERIFIED_ARCHIVE_IDENTITIES'].clear()
+        helper_globals['ARCHIVE_HEADER_IDENTITIES'].clear()
+        client = patch.dict(helper_globals, {'registry_session': lambda: helper_globals['requests']})
+        client.start()
+        self.addCleanup(client.stop)
         self.temporary = TemporaryDirectory(prefix='forgejo-publication-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -54,6 +58,59 @@ class ForgejoPublication(unittest.TestCase):
         path = self.root / f'{name}-{version}.{arch}.apk'
         path.write_bytes(apk_bytes(name, version, arch))
         return path
+
+    def test_registry_connections_are_reused_within_each_worker(self):
+        from threading import local
+        with patch.dict(helper_globals, {'REGISTRY_SESSIONS': local()}), \
+                patch.object(helper_globals['requests'], 'Session', side_effect=lambda: object()) as factory:
+            first = helper['registry_session']()
+            self.assertIs(helper['registry_session'](), first)
+            with helper_globals['ThreadPoolExecutor'](max_workers=1) as pool:
+                other = pool.submit(helper['registry_session']).result()
+                self.assertIs(pool.submit(helper['registry_session']).result(), other)
+            self.assertIsNot(first, other)
+            self.assertEqual(factory.call_count, 2)
+
+    def test_publication_reads_only_the_other_architecture_header(self):
+        import os
+        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'aarch64', signed=True) + gzip.compress(os.urandom(1024 * 1024))
+        digest = hashlib.sha256(data).hexdigest()
+        stream = io.BytesIO(data)
+        archive = response(data=data)
+        archive.raw = stream
+        files = [{'id': 42, 'name': 'php-zts-lib-ssl-3.6.0-r1.apk', 'sha256': digest}]
+        with patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), archive, response(payload=files)]) as get, \
+                patch.dict(helper_globals, {'archive_embedded_metadata': Mock(side_effect=AssertionError('Full archive read'))}):
+            first = helper['remote_package_archives']('https://example.com', '85', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+            second = helper['remote_package_archives']('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+        self.assertEqual(first[0]['arch'], 'aarch64')
+        self.assertEqual(second[0]['sha256'], digest)
+        self.assertLess(stream.tell(), 256 * 1024)
+        self.assertEqual(get.call_count, 3)
+
+    @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB reader unavailable')
+    def test_deb_publication_stops_after_the_control_header(self):
+        import os
+        def tar_member(name, content):
+            out = io.BytesIO()
+            with tarfile.open(fileobj=out, mode='w:gz') as tar:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(content)
+                tar.addfile(entry, io.BytesIO(content))
+            return out.getvalue()
+        members = [('debian-binary', b'2.0\n'), ('control.tar.gz', tar_member('control',
+            b'Package: header-test\nVersion: 1.0-1\nArchitecture: amd64\nMaintainer: Test <test@example.com>\nDescription: header test\n')),
+            ('data.tar.gz', tar_member('usr/share/test', os.urandom(1024 * 1024)))]
+        data = b'!<arch>\n'
+        for name, body in members:
+            data += (f'{name + "/":<16}{0:<12}{0:<6}{0:<6}{"100644":<8}{len(body):<10}`\n').encode() + body
+            if len(body) % 2:
+                data += b'\n'
+        stream = io.BytesIO(data)
+        archive = response()
+        archive.iter_content.side_effect = lambda size: iter(lambda: stream.read(size), b'')
+        self.assertEqual(helper['remote_archive_header'](archive, 'debian'), ('header-test', '1.0-1', 'amd64'))
+        self.assertLess(stream.tell(), 256 * 1024)
 
     def test_disconnected_registry_listing_retries_the_same_page(self):
         requests = helper_globals['requests']
