@@ -418,7 +418,7 @@ try {
         foreach ($hosts as $host) {
             foreach (['82', '83', '84', '85', '86'] as $owner) {
                 $revision = $host === $hosts[1] && $owner === '85' ? 12 : ($host === $hosts[0] && $owner === '86' ? 10 : 1);
-                $url = $host . '/api/v1/packages/' . $owner . '?type=debian&limit=1000&page=';
+                $url = $host . '/api/v1/packages/' . $owner . '?type=debian&q=php-zts-lib-&limit=1000&page=';
                 $indexes[$url . '1'] = [200, json_encode([['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-' . $revision]])];
                 $indexes[$url . '2'] = [200, '[]'];
             }

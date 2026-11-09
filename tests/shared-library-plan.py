@@ -212,6 +212,9 @@ class SharedLibraryPlan(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'build/test-only'):
                 planner['cohort'](argparse.Namespace(plan=args.output))
             args.libraries, args.packages, args.mode = None, 'curl', 'full'
+            args.request = str(directory / 'request.json')
+            Path(args.request).write_text(json.dumps({'libraries': ['other'], 'library_build_inputs': ['old'],
+                                                     'library_package_requests': ['fixture']}))
             with patch.dict(namespace, {'cached_abi': lambda *args: True}):
                 planner['prepare'](args)
             plan = json.loads(Path(args.output).read_text())

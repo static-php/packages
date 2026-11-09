@@ -191,8 +191,8 @@ def test_dependencies(kind, sdk, directory, consumers=False):
     if not plan.get('build_only'):
         return
     environment = dict(os.environ, SPP_DIST_PATH=str(directory / 'test-dependencies'),
-                       SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]))
-    environment.pop('SPP_SHARED_LIBRARY_PLAN', None)
+                       SPP_BASELINE_MANIFESTS=json.dumps([str(directory / 'baseline/shared-libraries.json')]),
+                       SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
     selected = set(plan['libraries'])
     roots = set(selected)
     if consumers:

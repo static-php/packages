@@ -22,4 +22,16 @@ foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
     }
 }
 
+$indexes = [];
+foreach (['82', '83', '84', '85', '86'] as $owner) {
+    $url = "https://example.com/api/v1/packages/{$owner}?type=alpine&q=php-zts-lib-&limit=1000&page=";
+    $indexes[$url . '1'] = [200, json_encode([['name' => 'php-zts-lib-zlib', 'version' => '1.3.1-r2']])];
+    $indexes[$url . '2'] = [200, $owner === '83' ? json_encode([['name' => 'php-zts-lib-zlib', 'version' => '1.3.1-r11']]) : '[]'];
+    $indexes[$url . '3'] = [200, '[]'];
+}
+$cache->setValue(null, $indexes);
+if (CreatePackages::getRemoteNextIteration('php-zts-lib-zlib', '1.3.1', 'aarch64', 'apk') !== 12) {
+    throw new RuntimeException('Missed a library revision on another stream owner or later filtered page');
+}
+
 echo "Passed remote revision pagination checks.\n";

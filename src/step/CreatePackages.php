@@ -53,6 +53,20 @@ class CreatePackages
         $manifestRoot = $buildroot ?? ($libsOnly && is_file(BASE_PATH . '/buildroot/shared-libraries.json') ? BASE_PATH . '/buildroot' : BUILD_ROOT_PATH);
         $shared = CraftConfig::getInstance()->getRawConfig()['build-options']['with-shared-libs'] ?? false;
         self::$sharedLibraries = SharedLibraries::load($manifestRoot, $libsOnly || $shared, self::runtimeLibdir());
+        if (self::$sharedLibraries !== null && ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN'))) {
+            $plan = self::migrationBaseline($planPath);
+            if (($plan['build_only'] ?? false) === true) {
+                // Unpublished native test dependencies are packaged locally with iteration 1.
+                foreach (self::$sharedLibraries->libraryIds() as $id) {
+                    if (self::$sharedLibraries->getPackageVersion($id, self::$packageType) !== null) {
+                        continue;
+                    }
+                    $version = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
+                    $version = self::$packageType === 'apk' ? self::toApkVersion($version) . '-r1' : $version . '-1';
+                    self::$sharedLibraries->setPackageVersion($id, self::$packageType, $version);
+                }
+            }
+        }
         if (($payload = BuildPayload::load($manifestRoot)) !== null && !$payload->isSealed()) {
             throw new RuntimeException('Seal the recorded payload before packaging it.');
         }
@@ -2354,10 +2368,14 @@ class CreatePackages
         }
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $owner ??= self::getForgejoOwner();
+        $query = str_starts_with($name, 'php-zts-lib-') ? '&q=php-zts-lib-' : '';
+        if (preg_replace('/-debuginfo$/', '', $name) === 'php-zts-runtime-layout') {
+            $query = '&q=php-zts-runtime-layout';
+        }
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {
-            $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}&limit=1000&page={$page}";
+            $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}{$query}&limit=1000&page={$page}";
             [$code, $body] = self::httpGet($url);
             if ($code !== 200 || $body === null) {
                 throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
