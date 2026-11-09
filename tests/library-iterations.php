@@ -31,6 +31,30 @@ foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
 }
 echo "Passed shared library revision lookup using only the primary registry across stream owners.\n";
 
+$allLibraries = new ReflectionProperty(CreatePackages::class, 'allLibraryRevisions');
+$allLibraries->setValue(null, true);
+try {
+    $pages = [];
+    foreach (['82', '83', '84', '85', '86'] as $owner) {
+        $url = "https://first.invalid/api/v1/packages/{$owner}?type=alpine&q=php-zts-lib-&limit=1000&page=";
+        $pages[$url . '1'] = [200, json_encode([
+            ['name' => 'php-zts-lib-openssl', 'version' => '3.6.0-r5'],
+            ['name' => 'php-zts-lib-openssl-debuginfo', 'version' => '3.6.0-r7'],
+            ['name' => 'php-zts-lib-zlib', 'version' => '1.4-r2'],
+        ])];
+        $pages[$url . '2'] = [200, '[]'];
+    }
+    $cache->setValue(null, $pages);
+    foreach ([['php-zts-lib-openssl', '3.6.0', 6], ['php-zts-lib-openssl-debuginfo', '3.6.0', 8], ['php-zts-lib-zlib', '1.4', 3]] as [$name, $version, $expected]) {
+        if (CreatePackages::getRemoteNextIteration($name, $version, 'aarch64', 'apk') !== $expected) {
+            throw new RuntimeException('Full library bump lost a revision in the shared filtered listing');
+        }
+    }
+} finally {
+    $allLibraries->setValue(null, false);
+}
+echo "Passed batched full-library revision lookup without a full-registry scan.\n";
+
 $directory = sys_get_temp_dir() . '/spp-library-revisions-' . bin2hex(random_bytes(6));
 mkdir($directory);
 foreach (['DIST_RPM_PATH', 'DIST_DEB_PATH', 'DIST_APK_PATH'] as $constant) {

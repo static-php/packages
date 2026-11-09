@@ -27,6 +27,7 @@ class CreatePackages
     private static string $packageType = 'rpm';
     private static ?string $iterationOverride = null;
     private static bool $bump = false;
+    private static bool $allLibraryRevisions = false;
     /** @var array<string, array{0:int,1:?string}> memoised HTTP GET responses (per run) */
     private static array $httpCache = [];
     /** @var array<string,string> resolved iteration per base package (name|version|arch|type) */
@@ -741,13 +742,18 @@ class CreatePackages
             'aarch64' => 'arm64',
             default => $architecture,
         } : $architecture;
-        foreach ($ids as $id) {
-            $package = new library($manifest, $id);
-            $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
-            $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
-            $release = $iteration;
-            $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $release);
-            $packages[] = $package;
+        self::$allLibraryRevisions = !array_diff($manifest->libraryIds(), $ids) && !array_diff($ids, $manifest->libraryIds());
+        try {
+            foreach ($ids as $id) {
+                $package = new library($manifest, $id);
+                $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
+                $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
+                $release = $iteration;
+                $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $release);
+                $packages[] = $package;
+            }
+        } finally {
+            self::$allLibraryRevisions = false;
         }
         foreach ($packages as $package) {
             self::createPackageWithFpm($package, $package->getVersion(), $architecture);
@@ -2481,7 +2487,11 @@ class CreatePackages
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $owner ??= self::getForgejoOwner();
         $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
-        $query = '&q=' . rawurlencode(preg_replace('/-debuginfo$/', '', $matchName));
+        // Full library repackages share one filtered listing across all selected
+        // libraries. Partial requests still query only the requested package.
+        $queryName = self::$allLibraryRevisions && str_starts_with($matchName, 'php-zts-lib-')
+            ? 'php-zts-lib-' : preg_replace('/-debuginfo$/', '', $matchName);
+        $query = '&q=' . rawurlencode($queryName);
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {
