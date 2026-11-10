@@ -1447,6 +1447,21 @@ def cell(args, prepared=None):
     return result
 
 
+def verified_unchanged_candidates(inventory, results):
+    candidates = {package['name']: package['version'] for package in inventory.get('incoming', [])
+                  if not package['name'].endswith(('-debuginfo', '-dbgsym'))}
+    if not candidates or inventory.get('incoming_changes') != []:
+        return False
+    covered = set()
+    for receipt in results:
+        if receipt.get('ok') is not True or receipt.get('second_upgrade_noop') is not True:
+            continue
+        before, after = receipt.get('actual_old_versions', {}), receipt.get('new_versions', {})
+        covered.update(name for name, version in candidates.items()
+                       if before.get(name) == version and after.get(name) == version)
+    return candidates.keys() <= covered
+
+
 def suite(args, baseline, profiles):
     mirror = PreparedMirror(args, baseline=baseline)
     results = []
@@ -1492,8 +1507,10 @@ def suite(args, baseline, profiles):
                     or receipt.get('cleanup', {}).get('complete') is False):
                 break
         exercised = any(item.get('applicable', item.get('ok', False)) for item in results)
-        result.update(ok=len(results) == len(execution_profiles) and all(item['ok'] for item in results) and exercised,
-                      applicable=exercised, interrupted=any(item.get('interrupted') for item in results))
+        unchanged = not exercised and (getattr(args, 'partial_consumers', False) or args.library_only) and verified_unchanged_candidates(getattr(mirror, 'inventory', {}), results)
+        result.update(ok=len(results) == len(execution_profiles) and all(item['ok'] for item in results) and (exercised or unchanged),
+                      applicable=exercised, unchanged_candidates_validated=bool(unchanged),
+                      interrupted=any(item.get('interrupted') for item in results))
     except BaseException as error:
         result.update(ok=False, error=str(error), interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)))
     finally:

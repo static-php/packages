@@ -694,6 +694,35 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual(calls, ['php-zts-cli'])
             self.assertTrue(json.loads(report.read_text())['interrupted'])
 
+    def test_verified_unchanged_partial_candidates_complete_without_claiming_an_update(self):
+        baseline = {'selection': {'profile': 'all', 'complete': True},
+                    'packages': [{'name': name} for name in ('php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-xdebug')]}
+        class Unchanged(PreparedStub):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.inventory = {'incoming_changes': [], 'incoming': [
+                    {'name': name, 'version': '1.2.3-r2'} for name in ('frankenphp', 'php-zts-xdebug')]}
+        for defect in (None, 'wrong-version', 'missing-coverage', 'second-upgrade'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / 'report.json'
+                arguments = ['migration-upgrade-containers.py', '--type', 'apk', '--php', '8.5', '--arch', 'x86_64',
+                    '--baseline-dir', '/unused', '--artifacts', '/unused', '--profile', 'all', '--partial-consumers', '--report', str(report)]
+                def checked(args, prepared=None):
+                    versions = {name: '1.2.3-r2' for name in args.profile.split(',')}
+                    after = dict(versions)
+                    if defect == 'wrong-version':
+                        after['php-zts-xdebug'] = '1.2.3-r1'
+                    if defect == 'missing-coverage':
+                        versions.pop('php-zts-xdebug', None)
+                    return {'ok': True, 'applicable': False, 'second_upgrade_noop': defect != 'second-upgrade',
+                            'actual_old_versions': versions, 'new_versions': after}
+                with patch.dict(scope, {'load_baseline': lambda *args: baseline, 'cell': checked, 'PreparedMirror': Unchanged}), \
+                        patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
+                    self.assertEqual(harness['main'](), 0 if defect is None else 1)
+                result = json.loads(report.read_text())
+                self.assertFalse(result['applicable'])
+                self.assertEqual(result['unchanged_candidates_validated'], defect is None)
+
     def test_unaffected_profiles_do_not_claim_a_successful_partial_update(self):
         baseline = {'selection': {'profile': 'all', 'complete': True}, 'packages': [{'name': 'php-zts-cli'}]}
         with tempfile.TemporaryDirectory(prefix='spp-migration-unaffected-') as directory:
