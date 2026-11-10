@@ -2479,7 +2479,7 @@ class CreatePackages
             $baseUrl = getenv('SPP_RPM_REPO_URL') ?: 'https://rpm.henderkes.com';
             $pattern = '#' . preg_quote($name, '#') . '-' . preg_quote($version, '#')
                 . '-(\d+)(?:\.[^."/]+){0,2}\.' . preg_quote($architecture, '#') . '\.rpm#';
-            foreach (['el8', 'el9', 'el10'] as $repository) {
+            foreach (['el8'] as $repository) {
                 $url = rtrim($baseUrl, '/') . "/{$architecture}/{$repository}/";
                 [$code, $body] = self::httpGet($url);
                 if ($code === 404) {

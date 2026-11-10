@@ -605,6 +605,16 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertEqual(self.manual_plan(bump=False)['libraries'], [])
 
 
+    def test_rebuilding_an_already_published_library_does_not_republish_it(self):
+        for selected, packages in [('fixture', None), (None, None), (None, 'curl'), (None, 'frankenphp')]:
+            with self.subTest(selected=selected, packages=packages):
+                plan = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', bump=False, mode='incremental')
+                self.assertEqual(plan['libraries'], [])
+                self.assertFalse(plan['abi_break'])
+                self.assertEqual(plan['expected_members'], [])
+                changed = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', changed=('fixture',), bump=False, mode='incremental')
+                self.assertEqual(changed['libraries'], ['fixture'])
+
     def test_cached_sdk_selection_overrides_broad_download_changes(self):
         for mode in ('incremental', 'full'):
             with self.subTest(mode=mode):

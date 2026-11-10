@@ -41,6 +41,20 @@ if (CreatePackages::getRemoteNextIteration('php-zts-lib-zlib', '1.3.1', 'aarch64
 
 echo "Passed remote revision pagination checks.\n";
 
+putenv('SPP_RPM_REPO_URL=https://example.com');
+foreach (['php-zts-lib-fixture', 'php-zts-xdebug', 'frankenphp'] as $name) {
+    $cache->setValue(null, [
+        'https://example.com/x86_64/el8/' => [200, "{$name}-1.2.3-4.x86_64.rpm"],
+        'https://example.com/x86_64/el9/' => [500, null],
+        'https://example.com/x86_64/el10/' => [500, null],
+    ]);
+    if (CreatePackages::getRemoteNextIteration($name, '1.2.3', 'x86_64', 'rpm') !== 5) {
+        throw new RuntimeException('RPM revision selection must use EL8 without querying retired repositories');
+    }
+}
+putenv('SPP_RPM_REPO_URL');
+echo "Passed library, extension and SAPI revision selection with unavailable retired repositories.\n";
+
 $baseline = tempnam(sys_get_temp_dir(), 'spp-revision-floor-');
 putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$baseline]));
 putenv('SPP_RPM_REPO_URL=https://example.com');

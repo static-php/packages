@@ -831,17 +831,17 @@ def prepare(args):
     if specified:
         requested_libraries = set(specified) | rebuilt
         selected = (requested_libraries if forced_revision
-                    else requested_libraries.intersection(set(sources) | rebuilt | metadata_libraries | abi_roots | set(old.get('publication_drift', []))))
+                    else requested_libraries.intersection(set(sources) | metadata_libraries | abi_roots | set(old.get('publication_drift', []))))
         allowed = requested_libraries | set(reverse_closure(current, requested_libraries.intersection(abi_roots)))
         unexpected = abi_roots - allowed
         if unexpected:
             raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
     else:
         if args.packages:
-            selected = set(sources) | rebuilt
+            selected = set(sources)
         else:
             if getattr(args, 'rebuilt_libraries', None) is not None:
-                selected = set(sources) | rebuilt
+                selected = set(sources)
             else:
                 selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
             selected.update(metadata_libraries)
