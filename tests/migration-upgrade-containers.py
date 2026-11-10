@@ -892,12 +892,12 @@ def inside(args):
         probe = php_probe()
         if not probe['version'].startswith(args.php + '.'):
             raise RuntimeError('Old installation selected the wrong PHP stream')
-        if not probe['curl'] or not probe['fileinfo']:
+        closure = run(['ldd', '/usr/bin/php-zts'], check=False)
+        shared = not closure.returncode and 'not found' not in closure.stdout + closure.stderr and '/php-zts/lib/' in closure.stdout
+        if not shared and (not probe['curl'] or not probe['fileinfo']):
             raise RuntimeError('Published static CLI lacks expected builtin cURL/Fileinfo')
-        if args.library_only or args.partial_consumers:
-            closure = run(['ldd', '/usr/bin/php-zts'], check=False)
-            if closure.returncode or 'not found' in closure.stdout + closure.stderr or '/php-zts/lib/' not in closure.stdout:
-                raise RuntimeError('Partial updates require an already-shared installed PHP baseline')
+        if (args.library_only or args.partial_consumers) and not shared:
+            raise RuntimeError('Partial updates require an already-shared installed PHP baseline')
         php_ini = run(['/usr/bin/php-zts', '-r', 'echo php_ini_loaded_file();']).stdout
         if not php_ini or not Path(php_ini).is_file():
             raise RuntimeError('Installed PHP has no owned php.ini to customize')
@@ -948,7 +948,7 @@ def inside(args):
             or any(before['probe'][name] and not probe[name] for name in ('curl', 'fileinfo'))):
         raise RuntimeError('Upgrade lost configuration/cURL/Fileinfo')
     for module in ('curl', 'fileinfo'):
-        if 'php-zts-' + module not in after:
+        if before['probe'][module] and 'php-zts-' + module not in after:
             raise RuntimeError('Moved module was not installed automatically: ' + module)
     libraries = sorted(name for name in after if name.startswith('php-zts-lib-'))
     if not libraries:

@@ -1,0 +1,109 @@
+name: Verify published library upgrades
+
+on:
+    workflow_dispatch:
+        inputs:
+            glibc_build_run_id:
+                description: Pre-update RPM/DEB inventory build run
+                type: string
+                required: true
+            apk_build_run_id:
+                description: Pre-update APK inventory build run
+                type: string
+                required: true
+            apk_selection_build_run_id:
+                description: Optional completed APK rollout carrying the final consumer selections
+                type: string
+                default: ""
+
+permissions:
+    contents: read
+    actions: read
+
+jobs:
+    upgrade:
+        name: Upgrade (${{ matrix.type }} ${{ matrix.arch }} php${{ matrix.php }})
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        timeout-minutes: 25
+        strategy:
+            fail-fast: false
+            max-parallel: 10
+            matrix:
+                type: [rpm, deb, apk]
+                arch: [x86_64, arm64]
+                php: ['8.2', '8.3', '8.4', '8.5', '8.6']
+        env:
+            GH_TOKEN: ${{ github.token }}
+            TYPE: ${{ matrix.type }}
+            PHPV: ${{ matrix.php }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            APK_SELECTION_RUN: ${{ inputs.apk_selection_build_run_id }}
+            BASELINE_RUN: ${{ matrix.type == 'apk' && inputs.apk_build_run_id || inputs.glibc_build_run_id }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Prepare metadata tools
+                run: |
+                    sudo apt-get update
+                    sudo apt-get install -y python3-rpm python3-requests rpm2cpio zstd
+            -   name: Read the pre-update inventory
+                run: |
+                    artifact="shared-sdk-glibc-alma8-$MATRIX_ARCH"
+                    if [[ "$TYPE" == apk ]]; then artifact="shared-libs-apk-$MATRIX_ARCH"; fi
+                    args=(--run-id "$BASELINE_RUN" --artifact "$artifact" --type "$TYPE" --php "$PHPV" --output stage/input)
+                    if [[ "$TYPE" == apk && -n "$APK_SELECTION_RUN" ]]; then args+=(--plan-run-id "$APK_SELECTION_RUN"); fi
+                    /usr/bin/python3 .github/actions/shared-libraries/artifact-json.py "${args[@]}"
+            -   name: Restore verified pre-update archives
+                id: old-cache
+                uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: stage/upgrade/old/artifacts
+                    key: published-upgrade-old-v1-${{ matrix.type }}-${{ matrix.arch }}-${{ matrix.php }}-${{ env.BASELINE_RUN }}
+                    restore-keys: native-baseline-v1-${{ matrix.type }}-${{ matrix.arch }}-${{ matrix.php }}-
+            -   name: Freeze old and currently published packages
+                run: |
+                    args=(--type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --metadata stage/input --output stage/upgrade)
+                    if [[ "$TYPE" == apk ]]; then
+                        docker run --rm -e RUNNER_UID="$(id -u)" -e RUNNER_GID="$(id -g)" -v "$PWD:/build" -w /build alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf \
+                            sh -ec 'apk add --no-cache python3 ca-certificates su-exec; su-exec "$RUNNER_UID:$RUNNER_GID" python3 tests/published-upgrade-inputs.py "$@"' sh "${args[@]}"
+                    else
+                        /usr/bin/python3 tests/published-upgrade-inputs.py "${args[@]}"
+                    fi
+            -   name: Save verified pre-update archives
+                if: steps.old-cache.outputs.cache-hit != 'true'
+                uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: stage/upgrade/old/artifacts
+                    key: published-upgrade-old-v1-${{ matrix.type }}-${{ matrix.arch }}-${{ matrix.php }}-${{ env.BASELINE_RUN }}
+            -   name: Upgrade the installed pre-update cohort
+                run: |
+                    runtime=alma8
+                    if [[ "$TYPE" == deb ]]; then runtime=debian; elif [[ "$TYPE" == apk ]]; then runtime=alpine; fi
+                    /usr/bin/python3 tests/migration-upgrade-containers.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" \
+                        --runtime "$runtime" --profile auto --partial-consumers --baseline-dir stage/upgrade/old \
+                        --artifacts stage/upgrade/new/artifacts --report stage/upgrade/native-upgrade-receipt.json
+                    /usr/bin/python3 - <<'PY'
+                    import json
+                    from pathlib import Path
+                    receipt = json.loads(Path('stage/upgrade/native-upgrade-receipt.json').read_text())
+                    assert receipt['ok'] and receipt['complete'] and receipt['native']
+                    for cell in receipt['cells']:
+                        assert cell.get('old_installation'), 'An ordinary upgrade from the installed old cohort was not tested'
+                        assert cell.get('coverage') != 'fresh_replacement_after_broken_baseline'
+                        assert cell['second_upgrade_noop']
+                        before = cell['actual_old_versions']['php-zts-imagick']
+                        assert before == cell['new_versions']['php-zts-imagick'], 'Upgrade changed unrelated Imagick'
+                    print('Ordinary upgrade passed with unchanged Imagick and a second unchanged upgrade.')
+                    PY
+            -   name: Retain native upgrade evidence
+                if: ${{ !cancelled() }}
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: published-upgrade-${{ matrix.type }}-${{ matrix.arch }}-php${{ matrix.php }}
+                    path: |
+                        stage/upgrade/inventory-audit.json
+                        stage/upgrade/native-upgrade-receipt.json
+                    retention-days: 7
+                    overwrite: true

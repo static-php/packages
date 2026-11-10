@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import zipfile
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -19,6 +21,36 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_retained_metadata_uses_bounded_verified_ranges(self):
+        reader = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/artifact-json.py'))
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr('metadata.json', '{"schema": 1}')
+            archive.writestr('unused-sdk.tar.zst', bytes(2 * 1024 * 1024))
+        raw = data.getvalue()
+        ranges = []
+        def request(session, method, url, **kwargs):
+            if method == 'HEAD':
+                return Mock(status_code=200, headers={'Content-Length': str(len(raw))})
+            match = re.fullmatch(r'bytes=(\d+)-(\d+)', kwargs['headers']['Range'])
+            start, end = map(int, match.groups())
+            ranges.append((start, end))
+            return Mock(status_code=206, headers={'Content-Range': f'bytes {start}-{end}/{len(raw)}'},
+                content=raw[start:end + 1])
+        with patch.dict(reader['RemoteZip'].__init__.__globals__, request=request):
+            with zipfile.ZipFile(reader['RemoteZip']('https://artifact.test/file')) as archive:
+                self.assertEqual(json.loads(archive.read('metadata.json')), {'schema': 1})
+        self.assertLess(sum(end - start + 1 for start, end in ranges), len(raw) // 2)
+
+    def test_retained_metadata_transport_retries_transient_errors(self):
+        reader = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/artifact-json.py'))
+        response = Mock(status_code=200)
+        session = Mock()
+        session.request.side_effect = [Mock(status_code=502), reader['requests'].ConnectionError('reset'), response]
+        with patch.dict(reader['request'].__globals__, time=Mock()):
+            self.assertIs(reader['request'](session, 'GET', 'https://artifact.test'), response)
+        self.assertEqual(session.request.call_count, 3)
+
     def test_upload_failure_report_omits_traceback_and_names_archive(self):
         reason = 'Upload failed for https://mirror.test 85/php-zts-cgi_8.5.12-6_arm64.deb: HTTP 500 after 3 attempts'
         lines = ['Traceback (most recent call last):', '  File "helper.py", line 56',
