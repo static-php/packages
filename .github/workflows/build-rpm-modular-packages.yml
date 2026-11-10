@@ -557,6 +557,7 @@ jobs:
             MATRIX_ARCH: ${{ matrix.arch }}
             PHPV: ${{ matrix.php-version }}
             PACKAGES: ${{ matrix.packages }}
+            TLS_CHECKS: ${{ matrix.tls-checks }}
             MODE: ${{ inputs.mode || 'full' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
@@ -625,7 +626,6 @@ jobs:
                 if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
-                    TLS_CHECKS: ${{ matrix.tls-checks }}
                 run: |
                     args=()
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi

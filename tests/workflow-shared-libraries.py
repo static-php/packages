@@ -668,6 +668,7 @@ class WorkflowContractTests(unittest.TestCase):
         cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
         self.assertIn('inputs.publish == true', cache['if'])
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
+        self.assertEqual(data['jobs']['package']['env']['TLS_CHECKS'], '${{ matrix.tls-checks }}')
         publish = self.publication_steps(data)
         names = [step['name'] for step in publish]
         self.assertLess(names.index('Verify selected build target'), names.index('Publish each validated PHP stream independently'))
