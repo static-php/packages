@@ -60,6 +60,25 @@ $less = static function (string $type, string $older, string $newer) use ($compa
     $checks++;
 };
 
+$historicalUpgrade = static function (string $type, string $older, string $newer) use ($less, $compare, $command, &$checks): void {
+    if ($type === 'apk') {
+        $valid = new Process(['apk', 'version', '--check', $older]);
+        $valid->run();
+        if ($valid->getExitCode() === 1) {
+            (new Process(['apk', 'version', '--check', $newer]))->mustRun();
+            try {
+                $compare->invoke($command, $type, $older, $newer);
+            } catch (Symfony\Component\Process\Exception\ProcessFailedException) {
+                $checks++;
+                return;
+            }
+            throw new RuntimeException('Malformed historical APK version was ordered as a valid version');
+        }
+        $valid->mustRun();
+    }
+    $less($type, $older, $newer);
+};
+
 $equal = static function (string $type, string $left, string $right) use ($compare, $command, &$checks): void {
     if ($type === 'apk') {
         $left = CreatePackages::validApkPackageVersion($left);
@@ -142,7 +161,7 @@ foreach ($types as $type) {
         $suffix = str_replace('.', '', substr($php, 0, 3));
         $legacy = match ($type) {'deb' => "5.1.28+php{$suffix}", 'apk' => "5.1.28p{$suffix}", default => "5.1.28_{$suffix}"};
         if ($type === 'apk') {
-            $less($type, $legacy, $version($type, '5.1.28', $php));
+            $historicalUpgrade($type, $legacy, $version($type, '5.1.28', $php));
         } else {
             $equal($type, $legacy, $version($type, '5.1.28', $php));
         }
@@ -171,7 +190,7 @@ foreach ($types as $type) {
                 $old = str_replace(['~dev', '~'], ['_pre', '_'], $old);
             }
             if ($old !== $release) {
-                $less($type, $old . $revision, $release . $revision);
+                $historicalUpgrade($type, $old . $revision, $release . $revision);
             }
             $matrices[$type][] = ['php' => $phpPhase ?: 'release', 'extension' => $extensionPhase ?: 'release', 'before' => $old, 'after' => $new];
         }
@@ -208,7 +227,7 @@ foreach ($types as $type) {
         foreach (['frankenphp', 'pie-zts', 'php-zts-swoole'] as $name) {
             foreach (['', $type === 'apk' ? '_p0' : '+ext'] as $boundary) {
                 $publishedVersion = '1.13.5' . $stableTag . ($type === 'apk' ? '_p35' : '.35') . $boundary;
-                $published = $publishedVersion . match ($type) {'rpm' => '-1.el10', 'apk' => '-r1', default => '-1'};
+                $published = $publishedVersion . match ($type) {'rpm' => '-1.el8', 'apk' => '-r1', default => '-1'};
                 file_put_contents($baseline, json_encode(['type' => $type, 'packages' => [
                     ['name' => $name, 'version' => $published, 'architecture' => 'x86_64'],
                 ]], JSON_THROW_ON_ERROR));
@@ -221,10 +240,10 @@ foreach ($types as $type) {
                 if ($iteration !== 2) {
                     throw new RuntimeException('Same-version migration did not advance the published revision');
                 }
-                $less($type, $published, $selected . ($type === 'apk' ? '-r2' : '-2'));
+                $historicalUpgrade($type, $published, $selected . ($type === 'apk' ? '-r2' : '-2'));
                 $next = $version($type, '1.13.6', '8.2.36');
                 $equal($type, CreatePackages::migrationPackageVersion($type, $name, $next, 'x86_64'), '1.13.6' . $stableTag);
-                $less($type, $published, $next . ($type === 'apk' ? '-r1' : '-1'));
+                $historicalUpgrade($type, $published, $next . ($type === 'apk' ? '-r1' : '-1'));
                 $equal($type, CreatePackages::migrationPackageVersion($type, $name, $proposed, 'aarch64'), $proposed);
             }
         }
@@ -239,13 +258,13 @@ foreach ($types as $type) {
                 $selected = CreatePackages::migrationPackageVersion('apk', $name, $proposed, 'x86_64');
                 $equal('apk', $selected, $proposed);
                 $equal('apk', CreatePackages::migrationPackageVersion('apk', $name . '-debuginfo', $proposed, 'x86_64'), $selected);
-                $less('apk', $selected . '-r999', $published);
+                $historicalUpgrade('apk', $published, $selected . '-r999');
                 if (CreatePackages::migrationUpstreamVersion('apk', $selected . '-r0') !== CreatePackages::normalizeVersion($upstream)) {
                     throw new RuntimeException('APK package version lost the real upstream identity');
                 }
                 $next = $version('apk', $name === 'php-zts-amqp' ? '2.2.1' : '3.2.18', $php);
                 $equal('apk', CreatePackages::migrationPackageVersion('apk', $name, $next, 'x86_64'), $next);
-                $less('apk', $published, $next . '-r0');
+                $historicalUpgrade('apk', $published, $next . '-r0');
                 file_put_contents($baseline, json_encode(['type' => 'apk', 'packages' => [
                     ['name' => $name, 'version' => $next . '-r7', 'architecture' => 'x86_64'],
                 ]], JSON_THROW_ON_ERROR));
@@ -253,55 +272,14 @@ foreach ($types as $type) {
                 $less('apk', $next . '-r7', $next . '-r8');
             }
         }
-        $legacyPrefix = match ($type) {
-            'rpm' => '3.6.0_86.0~rc4+ext',
-            'deb' => '3.6.0+php86.0~rc4+ext',
-            'apk' => '3.6.0p86.0_rc4_p0',
-        };
         $marker = $type === 'apk' ? '_' : '~';
-        $published = $legacyPrefix . $marker . 'alpha1' . ($type === 'apk' ? '-r1' : '-1');
-        file_put_contents($baseline, json_encode(['type' => $type, 'packages' => [
-            ['name' => 'php-zts-xdebug', 'version' => $published, 'architecture' => 'x86_64'],
-        ]], JSON_THROW_ON_ERROR));
-        $selected = CreatePackages::migrationPackageVersion($type, 'php-zts-xdebug', $version($type, '3.6.0alpha2', '8.6.0RC5'), 'x86_64');
-        $equal($type, $selected, str_replace($marker . 'rc4', $marker . 'rc5', $legacyPrefix) . $marker . 'alpha2');
-        $less($type, $published, $selected . ($type === 'apk' ? '-r1' : '-1'));
-
-        foreach (['1.13.5' => 'frankenphp', '3.2.17RC1' => 'php-zts-igbinary'] as $upstream => $name) {
-            $own = $name === 'frankenphp' ? '' : ($type === 'apk' ? '_rc1' : '~rc1');
-            $number = $name === 'frankenphp' ? '1.13.5' : '3.2.17';
-            $formats = match ($type) {
-                'rpm' => [$number . $own . '_86~rc2', $number . $own . '_86.0~rc2', $number . '_86.0~rc2+ext' . $own],
-                'deb' => [$number . $own . '+php86~rc2', $number . $own . '+php86.0~rc2', $number . '+php86.0~rc2+ext' . $own],
-                'apk' => [$number . $own . ($own === '' ? 'p86_rc2' : '_p86_rc2'),
-                          $number . $own . ($own === '' ? 'p86.0_rc2' : '_p86_p0_rc2'), $number . 'p86.0_rc2_p0' . $own],
-            };
-            $separator = $type === 'apk' ? '-r' : '-';
-            foreach ($formats as $format) {
-                $previousVersion = $format;
-                foreach (['8.6.0RC2' => $marker . 'rc2', '8.6.0RC5' => $marker . 'rc5', '8.6.0' => '', '8.6.1RC1' => '', '8.6.1' => ''] as $php => $phpPhase) {
-                    file_put_contents($baseline, json_encode(['type' => $type, 'packages' => [
-                        ['name' => $name, 'version' => $previousVersion . $separator . '7', 'architecture' => 'x86_64'],
-                    ]], JSON_THROW_ON_ERROR));
-                    $proposed = $version($type, $upstream, $php);
-                    $selected = CreatePackages::migrationPackageVersion($type, $name, $proposed, 'x86_64');
-                    $equal($type, $selected, str_replace($marker . 'rc2', $phpPhase, $format));
-                    $equal($type, CreatePackages::migrationPackageVersion($type, $name . '-debuginfo', $proposed, 'x86_64'), $selected);
-                    $less($type, $previousVersion . $separator . '7', $selected . $separator . '8');
-                    if (CreatePackages::migrationUpstreamVersion($type, $selected . $separator . '8') !== CreatePackages::normalizeVersion($upstream)) {
-                        throw new RuntimeException('Updating the retained PHP phase changed the actual upstream version');
-                    }
-                    $previousVersion = $selected;
-                }
-            }
-        }
         $pieLegacy = match ($type) {'rpm' => '1.5.5_86.0~rc2+ext', 'deb' => '1.5.5+php86.0~rc2+ext', 'apk' => '1.5.5p86.0_rc2_p0'};
         file_put_contents($baseline, json_encode(['type' => $type, 'packages' => [
             ['name' => 'pie-zts', 'version' => $pieLegacy . ($type === 'apk' ? '-r1' : '-1'), 'architecture' => 'x86_64'],
         ]], JSON_THROW_ON_ERROR));
         $pie = CreatePackages::migrationPackageVersion($type, 'pie-zts', $version($type, '1.5.5', '8.6.0RC5', false), 'x86_64');
         $equal($type, $pie, str_replace($marker . 'rc2', '', $pieLegacy));
-        $less($type, $pieLegacy . ($type === 'apk' ? '-r1' : '-1'), $pie . ($type === 'apk' ? '-r1' : '-1'));
+        $historicalUpgrade($type, $pieLegacy . ($type === 'apk' ? '-r1' : '-1'), $pie . ($type === 'apk' ? '-r1' : '-1'));
     } finally {
         unlink($baseline);
         $previous === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previous);

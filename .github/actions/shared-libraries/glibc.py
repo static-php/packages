@@ -66,34 +66,34 @@ def architecture():
 def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None):
     args = ['python3', 'bin/shared-library-plan', 'baseline', '--type', kind,
             '--arch', os.environ['MATRIX_ARCH'], '--output', directory]
-    args += ['--consumer-stream', '8.5'] if consumers else ['--skip-consumers']
+    streams = sorted(set(filter(None, os.environ.get('PHP_VERSIONS', '').split(','))) or set(STREAMS))
+    if consumers and kind == 'rpm':
+        streams = list(STREAMS)
+    args += ['--php-versions', ','.join(streams)]
+    if not consumers:
+        args += ['--skip-consumers']
     args += ['--abi-libraries', ','.join(sorted(abi_libraries))]
     if libraries is not None:
         args += ['--libraries', ','.join(sorted(libraries))]
-    if os.environ.get('PACKAGES') and os.environ.get('PUBLISH') == 'false':
-        args += ['--php-versions', os.environ.get('PHP_VERSIONS') or ','.join(STREAMS)]
     if kind == 'rpm':
         host = os.environ.get('RPM_BASE_URL', 'https://rpm.henderkes.com').rstrip('/')
         args += ['--base-url', host + '/' + architecture() + '/el8']
-        for version in ('9', '10'):
-            args += ['--baseline-url', host + '/' + architecture() + '/el' + version]
     else:
         args += ['--host', 'https://git.henderkes.com',
                  '--password-env', 'FORGEJO_PASSWORD', '--consumer-password-env', 'FORGEJO_PASSWORD']
-        if os.environ.get('LIBRARIES') and os.environ.get('PUBLISH') == 'true':
-            streams = set(filter(None, os.environ.get('PHP_VERSIONS', '').split(','))) or set(STREAMS)
-            args += ['--owners', ','.join(sorted({'85'} | {stream.replace('.', '') for stream in streams}))]
+        args += ['--owners', ','.join(stream.replace('.', '') for stream in streams)]
     run(args)
 
 
 def share_consumers(source, destination):
-    canonical = read(source / 'shared-libraries.json')
+    captured = read(source / 'shared-libraries.json')
     path = destination / 'shared-libraries.json'
     value = read(path)
-    for field in ['consumers', 'consumer_dependencies', 'consumer_components',
-                  'consumer_inventory_complete', 'consumer_inventory_stream']:
-        if field in canonical:
-            value[field] = canonical[field]
+    for field in ['consumers', 'consumer_versions', 'consumer_dependencies', 'consumer_components',
+                  'consumer_native_metadata', 'consumer_inventory_complete', 'consumer_inventory_streams',
+                  'migration_cutoffs']:
+        if field in captured:
+            value[field] = captured[field]
     write(path, value)
 
 
@@ -314,24 +314,14 @@ def classify():
              '--output', STAGE / 'effective-source-plan.json'])
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
-    pending = pending_library_roots(sdk)
-    if pending:
-        rebuild_library_consumers(pending, rebuilt, formats[0])
-    scope = None
-    if os.environ.get('LIBRARIES'):
-        graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
-        scope = graph['dependency_closure'](set(os.environ['LIBRARIES'].split(',')) | rebuilt, graph['library_graph'](read(sdk / 'shared-libraries.json')))
-    elif os.environ.get('PACKAGES') and not rebuilt:
-        scope = []
-    def read_baseline(kind):
-        baseline(kind, format_stage(kind) / 'baseline', libraries=scope)
-    with ThreadPoolExecutor(max_workers=len(formats)) as executor:
-        list(executor.map(read_baseline, formats))
+    capture_baselines()
+    scope = read(format_stage(formats[0]) / 'baseline/shared-libraries.json').get('metadata_scope')
     consumers_ready = False
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
-    for phase in range(100):
-        pending = pending_library_roots(sdk)
+    for phase in range(len(read(sdk / 'shared-libraries.json')['libraries']) + 2):
+        pending = {provider for dependencies in read(sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values()
+                   for provider in dependencies.values()}
         if pending and rebuild_library_consumers(pending, rebuilt, formats[0]):
             shared = False
             variants_ready = not glibc
@@ -358,16 +348,9 @@ def classify():
                     '--libraries', os.environ.get('LIBRARIES', ''), '--php-versions', os.environ.get('PHP_VERSIONS', ''),
                     '--packages', os.environ.get('PACKAGES', ''), '--output', directory / 'shared-library-plan.json',
                     '--manifest-output', directory / 'shared-libraries.json', '--rebuilt-libraries', ','.join(sorted(rebuilt))]
+            args += revision_flags()
             if (STAGE / 'effective-source-plan.json').is_file():
                 args += ['--request', STAGE / 'effective-source-plan.json']
-            old = directory / 'baseline/shared-libraries.json'
-            request = read(STAGE / 'effective-source-plan.json')
-            if (os.environ.get('LIBRARIES') or os.environ.get('PACKAGES')) and os.environ.get('PUBLISH') == 'false':
-                args += ['--build-only']
-            if not os.environ.get('LIBRARIES') and (os.environ.get('MODE', 'full') == 'full' or
-                    (not old.exists() or not read(old).get('libraries')) and
-                    all(request.get('requests', {}).get(stream, {}).get('full') for stream in STREAMS)):
-                args += ['--bootstrap']
             run(args)
             if glibc and not shared:
                 save_abi_cache(selected_sdk, kind)
@@ -376,15 +359,12 @@ def classify():
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
             for dependencies in read(selected_sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values():
                 reverse_roots.update(dependencies.values())
-        needs_consumers = any(plan.get('abi_break') or plan.get('bootstrap') and not plan.get('build_only') for plan in plans.values())
-        if scope is not None and any(plan.get('abi_break') for plan in plans.values()) or needs_consumers and not consumers_ready:
-            scope = None
+        needs_consumers = any(plan.get('abi_break') for plan in plans.values())
+        if needs_consumers and not consumers_ready:
             for kind in formats:
-                directory = format_stage(kind) / 'baseline'
-                shutil.rmtree(directory)
-                baseline(kind, directory, consumers=kind == formats[-1], abi_libraries=reverse_roots)
-            if glibc:
-                share_consumers(STAGE / 'deb/baseline', STAGE / 'rpm/baseline')
+                consumer_baseline = format_stage(kind) / 'consumer-baseline'
+                baseline(kind, consumer_baseline, consumers=True, libraries=[])
+                share_consumers(consumer_baseline, format_stage(kind) / 'baseline')
             consumers_ready = True
             continue
         if reverse_roots and rebuild_library_consumers(reverse_roots, rebuilt, formats[0]):
@@ -769,6 +749,35 @@ def package_inline():
     with ThreadPoolExecutor(max_workers=len(FORMATS)) as executor:
         list(executor.map(package_format, FORMATS))
     (STAGE / 'packaged-stream').write_text(os.environ['PHPV'] + '\n')
+
+
+def capture_baselines():
+    formats = ('apk',) if os.environ.get('TYPE') == 'apk' else FORMATS
+    plan = read(STAGE / 'library-build-plan.json')
+    scope = None
+    if os.environ.get('LIBRARIES') and not plan.get('full'):
+        manifest = read(ROOT / 'buildroot/shared-libraries.json')
+        roots = set(plan.get('requested', os.environ['LIBRARIES'].split(','))) | set(plan.get('selected', [])) | set(plan.get('rebuilt_libraries', []))
+        payload = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+        inventory = payload['library_graph'](manifest)
+        for name, entry in plan.get('inventory', {}).get('libraries', {}).items():
+            inventory[name] = sorted(set(inventory.get(name, [])) | set(entry.get('depends', [])))
+        affected = set(roots)
+        while True:
+            dependents = {name for name, dependencies in inventory.items() if affected.intersection(dependencies)} - affected
+            if not dependents:
+                break
+            affected.update(dependents)
+        scope = payload['dependency_closure'](affected, inventory)
+    elif os.environ.get('PACKAGES') and not plan.get('selected') and not plan.get('rebuilt_libraries') and not plan.get('full'):
+        scope = []
+    def capture(kind):
+        destination = format_stage(kind) / 'baseline'
+        if not (destination / 'shared-libraries.json').is_file():
+            baseline(kind, destination, libraries=scope)
+    with ThreadPoolExecutor(max_workers=len(formats)) as executor:
+        list(executor.map(capture, formats))
+
 
 
 def main():

@@ -17,6 +17,50 @@ spec.loader.exec_module(source)
 
 
 class SourceIdentities(unittest.TestCase):
+    def test_two_changed_libraries_do_not_select_frankenphp_or_php_streams(self):
+        previous = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
+                    'shared_configuration': 'build', 'shared_components': {},
+                    'shared_library_recipes': {'libaom': 'same', 'libjxl': 'same'}}
+        inventory = {'libraries': {'libaom': {'recipe_hash': 'same'}, 'libjxl': {'recipe_hash': 'same'}},
+                     'managed_library_artifacts': ['libaom', 'libjxl'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
+        old = {'libaom': 'old-aom', 'libjxl': 'old-jxl', 'frankenphp': 'unchanged-frankenphp'}
+        new = dict(old, libaom='new-aom', libjxl='new-jxl')
+        original = source.plan(old, new, previous, previous, configuration='build', build_inputs=inventory,
+                               library_ids={'libaom', 'libjxl'}, components={})
+        self.assertEqual(original['libraries'], ['libaom', 'libjxl'])
+        self.assertEqual(original['requests'], {})
+        self.assertEqual(original['package_requests'], {})
+        effective = source.reconcile(original, new, previous, 'build', 'changed-packaging-code', {}, inventory,
+                                     'changed-library-packaging', {}, automatic=True)
+        self.assertEqual(effective['requests'], {})
+        self.assertEqual(effective['package_requests'], {})
+        self.assertEqual(effective['library_package_requests'], [])
+
+    def test_missing_download_state_does_not_invent_library_packaging_changes(self):
+        inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
+                     'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
+        def plan(previous):
+            return source.plan({}, {}, previous, {}, configuration='build', build_inputs=inventory,
+                               library_package_configuration='packaging', variants={'rpm': 'profile'})
+        self.assertEqual(plan({})['library_package_requests'], [])
+        self.assertEqual(plan({})['variant_package_requests'], {})
+        self.assertEqual(plan({'shared_library_package_configuration': 'older-packaging'})['library_package_requests'], ['attr'])
+        self.assertEqual(plan({'shared_variant_configuration': {'rpm': 'older-profile'}})['variant_package_requests'], {'rpm': ['openssl']})
+
+    def test_legacy_snapshot_packaging_hints_need_evidence_of_a_previous_configuration(self):
+        inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
+                     'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
+        metadata = {'shared_configuration': 'build', 'shared_package_configuration': 'package',
+                    'shared_library_package_configuration': 'library-package', 'shared_variant_configuration': {'rpm': 'profile'}}
+        original = {'library_package_requests': ['attr'], 'variant_package_requests': {'rpm': ['openssl']}}
+        def reconcile():
+            return source.reconcile(original, {}, metadata, 'build', 'package', {}, inventory, 'library-package', {'rpm': 'profile'})
+        self.assertEqual(reconcile()['library_package_requests'], [])
+        self.assertEqual(reconcile()['variant_package_requests'], {})
+        original.update(library_package_baseline='older-package', variant_package_baselines={'rpm': 'older-profile'})
+        self.assertEqual(reconcile()['library_package_requests'], ['attr'])
+        self.assertEqual(reconcile()['variant_package_requests'], {'rpm': ['openssl']})
+
     def test_test_package_destination_keeps_existing_compiled_cache_identity(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

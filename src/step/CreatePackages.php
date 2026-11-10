@@ -149,7 +149,6 @@ class CreatePackages
                 }
             }
             if ($includeCli) {
-                self::prepareMigrationCutoffs();
                 self::createSapiPackage('cli');
             }
         }
@@ -163,7 +162,6 @@ class CreatePackages
             }
             self::createExtensionPackages();
             if (in_array('cli', self::$sapis, true)) {
-                self::prepareMigrationCutoffs();
                 self::createSapiPackage('cli');
             }
         }
@@ -585,18 +583,26 @@ class CreatePackages
             return;
         }
         $type = self::$packageType;
+        $selected = [];
+        if ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) {
+            $selected = self::migrationBaseline($planPath)['libraries'] ?? [];
+        }
         $packages = [];
         foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
             $baseline = self::migrationBaseline($path);
             if (($baseline['type'] ?? null) === $type) {
+                if (isset($baseline['php_stream'])) {
+                    [$phpVersion] = self::getPhpVersionAndArchitecture();
+                    if (!str_starts_with($phpVersion, $baseline['php_stream'] . '.')) {
+                        continue;
+                    }
+                }
                 array_push($packages, ...($baseline['packages'] ?? []), ...($baseline['published_packages'] ?? []));
             }
         }
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
-        $plan = ($path = getenv('SPP_SHARED_LIBRARY_PLAN')) ? self::migrationBaseline($path) : [];
         foreach (self::$sharedLibraries->libraryIds() as $id) {
-            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null
-                && (($plan['build_only'] ?? false) || in_array($id, $plan['libraries'] ?? [], true))) {
+            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null && ($packages === [] || in_array($id, $selected, true))) {
                 continue;
             }
             $source = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
@@ -646,36 +652,6 @@ class CreatePackages
             }
         }
         return 0;
-    }
-
-    private static function prepareMigrationCutoffs(): void
-    {
-        if (getenv('SPP_MIGRATION_CUTOFFS') || !getenv('SPP_BASELINE_MANIFESTS')) {
-            return;
-        }
-        $baselines = json_decode((string) getenv('SPP_BASELINE_MANIFESTS'), true, 512, JSON_THROW_ON_ERROR);
-        if (!is_array($baselines) || !array_is_list($baselines)) {
-            throw new RuntimeException('SPP_BASELINE_MANIFESTS must be a JSON array of captured baseline manifests');
-        }
-        if ($baselines === []) {
-            return;
-        }
-        $output = TEMP_DIR . '/migration-cutoffs-' . self::$packageType . '.json';
-        [$version] = self::getPhpVersionAndArchitecture();
-        preg_match('/^(\d+\.\d+)/', $version, $stream);
-        $arguments = ['python3', BASE_PATH . '/bin/shared-library-plan', 'migration-cutoffs', '--type', self::$packageType,
-            '--artifacts', DIST_PATH . '/' . self::$packageType, '--php-version', $stream[1], '--output', $output];
-        foreach ($baselines as $baseline) {
-            if (!is_string($baseline) || !is_file($baseline)) {
-                throw new RuntimeException('Missing captured migration baseline');
-            }
-            $arguments[] = '--baseline-manifest';
-            $arguments[] = $baseline;
-        }
-        $process = new Process($arguments);
-        $process->setTimeout(null);
-        $process->mustRun();
-        putenv('SPP_MIGRATION_CUTOFFS=' . $output);
     }
 
     private static function migrationConflicts(): array

@@ -147,11 +147,34 @@ try {
     $unresolved->setPackageVersion('base', 'apk', '1.0-r99');
     $resolve->invoke(null);
     expect($unresolved->getPackageVersion('base', 'apk') === '1.0-r99', 'Selected candidate library floor was lowered');
-    $buildOnlyPlan = $temporary . '/unpublished-libraries.json';
-    file_put_contents($buildOnlyPlan, json_encode(['libraries' => [], 'build_only' => true]));
-    putenv('SPP_SHARED_LIBRARY_PLAN=' . $buildOnlyPlan);
-    $resolve->invoke(null);
-    expect($unresolved->getPackageVersion('base', 'apk') === '1.0-r99', 'Unpublished fixture floor was replaced by a repository version');
+    $versionProperty = new ReflectionProperty(\staticphp\step\CreatePackages::class, 'versionArch');
+    $previousVersion = $versionProperty->getValue(null);
+    $previousPlan = getenv('SPP_SHARED_LIBRARY_PLAN');
+    $planPath = $temporary . '/library-plan.json';
+    putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
+    $typeProperty->setValue(null, 'apk');
+    $baselinePaths = [];
+    foreach (['8.2' => '1.0-r5', '8.5' => '1.0-r1'] as $stream => $version) {
+        $path = $temporary . '/stream-' . $stream . '.json';
+        file_put_contents($path, json_encode(['type' => 'apk', 'php_stream' => $stream, 'packages' => [
+            ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']],
+        ]]));
+        $baselinePaths[] = $path;
+    }
+    putenv('SPP_BASELINE_MANIFESTS=' . json_encode($baselinePaths));
+    foreach (['8.2' => '1.0-r5', '8.5' => '1.0-r1'] as $stream => $version) {
+        $versionProperty->setValue(null, [$stream . '.1', $architecture]);
+        foreach ([[], ['base']] as $selected) {
+            file_put_contents($planPath, json_encode(['libraries' => $selected]));
+            $unresolved->setPackageVersion('base', 'apk', '1.0-r9');
+            $resolve->invoke(null);
+            $expected = $selected === [] ? $version : '1.0-r9';
+            expect($unresolved->getPackageVersion('base', 'apk') === $expected, 'Library dependency revision came from the wrong PHP stream or replaced an incoming candidate');
+            expect(in_array('php-zts-lib-base>=' . $expected, $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Generated dependency floor ignored the stream baseline');
+        }
+    }
+    $versionProperty->setValue(null, $previousVersion);
+    putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     putenv($previousBaselines === false ? 'SPP_BASELINE_MANIFESTS' : 'SPP_BASELINE_MANIFESTS=' . $previousBaselines);
     putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     $sharedProperty->setValue(null, null);

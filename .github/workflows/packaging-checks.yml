@@ -62,4 +62,8 @@ jobs:
                         python3 tests/forgejo-publication.py
                         python3 tests/abi-dump-cache.py
                         python3 tests/shared-library-plan.py
+                        python3 tests/source-state.py
+                        python3 tests/source-plan-identities.py
+                        python3 tests/publication-baselines.py
+                        python3 tests/publication-retry-plan.py
                     '
