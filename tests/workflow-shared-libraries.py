@@ -648,6 +648,9 @@ class WorkflowContractTests(unittest.TestCase):
     def test_glibc_validation_only_cannot_publish_or_save_release_caches(self):
         data = dict(self.workflows())['build-rpm-modular-packages.yml']
         self.assertIn('inputs.publish == true', data['jobs']['publish']['if'])
+        runner = (ROOT / '.github/actions/shared-libraries/run.sh').read_text()
+        self.assertNotIn('--baseline-directory', runner)
+        self.assertIn('--remote-directory \"$RPM_DIRECTORY\"', runner)
         cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
         self.assertIn('inputs.publish == true', cache['if'])
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
