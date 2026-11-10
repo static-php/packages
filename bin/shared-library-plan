@@ -824,6 +824,7 @@ def prepare(args):
             versions.pop(args.type, None)
     sources = source_changes(old, current)
     content_sources = source_changes(dict(old, stream_libraries={}), current)
+    publication_changes = set(sources) if getattr(args, 'rebuilt_libraries', None) is None else set(sources) & rebuilt
     abi_roots = set(divergent) | {identifier for identifier, change in comparison['libraries'].items() if change['status'] in ['breaking', 'removed']}
     unknown = (set(specified) | rebuilt) - current['libraries'].keys()
     if unknown:
@@ -838,10 +839,10 @@ def prepare(args):
             raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
     else:
         if args.packages:
-            selected = set(sources)
+            selected = set(publication_changes)
         else:
             if getattr(args, 'rebuilt_libraries', None) is not None:
-                selected = set(sources)
+                selected = set(publication_changes)
             else:
                 selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
             selected.update(metadata_libraries)

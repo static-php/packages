@@ -615,6 +615,16 @@ class SharedLibraryPlan(unittest.TestCase):
                 changed = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', changed=('fixture',), bump=False, mode='incremental')
                 self.assertEqual(changed['libraries'], ['fixture'])
 
+    def test_unrebuilt_cached_library_differences_do_not_join_php_updates(self):
+        for packages in (None, 'curl', 'frankenphp'):
+            with self.subTest(packages=packages):
+                plan = self.manual_plan(selected=None, packages=packages, rebuilt='', changed=('other',), bump=False, mode='incremental')
+                self.assertEqual(plan['libraries'], [])
+                actual = self.manual_plan(selected=None, packages=packages, rebuilt='fixture', changed=('fixture', 'other'), bump=False, mode='incremental')
+                self.assertEqual(actual['libraries'], ['fixture'])
+        explicit = self.manual_plan(selected='other', rebuilt='', changed=('other',), bump=False, mode='incremental')
+        self.assertEqual(explicit['libraries'], ['other'])
+
     def test_cached_sdk_selection_overrides_broad_download_changes(self):
         for mode in ('incremental', 'full'):
             with self.subTest(mode=mode):
