@@ -413,7 +413,7 @@ def main():
     parser.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
     parser.add_argument('--php', choices=('8.2', '8.3', '8.4', '8.5', '8.6'), required=True)
     parser.add_argument('--arch', choices=('x86_64', 'arm64'), required=True)
-    parser.add_argument('--el', choices=('el8', 'el9', 'el10'), default='el8')
+    parser.add_argument('--el', choices=('el8',), default='el8')
     parser.add_argument('--base-url')
     parser.add_argument('--inventory', type=Path, help='Use the run-pinned published metadata without reading the live indexes')
     parser.add_argument('--profile', default=DEFAULT_PROFILE)

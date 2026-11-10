@@ -230,9 +230,23 @@ class MatrixTests(unittest.TestCase):
             builds, _ = workflow.matrix(root, ['8.4'])
             self.assertEqual(builds[0]['packages'], 'imagick,redis')
 
+    def test_removed_el_targets_are_rejected_before_registry_or_repository_reads(self):
+        for alma in ('9', '10'):
+            for kind in ('rpm', 'glibc'):
+                argv = ['workflow.py', 'setup', '--type=' + kind, '--alma-versions=' + alma, '--resolve-images']
+                with self.subTest(kind=kind, alma=alma), mock.patch('sys.argv', argv), \
+                        mock.patch.object(workflow.subprocess, 'check_output') as inspect:
+                    with self.assertRaisesRegex(RuntimeError, 'Only the EL8'):
+                        workflow.main()
+                    inspect.assert_not_called()
+            result = subprocess.run([sys.executable, str(ROOT / 'bin/freeze-migration-baseline.py'),
+                '--type=rpm', '--php=8.5', '--arch=x86_64', '--el=el' + alma, '--output=unused'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('invalid choice', result.stderr)
+
     def test_builder_tags_are_resolved_once_and_pinned_for_all_arches(self):
         digest = 'sha256:' + '1' * 64
-        for kind, calls, targets in [('rpm', 3, 6), ('glibc', 2, 2), ('apk', 1, 2)]:
+        for kind, calls, targets in [('rpm', 1, 2), ('glibc', 2, 2), ('apk', 1, 2)]:
             output = io.StringIO()
             argv = ['workflow.py', 'setup', '--type=' + kind, '--resolve-images']
             with self.subTest(kind=kind), mock.patch('sys.argv', argv), mock.patch('sys.stdout', output), mock.patch.object(workflow.subprocess, 'check_output', return_value=json.dumps({'digest': digest})) as inspect:

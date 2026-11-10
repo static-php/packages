@@ -297,9 +297,9 @@ def main():
         archs = ["arm64" if arch == "aarch64" else "x86_64" if args.type == "glibc" and arch == "amd64" else arch for arch in archs]
         if any(arch not in (["amd64", "arm64"] if args.type == "deb" else ["x86_64", "arm64"]) for arch in archs):
             raise RuntimeError("Unsupported architecture")
-        alms = ["8"] if args.type == "glibc" else csv(args.alma_versions, ["8", "9", "10"]) if args.type == "rpm" else [""]
-        if args.type == "rpm" and any(alma not in ["8", "9", "10"] for alma in alms):
-            raise RuntimeError("Unsupported Alma version")
+        alms = csv(args.alma_versions, ["8"]) if args.type in ("glibc", "rpm") else [""]
+        if args.type in ("glibc", "rpm") and any(alma != "8" for alma in alms):
+            raise RuntimeError("Only the EL8 glibc producer is supported")
         values = [{"arch": arch, "alma": alma, "target": ("alma" + alma + "-" if alma else "") + arch} for alma in alms for arch in archs]
         images = {}
         for value in values:
