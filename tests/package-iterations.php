@@ -175,3 +175,65 @@ try {
     $bulk->setValue(null, false);
 }
 echo "Passed shared bulk inventories for PHP package revisions with later pages and orphaned debug counterparts.\n";
+
+$retryDirectory = sys_get_temp_dir() . '/spp-revision-http-' . bin2hex(random_bytes(6));
+mkdir($retryDirectory);
+$originalPath = getenv('PATH');
+$originalProcessEnvironment = [$_ENV, $_SERVER];
+$retryState = $retryDirectory . '/state.json';
+$http = new ReflectionMethod(CreatePackages::class, 'httpGet');
+file_put_contents($retryDirectory . '/curl', <<<'PHP'
+#!/usr/bin/env php
+<?php
+$path = __DIR__ . '/state.json';
+$state = json_decode(file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+$index = $state['attempts']++;
+$state['urls'][] = end($argv);
+file_put_contents($path, json_encode($state, JSON_THROW_ON_ERROR));
+$response = $state['responses'][min($index, count($state['responses']) - 1)];
+if ($response[0] === 0) {
+    exit(7);
+}
+echo $response[1] . "\n" . $response[0];
+PHP);
+chmod($retryDirectory . '/curl', 0755);
+putenv('PATH=' . $retryDirectory . ':' . $originalPath);
+$_ENV['PATH'] = $_SERVER['PATH'] = $retryDirectory . ':' . $originalPath;
+try {
+    foreach ([
+        'temporary-server' => [[[500, 'first error'], [502, 'second error'], [200, 'final body']], 3, [200, 'final body']],
+        'temporary-connection' => [[[0, ''], [200, 'connected']], 2, [200, 'connected']],
+        'permanent-error' => [[[403, 'forbidden']], 1, [403, 'forbidden']],
+        'exhausted-retries' => [[[503, 'unavailable']], 3, [503, 'unavailable']],
+    ] as $name => [$responses, $attempts, $expected]) {
+        $cache->setValue(null, []);
+        $url = 'https://fixture.invalid/' . $name;
+        file_put_contents($retryState, json_encode(['attempts' => 0, 'urls' => [], 'responses' => $responses], JSON_THROW_ON_ERROR));
+        if ($http->invoke(null, $url) !== $expected) {
+            throw new RuntimeException('Incorrect revision HTTP result after ' . $name);
+        }
+        $state = json_decode(file_get_contents($retryState), true, 512, JSON_THROW_ON_ERROR);
+        if ($state['attempts'] !== $attempts || $state['urls'] !== array_fill(0, $attempts, $url)) {
+            throw new RuntimeException('Incorrect bounded revision HTTP attempts for ' . $name);
+        }
+        if ($expected[0] === 503) {
+            file_put_contents($retryState, json_encode(['attempts' => 0, 'urls' => [], 'responses' => [[200, 'recovered']]], JSON_THROW_ON_ERROR));
+            if ($http->invoke(null, $url) !== [200, 'recovered']) {
+                throw new RuntimeException('Transient revision HTTP failure was cached');
+            }
+        } else {
+            $http->invoke(null, $url);
+            if (json_decode(file_get_contents($retryState), true, 512, JSON_THROW_ON_ERROR)['attempts'] !== $attempts) {
+                throw new RuntimeException('Stable revision HTTP result was not reused');
+            }
+        }
+    }
+} finally {
+    putenv('PATH=' . $originalPath);
+    [$_ENV, $_SERVER] = $originalProcessEnvironment;
+    unlink($retryDirectory . '/curl');
+    unlink($retryState);
+    rmdir($retryDirectory);
+    $cache->setValue(null, []);
+}
+echo "Passed bounded revision lookup retries, successful body isolation and transient-error cache handling.\n";

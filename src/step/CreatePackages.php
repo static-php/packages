@@ -2599,7 +2599,7 @@ class CreatePackages
         // listing is far smaller/faster than the HTML autoindex (e.g. 0.8MB/2s vs 4MB/120s);
         // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
         // both payloads, so the same regex extracts iterations either way.
-        $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
+        $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--connect-timeout', '10', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
         if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
             $owner = rawurldecode($m[1]);
             $password = getenv('FORGEJO_PASSWORD') ?: '';
@@ -2607,18 +2607,23 @@ class CreatePackages
                 $arguments = [...$arguments, '--user', $owner . ':' . $password];
             }
         }
-        $process = new Process([...$arguments, $url]);
-        $process->run();
-        if (!$process->isSuccessful()) {
-            return [0, null]; // transport failure: do not cache, allow a retry
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $process = new Process([...$arguments, $url]);
+            $process->setTimeout(100);
+            $process->run();
+            $output = $process->getOutput();
+            $nl = strrpos($output, "\n");
+            $result = $process->isSuccessful() && $nl !== false
+                ? [(int) substr($output, $nl + 1), substr($output, 0, $nl)] : [0, null];
+            if (!in_array($result[0], [0, 408, 425, 429, 500, 502, 503, 504], true)) {
+                self::$httpCache[$url] = $result;
+                return $result;
+            }
+            if ($attempt < 3) {
+                fwrite(STDERR, "Retrying GET {$url} after HTTP {$result[0]} (attempt " . ($attempt + 1) . "/3)\n");
+                usleep(1000000 * $attempt);
+            }
         }
-        $output = $process->getOutput();
-        $nl = strrpos($output, "\n");
-        if ($nl === false) {
-            return [0, null];
-        }
-        $result = [(int)substr($output, $nl + 1), substr($output, 0, $nl)];
-        self::$httpCache[$url] = $result;
         return $result;
     }
 
