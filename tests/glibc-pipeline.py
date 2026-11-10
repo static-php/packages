@@ -58,6 +58,51 @@ class Pipeline(unittest.TestCase):
                     glibc.publication_baseline(kind, Path('current-baseline'), {'baseline_states': states})
                     baseline.assert_called_once_with(kind, Path('current-baseline'), libraries=expected)
 
+    def test_publication_guard_accepts_recorded_scope_and_rejects_real_changes(self):
+        planner = glibc.runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
+        for kind in ('rpm', 'deb', 'apk'):
+            for arch in ('x86_64', 'arm64'):
+                for scope in (None, [], ['libaom', 'libjxl', 'missing']):
+                    for change in ('unchanged', 'outside-scope', 'selected-library', 'runtime-layout'):
+                        with self.subTest(kind=kind, arch=arch, scope=scope, change=change), tempfile.TemporaryDirectory() as temporary:
+                            root = Path(temporary)
+                            libraries = {name: {'version': '1.0', 'elf': {}, 'package_versions': {}}
+                                         for name in ('libaom', 'libjxl', 'other')}
+                            def project(remote, selected):
+                                result = copy.deepcopy(remote)
+                                if selected is not None:
+                                    result['libraries'] = {name: value for name, value in result['libraries'].items() if name in selected}
+                                    result['metadata_scope'] = sorted(selected)
+                                return result
+                            remote = {'schema': 1, 'linkage': 'shared', 'runtime_libdir': '/usr/lib/php-zts/lib',
+                                      'architecture': 'aarch64' if arch == 'arm64' else arch,
+                                      'libc': 'musl' if kind == 'apk' else 'glibc', 'libraries': libraries}
+                            previous = project(remote, scope)
+                            plan = {'schema': 1, 'baseline_fingerprint': planner['fingerprint'](previous),
+                                    'baseline_states': [previous]}
+                            if change in ('outside-scope', 'selected-library'):
+                                remote['libraries']['other' if change == 'outside-scope' else 'libjxl']['version'] = '2.0'
+                            elif change == 'runtime-layout':
+                                remote['runtime_layout'] = {'package_version': '2-1', 'archive_sha256': 'changed'}
+                            def fetch(arguments):
+                                selected = arguments[arguments.index('--libraries') + 1].split(',') if '--libraries' in arguments else None
+                                selected = set(filter(None, selected)) if selected is not None else None
+                                glibc.write(Path(arguments[arguments.index('--output') + 1]) / 'shared-libraries.json', project(remote, selected))
+                            with patch.object(glibc, 'run', fetch), patch.dict(os.environ, MATRIX_ARCH=arch, PHP_VERSIONS=''):
+                                glibc.publication_baseline(kind, root / 'current', plan)
+                            glibc.write(root / 'plan.json', plan)
+                            artifacts = root / 'archives'
+                            artifacts.mkdir()
+                            args = glibc.SimpleNamespace(plan=root / 'plan.json', baseline_manifest=root / 'current/shared-libraries.json',
+                                artifacts=artifacts, type=kind, output=root / 'cohort.json', php_streams='')
+                            changed = change == 'runtime-layout' or (change == 'selected-library' and scope != []) or (change == 'outside-scope' and scope is None)
+                            if changed:
+                                with self.assertRaisesRegex(RuntimeError, 'baseline changed during the build'):
+                                    planner['cohort'](args)
+                            else:
+                                planner['cohort'](args)
+                                self.assertEqual(json.loads(args.output.read_text())['plan_fingerprint'], planner['digest'](plan))
+
     def test_explicit_iteration_cannot_silently_disable_bumping(self):
         with patch.dict(os.environ, ITERATION='5', BUMP='true'):
             with self.assertRaisesRegex(RuntimeError, 'Choose bump=true or an explicit iteration'):

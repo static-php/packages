@@ -47,7 +47,10 @@ jobs:
                         composer install --no-interaction --prefer-dist --no-progress
                         php tests/builder-tool-cache.php
                         php tests/build-payload.php
-                        python3 tests/glibc-pipeline.py Pipeline.test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild
+                        python3 tests/glibc-pipeline.py \
+                            Pipeline.test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild \
+                            Pipeline.test_publication_rechecks_the_recorded_library_baseline_scope \
+                            Pipeline.test_publication_guard_accepts_recorded_scope_and_rejects_real_changes
                         php tests/package-iterations.php
                         python3 tests/apk-reuse-published.py
                         for format in ${FORMATS//,/ }; do php tests/package-versions.php --type="$format"; done
