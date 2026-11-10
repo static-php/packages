@@ -432,6 +432,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(inputs['php_version']['default'], 'all')
         self.assertFalse(inputs['skip_mirror']['default'])
         self.assertIn('!inputs.skip_mirror', self.workflow['jobs']['mirror']['if'])
+        self.assertEqual(self.workflow['jobs']['mirror']['strategy']['max-parallel'], 2)
         self.assertIn("inputs.mirror_run_id == ''", self.workflow['jobs']['publish']['if'])
         self.assertEqual(self.workflow['jobs']['mirror']['with']['primary-run-id'], '${{ inputs.mirror_run_id }}')
         download = next(step for step in self.publisher['jobs']['publish-glibc']['steps']
@@ -467,7 +468,7 @@ class WorkflowContracts(unittest.TestCase):
             if name != 'build-apk-forgejo.yml':
                 self.assertEqual(job['with']['package-image-digest'], '${{ matrix.package-image-digest }}')
         self.assertEqual(self.publisher['concurrency'], {
-            'group': "${{ inputs.mirror && 'shared-publish-host2' || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}", 'cancel-in-progress': False, 'queue': 'max'})
+            'group': "${{ inputs.mirror && format('shared-publish-host2-{0}-{1}', inputs.format, inputs.target) || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}", 'cancel-in-progress': False, 'queue': 'max'})
         self.assertNotIn('container', self.publisher['jobs']['publish-apk'])
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")

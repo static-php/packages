@@ -110,7 +110,7 @@ jobs:
             actions: read
         strategy:
             fail-fast: false
-            max-parallel: 1
+            max-parallel: 2
             matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
         uses: ./.github/workflows/publish-package-cohort.yml
         with:
