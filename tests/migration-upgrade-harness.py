@@ -93,6 +93,27 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertIn('php-zts-imagick', saved['installed'])
             self.assertIn('memory_limit=321M', ini.read_text())
 
+    def test_apk_metadata_transport_retries_without_retrying_package_failures(self):
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise RuntimeError('WARNING: updating APKINDEX.tar.gz: DNS: transient error (try again later)')
+            return SimpleNamespace(returncode=0)
+        with patch.dict(scope, run=execute, time=SimpleNamespace(sleep=lambda _: None)), patch('sys.stdout', new_callable=io.StringIO):
+            harness['ordinary_upgrade']('apk')
+        self.assertEqual(calls, [['apk', 'update', '--cache-max-age', '0'],
+            ['apk', 'update', '--cache-max-age', '0'], ['apk', 'upgrade']])
+        calls.clear()
+        def bad_upgrade(command, **kwargs):
+            calls.append(command)
+            if command[1] == 'upgrade':
+                raise RuntimeError('candidate package failed')
+            return SimpleNamespace(returncode=0)
+        with patch.dict(scope, run=bad_upgrade), self.assertRaisesRegex(RuntimeError, 'candidate package failed'):
+            harness['ordinary_upgrade']('apk')
+        self.assertEqual(len(calls), 2)
+
     def test_native_command_timeout_terminates_the_process(self):
         processes = []
         popen = subprocess.Popen

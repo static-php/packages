@@ -7,6 +7,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import lzma
@@ -40,8 +41,8 @@ def fetch(url):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
-        except (urllib.error.URLError, TimeoutError) as error:
-            retry = not isinstance(error, urllib.error.HTTPError) or error.code in (408, 429, 500, 502, 503, 504, 522, 524)
+        except (OSError, http.client.HTTPException) as error:
+            retry = not isinstance(error, urllib.error.HTTPError) or error.code in (408, 429) or 500 <= error.code < 600
             if not retry:
                 raise
             if attempt == 2:

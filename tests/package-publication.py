@@ -21,6 +21,24 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_published_upgrade_matrix_retries_only_selected_native_cells(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/verify-published-upgrades.yml').read_text())
+        step = workflow['jobs']['prepare']['steps'][0]
+        script = step['run'].split("python3 - <<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            for selection, count in [('', 30), ('rpm:arm64:8.2,apk:x86_64:8.4,rpm:arm64:8.2', 2)]:
+                environment = dict(os.environ, SELECTED_TARGETS=selection, GITHUB_OUTPUT=str(output))
+                subprocess.run([sys.executable, '-c', script], env=environment, check=True)
+                fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(len(json.loads(fields['matrix'])['include']), count)
+                self.assertEqual(fields['any'], 'true')
+                output.unlink()
+            rejected = subprocess.run([sys.executable, '-c', script], env=dict(os.environ,
+                SELECTED_TARGETS='rpm:wrong:8.4', GITHUB_OUTPUT=str(output)), stderr=subprocess.PIPE)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(output.exists())
+
     def test_retained_metadata_uses_bounded_verified_ranges(self):
         reader = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/artifact-json.py'))
         data = io.BytesIO()

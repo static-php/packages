@@ -16,22 +16,48 @@ on:
                 type: string
                 default: ""
 
+            targets:
+                description: Optional comma-separated format:architecture:PHP targets to retry
+                type: string
+                default: ""
+
 permissions:
     contents: read
     actions: read
 
 jobs:
+    prepare:
+        runs-on: ubuntu-24.04
+        outputs:
+            matrix: ${{ steps.matrix.outputs.matrix }}
+            any: ${{ steps.matrix.outputs.any }}
+        steps:
+            -   name: Select native upgrade targets
+                id: matrix
+                env:
+                    SELECTED_TARGETS: ${{ inputs.targets }}
+                run: |
+                    python3 - <<'PY'
+                    import itertools, json, os
+                    allowed = list(itertools.product(('rpm', 'deb', 'apk'), ('x86_64', 'arm64'), ('8.2', '8.3', '8.4', '8.5', '8.6')))
+                    selected = [tuple(value.strip().split(':')) for value in os.environ['SELECTED_TARGETS'].split(',') if value.strip()]
+                    selected = list(dict.fromkeys(selected)) if selected else allowed
+                    if set(selected) - set(allowed):
+                        raise RuntimeError('Unsupported native upgrade target')
+                    matrix = {'include': [dict(zip(('type', 'arch', 'php'), target)) for target in selected]}
+                    with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                        output.write('matrix=' + json.dumps(matrix) + '\nany=' + str(bool(selected)).lower() + '\n')
+                    PY
     upgrade:
         name: Upgrade (${{ matrix.type }} ${{ matrix.arch }} php${{ matrix.php }})
+        needs: prepare
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         timeout-minutes: 25
         strategy:
             fail-fast: false
             max-parallel: 10
-            matrix:
-                type: [rpm, deb, apk]
-                arch: [x86_64, arm64]
-                php: ['8.2', '8.3', '8.4', '8.5', '8.6']
+            matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
         env:
             GH_TOKEN: ${{ github.token }}
             TYPE: ${{ matrix.type }}
@@ -66,7 +92,7 @@ jobs:
                 run: |
                     args=(--type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --metadata stage/input --output stage/upgrade)
                     if [[ "$TYPE" == apk ]]; then
-                        docker run --rm -e RUNNER_UID="$(id -u)" -e RUNNER_GID="$(id -g)" -v "$PWD:/build" -w /build alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf \
+                        docker run --rm -e RUNNER_UID="$(id -u)" -e RUNNER_GID="$(id -g)" -v "$PWD:/build" -w /build alpine@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab \
                             sh -ec 'apk add --no-cache python3 ca-certificates su-exec; su-exec "$RUNNER_UID:$RUNNER_GID" python3 tests/published-upgrade-inputs.py "$@"' sh "${args[@]}"
                     else
                         /usr/bin/python3 tests/published-upgrade-inputs.py "${args[@]}"

@@ -1,6 +1,8 @@
 """Regression checks for genuine published baseline capture."""
 
 import base64
+import contextlib
+import http.client
 import gzip
 import hashlib
 import io
@@ -13,7 +15,7 @@ from threading import Event
 from types import SimpleNamespace
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 helper = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/freeze-migration-baseline.py'))
@@ -120,6 +122,24 @@ class BaselineCapture(unittest.TestCase):
             args.arch = 'arm64'
             with self.assertRaisesRegex(RuntimeError, 'does not match'):
                 helper['freeze'](args)
+
+    def test_disconnected_and_truncated_archive_reads_retry_before_using_bytes(self):
+        scope = helper['fetch'].__globals__
+        url = 'https://example.test/package.rpm'
+        failures = [http.client.IncompleteRead(b'partial', 100),
+                    http.client.RemoteDisconnected('connection closed'), ConnectionResetError('reset')]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                broken = contextlib.nullcontext(SimpleNamespace(read=Mock(side_effect=failure)))
+                complete = contextlib.nullcontext(io.BytesIO(b'complete archive'))
+                with patch.object(scope['urllib'].request, 'urlopen', side_effect=[broken, complete]) as opened, \
+                        patch.object(scope['time'], 'sleep'):
+                    self.assertEqual(helper['fetch'](url), b'complete archive')
+                    self.assertEqual(opened.call_count, 2)
+                with patch.object(scope['urllib'].request, 'urlopen', side_effect=failure) as opened, \
+                        patch.object(scope['time'], 'sleep'), self.assertRaisesRegex(RuntimeError, url):
+                    helper['fetch'](url)
+                self.assertEqual(opened.call_count, 3)
 
     def test_transient_download_retries_are_bounded_and_keep_the_url(self):
         url = 'https://example.test/failed.rpm'

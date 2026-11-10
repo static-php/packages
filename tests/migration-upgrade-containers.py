@@ -557,7 +557,7 @@ def configure_client(kind, stream, arch, runtime, modules=True):
     shutil.copy2('/spp/keys/spp-migration.rsa.pub', '/etc/apk/keys/spp-migration.rsa.pub')
     with open('/etc/apk/repositories', 'a') as output:
         output.write('\nhttp://repo:8080/apk\n')
-    run(['apk', 'update'])
+    update_apk_indexes()
     return '/etc/apk/repositories', '/etc/apk/keys/spp-migration.rsa.pub'
 
 
@@ -615,13 +615,24 @@ def assert_disabled_extension(state, probe):
         raise RuntimeError('Upgrade changed or re-enabled the user-disabled extension ' + state['extension'])
 
 
+def update_apk_indexes(*options):
+    for attempt in range(3):
+        try:
+            return run(['apk', 'update', *options])
+        except RuntimeError as error:
+            if attempt == 2 or not re.search(r'DNS:|temporary error|connection (?:reset|refused)|HTTP[^\n]*5\d\d', str(error), re.I):
+                raise
+            annotation('warning', f'APK repository index transport failed; retrying ({attempt + 2}/3)')
+            time.sleep(attempt + 1)
+
+
 def ordinary_upgrade(kind):
     if kind == 'rpm':
         return run(['dnf', 'upgrade', '-y'])
     if kind == 'deb':
         run(['apt-get', 'update'])
         return run(['apt', 'upgrade', '-y'], input='\n' * 32)
-    run(['apk', 'update', '--cache-max-age', '0'])
+    update_apk_indexes('--cache-max-age', '0')
     return run(['apk', 'upgrade'])
 
 
