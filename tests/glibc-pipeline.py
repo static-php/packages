@@ -48,6 +48,15 @@ class Pipeline(unittest.TestCase):
                 glibc.baseline('apk', Path('baseline'))
                 self.assertEqual(run.call_args.args[0][run.call_args.args[0].index('--owners') + 1], '84,86')
 
+    def test_publication_rechecks_the_recorded_library_baseline_scope(self):
+        for kind in ('rpm', 'deb', 'apk'):
+            for states, expected in [([], None), ([{'libraries': {}}], set()),
+                    ([{'libraries': {'libaom': {}, 'libjxl': {}, 'brotli': {}}}], {'libaom', 'libjxl', 'brotli'}),
+                    ([{'libraries': {'libaom': {}}}, {'libraries': {'libjxl': {}}}], {'libaom', 'libjxl'})]:
+                with self.subTest(kind=kind, states=states), patch.object(glibc, 'baseline') as baseline:
+                    glibc.publication_baseline(kind, Path('current-baseline'), {'baseline_states': states})
+                    baseline.assert_called_once_with(kind, Path('current-baseline'), libraries=expected)
+
     def test_explicit_iteration_cannot_silently_disable_bumping(self):
         with patch.dict(os.environ, ITERATION='5', BUMP='true'):
             with self.assertRaisesRegex(RuntimeError, 'Choose bump=true or an explicit iteration'):

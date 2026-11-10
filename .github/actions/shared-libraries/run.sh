@@ -174,7 +174,8 @@ case "$command" in
 import os, runpy
 from pathlib import Path
 helper = runpy.run_path('.github/actions/shared-libraries/glibc.py')
-helper['baseline'](os.environ['TYPE'], Path('current-baseline'))
+plan = helper['read'](Path('cohort') / ('shared-libs-' + os.environ['TYPE'] + '-' + os.environ['TARGET']) / 'shared-library-plan.json')
+helper['publication_baseline'](os.environ['TYPE'], Path('current-baseline'), plan)
 PY
         fi
         baseline_args=()

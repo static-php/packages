@@ -85,6 +85,13 @@ def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None)
     run(args)
 
 
+
+def publication_baseline(kind, directory, plan):
+    captured = plan.get('baseline_states', [])
+    libraries = set().union(*(set(value.get('libraries', {})) for value in captured)) if captured else None
+    baseline(kind, directory, libraries=libraries)
+
+
 def share_consumers(source, destination):
     captured = read(source / 'shared-libraries.json')
     path = destination / 'shared-libraries.json'
