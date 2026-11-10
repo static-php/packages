@@ -1450,8 +1450,13 @@ def cell(args, prepared=None):
 def verified_unchanged_candidates(inventory, results):
     candidates = {package['name']: package['version'] for package in inventory.get('incoming', [])
                   if not package['name'].endswith(('-debuginfo', '-dbgsym'))}
-    if not candidates or inventory.get('incoming_changes') != []:
+    changes = inventory.get('incoming_changes')
+    if not candidates or not isinstance(changes, list) or any(not name.endswith(('-debuginfo', '-dbgsym')) for name in changes):
         return False
+    for package in inventory.get('incoming', []):
+        base = package['name'].removesuffix('-debuginfo').removesuffix('-dbgsym')
+        if candidates.get(base) != package['version']:
+            return False
     covered = set()
     for receipt in results:
         if receipt.get('ok') is not True or receipt.get('second_upgrade_noop') is not True:

@@ -700,9 +700,14 @@ class MigrationUpgradeHarness(unittest.TestCase):
         class Unchanged(PreparedStub):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.inventory = {'incoming_changes': [], 'incoming': [
-                    {'name': name, 'version': '1.2.3-r2'} for name in ('frankenphp', 'php-zts-xdebug')]}
-        for defect in (None, 'wrong-version', 'missing-coverage', 'second-upgrade'):
+                self.inventory = {'incoming_changes': ['frankenphp-debuginfo', 'php-zts-xdebug-debuginfo'], 'incoming': [
+                    {'name': name + suffix, 'version': '1.2.3-r2'} for name in ('frankenphp', 'php-zts-xdebug')
+                    for suffix in ('', '-debuginfo')]}
+                if defect == 'mismatched-debug':
+                    self.inventory['incoming'][-1]['version'] = '1.2.3-r3'
+                if defect == 'changed-runtime':
+                    self.inventory['incoming_changes'].append('php-zts-xdebug')
+        for defect in (None, 'wrong-version', 'missing-coverage', 'second-upgrade', 'mismatched-debug', 'changed-runtime'):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 report = Path(directory) / 'report.json'
                 arguments = ['migration-upgrade-containers.py', '--type', 'apk', '--php', '8.5', '--arch', 'x86_64',
