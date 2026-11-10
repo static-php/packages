@@ -23,7 +23,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
-        -e PUBLICATION_PHP_STREAMS \
+        -e PUBLICATION_PHP_STREAMS -e TLS_CHECKS \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
 
@@ -100,6 +100,7 @@ case "$command" in
         baseline_stage=stage
         if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi
         baseline_args=(--packages "${PACKAGES:-}")
+        if [[ "${TLS_CHECKS:-false}" == true ]]; then baseline_args+=(--tls); fi
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json"); fi
         python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
             --inventory "$baseline_stage/native-inventories/$PHPV.json" "${baseline_args[@]}"

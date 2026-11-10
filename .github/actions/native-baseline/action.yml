@@ -15,6 +15,7 @@ runs:
                 digest.update((directory / 'shared-library-plan.json').read_bytes())
                 digest.update(os.environ.get('PACKAGES', '').encode())
                 digest.update(os.environ.get('LIBRARY_ONLY', '').encode())
+                digest.update(os.environ.get('TLS_CHECKS', '').encode())
                 prefix = 'native-baseline-v1-' + '-'.join(os.environ[name] for name in ('TYPE', 'MATRIX_ARCH', 'PHPV')) + '-'
                 with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
                     output.write('prefix=' + prefix + '\nkey=' + prefix + digest.hexdigest() + '\n')

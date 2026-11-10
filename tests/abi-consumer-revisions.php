@@ -57,9 +57,8 @@ try {
             throw new RuntimeException('Affected ABI consumer failed to advance its native release: ' . $name);
         }
     }
-    $first = $type === 'apk' ? 0 : 1;
-    if ($counter->invoke(null, 'php-zts-xdebug', $moduleVersion, 'x86_64', $type) !== $first) {
-        throw new RuntimeException('Unchanged unrelated consumer received a forced revision bump');
+    if ($counter->invoke(null, 'php-zts-xdebug', $moduleVersion, 'x86_64', $type) !== 24) {
+        throw new RuntimeException('An explicitly packaged consumer lost its published revision floor');
     }
     $memo->setValue(null, []);
     if ($frankenCounter->invoke(new frankenphp(), 'frankenphp', $version, 'x86_64', $type, null, false) !== '20') {
@@ -72,12 +71,12 @@ try {
     $override->setValue(null, null);
     $plan['abi_break'] = false;
     file_put_contents($planPath, json_encode($plan, JSON_THROW_ON_ERROR));
-    if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== $first) {
-        throw new RuntimeException('Compatible library update changed the default consumer revision policy');
+    if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== 18) {
+        throw new RuntimeException('Ordinary packaging ignored the current published revision');
     }
     putenv('SPP_SHARED_LIBRARY_PLAN');
-    if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== $first) {
-        throw new RuntimeException('Ordinary unchanged packaging changed bump=false behavior');
+    if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== 18) {
+        throw new RuntimeException('Captured published revision was ignored without an ABI plan');
     }
     echo 'Passed ' . $type . " ABI consumer native revision floors, unaffected/noop defaults, FrankenPHP and explicit overrides.\n";
 } finally {

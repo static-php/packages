@@ -335,25 +335,14 @@ class CreatePackages
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         [$phpVersion] = self::getPhpVersionAndArchitecture();
         preg_match('/^(\d+\.\d+)/', $phpVersion, $targetStream);
-        $advanceAbi = false;
-        if (($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) !== false && $planPath !== '') {
-            $plan = self::migrationBaseline($planPath);
-            if (($plan['schema'] ?? null) !== 1 || ($plan['type'] ?? null) !== $type) {
-                throw new RuntimeException('Invalid shared-library package plan');
-            }
-            $advanceAbi = ($plan['abi_break'] ?? false) === true && isset($plan['published_consumers'][$targetStream[1]][$matchName]);
-        }
         foreach ($paths as $path) {
             $data = self::migrationBaseline($path);
             if (isset($data['type']) && $data['type'] !== $type) {
                 continue;
             }
-            if (array_key_exists($targetStream[1], $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
-                continue;
-            }
             $packages = array_merge($data['packages'] ?? [], $data['published_packages'] ?? []);
             foreach ($data['consumer_versions'] ?? [] as $stream => $consumers) {
-                if (array_key_exists($stream, $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
+                if ($stream !== $targetStream[1]) {
                     continue;
                 }
                 if (isset($consumers[$matchName])) {

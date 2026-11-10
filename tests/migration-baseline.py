@@ -46,6 +46,25 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_selective_tls_baseline_includes_published_curl_and_its_closure(self):
+        inventory = [{'name': name, 'version': '1-1', 'requires': requires, 'provides': []} for name, requires in [
+            ('php-zts-cli', []), ('php-zts-fpm', []), ('frankenphp', []), ('php-zts-xdebug', []),
+            ('php-zts-curl', ['php-zts-lib-curl-abi-1']), ('php-zts-lib-curl', ['php-zts-lib-openssl-abi-1']),
+            ('php-zts-lib-openssl', []), ('php-zts-unrelated', [])]]
+        inventory[5]['provides'] = ['php-zts-lib-curl-abi-1']
+        inventory[6]['provides'] = ['php-zts-lib-openssl-abi-1']
+        latest = {item['name']: item for item in inventory}
+        for kind in ('rpm', 'deb', 'apk'):
+            with self.subTest(kind=kind):
+                profile = helper['affected_profile'](latest, {'xdebug', 'frankenphp'}, [], tls=True)
+                selected = helper['select_packages'](kind, inventory, profile, latest=latest)
+                self.assertEqual(set(selected), {item['name'] for item in inventory[:-1]})
+                ordinary = helper['affected_profile'](latest, {'xdebug'}, [])
+                self.assertNotIn('curl', ordinary)
+                library_only = helper['affected_profile'](latest, set(), ['curl'], tls=True)
+                self.assertIn('curl', library_only)
+                self.assertIn('frankenphp', library_only)
+
     def test_failed_old_inventory_allows_new_repository_validation(self):
         for kind in ('rpm', 'deb', 'apk'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:

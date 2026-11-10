@@ -214,8 +214,10 @@ def latest_packages(kind, inventory):
     return latest
 
 
-def affected_profile(latest, packages, libraries):
+def affected_profile(latest, packages, libraries, tls=False):
     names = {'php-zts-cli', 'php-zts-fpm', 'frankenphp'} if packages else set()
+    if tls:
+        names.update({'php-zts-cli', 'php-zts-curl', 'frankenphp'})
     normalize = lambda name: name.removeprefix('php-zts-').replace('_', '-')
     requested = {normalize('pie-zts' if p == 'pie' else p) for p in packages}
     names.update(name for name in latest if normalize(name) in requested)
@@ -351,7 +353,7 @@ def freeze(args):
     if requested or library_plan:
         if library_plan and not libraries:
             raise RuntimeError('Library-only baseline requires planned library updates')
-        profile = affected_profile(latest, requested, libraries)
+        profile = affected_profile(latest, requested, libraries, tls=getattr(args, 'tls', False))
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='spp-freeze-baseline-') as temporary:
@@ -420,6 +422,7 @@ def main():
     parser.add_argument('--packages', default='', help='Limit the baseline to these changed consumers and runtime hosts')
     parser.add_argument('--library-plan', type=Path, help='Limit a library-only baseline to affected published consumers and dependencies')
     parser.add_argument('--include-debug', action='store_true', help='Include debug packages with --profile=all')
+    parser.add_argument('--tls', action='store_true', help='Include published TLS validation hosts and their dependencies')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     try:
