@@ -1,5 +1,9 @@
 import contextlib
 import gzip
+import hashlib
+import os
+import struct
+import subprocess
 import io
 import runpy
 import shutil
@@ -24,6 +28,101 @@ class UpgradeGuards(unittest.TestCase):
         client = patch.dict(forgejo_globals, {'registry_session': lambda: requests})
         client.start()
         self.addCleanup(client.stop)
+
+    def test_rpm_signature_reuse_preserves_exact_remote_bytes_and_rejects_content_changes(self):
+        def archive(signature, body=b'header payload'):
+            header = b'\x8e\xad\xe8\x01' + bytes(4)
+            lead = b'\xed\xab\xee\xdb' + bytes(92)
+            signature = header + struct.pack('>II', 0, len(signature)) + signature
+            signature += bytes((-len(signature)) % 8)
+            return lead + signature + header + struct.pack('>II', 0, 0) + body
+        original, signed = archive(b'old signature'), archive(b'new signature with different size')
+        self.assertEqual(rpm['rpm_content'](original), rpm['rpm_content'](signed))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'package.rpm'
+            path.write_bytes(original)
+            local = dict(name='php-zts-fixture', arch='aarch64', evr='0:1.0-1', path=str(path))
+            remote = dict(local, location='package.rpm', checksum=dict(type='sha256', value=hashlib.sha256(signed).hexdigest()))
+            with patch.dict(rpm_globals, local_package=lambda _: local):
+                self.assertTrue(rpm['reuse_published_signature'](path, [remote], lambda _: signed))
+                self.assertEqual(path.read_bytes(), signed)
+                rpm['same_archive'](local, remote)
+                for changed in [archive(b'new signature', b'changed header or payload'), signed[:-1]]:
+                    path.write_bytes(changed)
+                    with self.assertRaisesRegex(RuntimeError, 'content differs'):
+                        rpm['reuse_published_signature'](path, [remote], lambda _: signed)
+                    self.assertEqual(path.read_bytes(), changed)
+                path.write_bytes(original)
+                with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                    rpm['reuse_published_signature'](path, [remote], lambda _: original)
+                self.assertFalse(rpm['reuse_published_signature'](path, [dict(remote, arch='x86_64')], lambda _: signed))
+        for invalid in [b'', signed[:100], signed[:104] + struct.pack('>II', 2**32 - 1, 0) + signed[112:]]:
+            with self.assertRaisesRegex(RuntimeError, 'RPM'):
+                rpm['rpm_content'](invalid)
+
+    @unittest.skipUnless(all(shutil.which(tool) for tool in ('fpm', 'rpm', 'rpmsign', 'gpg')), 'native RPM signing tools required')
+    def test_real_rpm_signature_is_reused_without_changing_the_built_package(self):
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            payload = directory / 'payload'
+            payload.mkdir()
+            (payload / 'fixture').write_text('validated package bytes\n')
+            path = directory / 'package.rpm'
+            def run(*args, **kwargs):
+                try:
+                    return subprocess.check_output(args, stderr=subprocess.STDOUT, timeout=120, **kwargs)
+                except subprocess.CalledProcessError as error:
+                    raise RuntimeError(error.output.decode(errors='replace')) from error
+            run('fpm', '-s', 'dir', '-t', 'rpm', '-n', 'php-zts-signature-fixture', '-v', '1.0', '--iteration', '1',
+                '--package', str(path), '-C', str(payload), '.')
+            unsigned = path.read_bytes()
+            home = directory / 'gpg'
+            home.mkdir(mode=0o700)
+            environment = dict(os.environ, GNUPGHOME=str(home))
+            run('gpg', '--batch', '--pinentry-mode', 'loopback', '--passphrase', '', '--quick-generate-key',
+                'SPP signature fixture', 'rsa2048', 'sign', '0', env=environment)
+            fingerprint = next(line.split(':')[9] for line in run('gpg', '--with-colons', '--list-secret-keys', env=environment).decode().splitlines() if line.startswith('fpr:'))
+            run('rpmsign', '--define', '_gpg_name ' + fingerprint, '--define', '_gpg_path ' + str(home),
+                '--define', '__gpg ' + shutil.which('gpg'), '--addsign', str(path), env=environment)
+            signed = path.read_bytes()
+            self.assertNotEqual(unsigned, signed)
+            self.assertEqual(rpm['rpm_content'](unsigned), rpm['rpm_content'](signed))
+            local = rpm['local_package'](path)
+            remote = dict(local, location='package.rpm', checksum=dict(type='sha256', value=hashlib.sha256(signed).hexdigest()))
+            path.write_bytes(unsigned)
+            with self.assertRaisesRegex(RuntimeError, 'different bytes'):
+                rpm['same_archive'](local, remote)
+            self.assertTrue(rpm['reuse_published_signature'](path, [remote], lambda _: signed))
+            rpm['same_archive'](local, remote)
+            self.assertEqual(path.read_bytes(), signed)
+            secret = run('gpg', '--batch', '--armor', '--export-secret-keys', fingerprint, env=environment).decode()
+            workspace = directory / 'workspace'
+            archives = workspace / 'dist/rpm'
+            archives.mkdir(parents=True)
+            candidate = archives / 'package.rpm'
+            candidate.write_bytes(unsigned)
+            metadata = directory / 'remote'
+            (metadata / 'repodata').mkdir(parents=True)
+            (metadata / 'package.rpm').write_bytes(signed)
+            (metadata / 'repodata/repomd.xml').write_text('<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/primary.xml.gz"/></data></repomd>')
+            primary = '<metadata xmlns="http://linux.duke.edu/metadata/common"><package><name>{name}</name><arch>{arch}</arch><version epoch="0" ver="1.0" rel="1"/><location href="package.rpm"/><checksum type="sha256">{checksum}</checksum></package></metadata>'.format(checksum=hashlib.sha256(signed).hexdigest(), **local)
+            (metadata / 'repodata/primary.xml.gz').write_bytes(gzip.compress(primary.encode()))
+            tools = directory / 'tools'
+            tools.mkdir()
+            ssh = tools / 'ssh'
+            ssh.write_text('#!' + sys.executable + '\nimport pathlib,shlex,sys\nparts=shlex.split(sys.argv[-1]);p=pathlib.Path(parts[parts.index("cat")+1].rstrip(";"));sys.stdout.buffer.write(p.read_bytes())\n')
+            ssh.chmod(0o755)
+            signing_environment = dict(environment, PATH=str(tools) + os.pathsep + environment['PATH'],
+                RPM_HOST='fixture', RPM_DIRECTORY=str(metadata), RPM_SIGNING_KEY=secret, RPM_SIGNING_PASSWORD='')
+            script = root / '.github/actions/shared-libraries/sign-rpm.sh'
+            run('bash', str(script), cwd=workspace, env=signing_environment)
+            self.assertEqual(candidate.read_bytes(), signed)
+            candidate.write_bytes(unsigned[:-1] + bytes([unsigned[-1] ^ 1]))
+            rejected = subprocess.run(['bash', str(script)], cwd=workspace, env=signing_environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(b'content differs', rejected.stderr)
+            run('gpgconf', '--kill', 'gpg-agent', env=environment)
 
     def test_rpm_metadata_retries_connection_resets_without_hiding_failures(self):
         response = contextlib.nullcontext(io.BytesIO(b'verified metadata'))
