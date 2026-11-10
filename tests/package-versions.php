@@ -67,12 +67,19 @@ $historicalUpgrade = static function (string $type, string $older, string $newer
         if ($valid->getExitCode() === 1) {
             (new Process(['apk', 'version', '--check', $newer]))->mustRun();
             try {
-                $compare->invoke($command, $type, $older, $newer);
+                $order = $compare->invoke($command, $type, $older, $newer);
             } catch (Symfony\Component\Process\Exception\ProcessFailedException) {
                 $checks++;
                 return;
             }
-            throw new RuntimeException('Malformed historical APK version was ordered as a valid version');
+            preg_match('/^[0-9]+(?:[.][0-9]+){1,2}/', $older, $oldUpstream);
+            preg_match('/^[0-9]+(?:[.][0-9]+){1,2}/', $newer, $newUpstream);
+            $blocked = str_contains($older, '~') && $oldUpstream === $newUpstream;
+            if ($order !== ($blocked ? 1 : -1)) {
+                throw new RuntimeException('Incorrect native historical APK ordering: ' . $older . ' / ' . $newer);
+            }
+            $checks++;
+            return;
         }
         $valid->mustRun();
     }
