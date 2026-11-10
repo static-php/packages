@@ -512,6 +512,15 @@ def packaging_projection(payload, record, manifest, packages, library_selection=
             libraries = set(dependency_closure(library_selection, graph))
         else:
             consumers = packages | validation_hosts(packages)
+            profile = profile_helper()
+            shared = set(profile.names(record.get('configuration', {}).get('shared-extensions')))
+            metadata = profile.extension_metadata(Path(__file__).resolve().parents[3], include_suggests=True)
+            pending = list(consumers & shared)
+            while pending:
+                for dependency in metadata.get(pending.pop(), {}).get('depends', []):
+                    if dependency in shared and dependency not in consumers:
+                        consumers.add(dependency)
+                        pending.append(dependency)
             retained = {'bin/php'}
             retained.update('bin/php-' + name for name in consumers & {'cgi', 'fpm'})
             retained.update(name for name in record['files'] if component_file(name, record) in consumers)

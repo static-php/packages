@@ -129,7 +129,7 @@ function migrationVersionContracts(string $root): void
                 migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 10, $type . ' first shared build does not advance the captured static release automatically');
                 $baseline['migration_cutoffs']['8.6'] = [];
                 file_put_contents($path, json_encode($baseline, JSON_THROW_ON_ERROR));
-                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === ($type === 'apk' ? 0 : 1), $type . ' continues migration revision bumping after the stream is shared');
+                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 10, $type . ' ignored the captured published revision after the stream is shared');
             }
         } finally {
             $runtime->setValue(null, $previousRuntime);

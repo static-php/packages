@@ -29,6 +29,103 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_published_upgrade_inventory_rejects_unrelated_bumps_and_keeps_native_abi_consumers(self):
+        inputs = runpy.run_path(str(Path(__file__).with_name('published-upgrade-inputs.py')))
+        globals_ = inputs['prepare'].__globals__
+        old = [{'name': name, 'version': version, 'requires': depends} for name, version, depends in [
+            ('php-zts-cli', '8.4.27-5', ['php-zts-lib-openssl']),
+            ('php-zts-mysqlnd', '8.4.27-2', ['php-zts-lib-openssl-abi-1']),
+            ('php-zts-lib-openssl', '3.6.5-1', []),
+            ('php-zts-imagick', '3.8.1-3', ['php-zts-lib-imagemagick']),
+            ('php-zts-apcu', '5.1.28-1', [])]]
+        old[2]['provides'] = ['php-zts-lib-openssl-abi-1']
+        new = json.loads(json.dumps(old))
+        for package in new:
+            package['version'] = {'php-zts-cli': '8.4.27-6', 'php-zts-mysqlnd': '8.4.27-3',
+                'php-zts-lib-openssl': '4.1.0-1'}.get(package['name'], package['version'])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            metadata = root / 'metadata/rpm'
+            (metadata / 'native-inventories').mkdir(parents=True)
+            (metadata / 'shared-library-plan.json').write_text(json.dumps({'libraries': ['openssl'],
+                'expected_consumers': {'8.4': ['php-zts-cli']}}))
+            (metadata / 'native-inventories/8.4.json').write_text(json.dumps({'inventory': old}))
+            def freeze(args):
+                args.output.mkdir(parents=True, exist_ok=True)
+                (args.output / 'baseline.json').write_text('{"defects": []}')
+            fake = {'snapshot_inventory': lambda args: {'inventory': new},
+                'latest_packages': lambda kind, records: {r['name']: r for r in records}, 'freeze': freeze}
+            with patch.dict(globals_, BASELINE=fake), patch('sys.stdout', new_callable=io.StringIO):
+                inputs['prepare']('rpm', '8.4', 'x86_64', root / 'metadata', root / 'output')
+                audit = json.loads((root / 'output/inventory-audit.json').read_text())
+                self.assertIn('php-zts-mysqlnd', audit['selected_consumers'])
+                self.assertEqual(audit['imagick_before'], audit['imagick_after'])
+                for name in ('php-zts-imagick', 'php-zts-apcu'):
+                    package = next(p for p in new if p['name'] == name)
+                    original = package['version']
+                    package['version'] += '0'
+                    with self.assertRaisesRegex(RuntimeError, 'Imagick changed|Unrelated published package versions changed'):
+                        inputs['prepare']('rpm', '8.4', 'x86_64', root / 'metadata', root / 'output')
+                    package['version'] = original
+
+    def test_shared_old_cli_without_optional_fileinfo_remains_an_upgrade_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, key, ini = [root / name for name in ('repository', 'key', 'php.ini')]
+            for path in (config, key, ini):
+                path.write_text('fixture\n')
+            (root / 'selected.json').write_text(json.dumps(['php-zts-cli', 'php-zts-imagick']))
+            def mapped_path(value):
+                return root / value.removeprefix('/spp/') if str(value).startswith('/spp/') else Path(value)
+            def run(command, **kwargs):
+                return SimpleNamespace(returncode=0, stderr='', stdout=(
+                    '/usr/lib/php-zts/lib/libssl.so.3' if command[0] == 'ldd' else str(ini)))
+            args = SimpleNamespace(type='rpm', inside='old', php='8.4', arch='x86_64', runtime='alma8',
+                library_only=False, partial_consumers=True, disabled_extension=None)
+            probe = {'version': '8.4.27', 'curl': True, 'fileinfo': False, 'extensions': ['curl', 'imagick']}
+            with patch.dict(scope, {'Path': mapped_path, 'run': run, 'php_probe': lambda: probe,
+                    'configure_client': lambda *a: (str(config), str(key)),
+                    'installed': lambda kind: {'php-zts-cli': '8.4.27-5', 'php-zts-imagick': '3.8.1_84-3'},
+                    'module_state': lambda kind: '8.4'}):
+                harness['inside'](args)
+            saved = json.loads((root / 'client-before.json').read_text())
+            self.assertEqual(saved['probe'], probe)
+            self.assertIn('php-zts-imagick', saved['installed'])
+            self.assertIn('memory_limit=321M', ini.read_text())
+
+    def test_apk_metadata_transport_retries_without_retrying_package_failures(self):
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise RuntimeError('WARNING: updating APKINDEX.tar.gz: DNS: transient error (try again later)')
+            return SimpleNamespace(returncode=0)
+        with patch.dict(scope, run=execute, time=SimpleNamespace(sleep=lambda _: None)), patch('sys.stdout', new_callable=io.StringIO):
+            harness['ordinary_upgrade']('apk')
+        self.assertEqual(calls, [['apk', 'update', '--cache-max-age', '0'],
+            ['apk', 'update', '--cache-max-age', '0'], ['apk', 'upgrade']])
+        calls.clear()
+        def bad_upgrade(command, **kwargs):
+            calls.append(command)
+            if command[1] == 'upgrade':
+                raise RuntimeError('candidate package failed')
+            return SimpleNamespace(returncode=0)
+        with patch.dict(scope, run=bad_upgrade), self.assertRaisesRegex(RuntimeError, 'candidate package failed'):
+            harness['ordinary_upgrade']('apk')
+        self.assertEqual(len(calls), 2)
+
+    def test_native_command_timeout_terminates_the_process(self):
+        processes = []
+        popen = subprocess.Popen
+        def start(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        with patch.object(subprocess, 'Popen', side_effect=start):
+            with self.assertRaisesRegex(RuntimeError, 'Command timed out after 0.05s'):
+                harness['run']([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=.05)
+        self.assertIsNotNone(processes[0].returncode)
+
     def test_runner_can_update_read_only_container_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'inventory.json'
@@ -218,7 +315,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         for old_broken, candidate_broken, partial, tampered in [
                 (True, False, False, False), (True, True, False, False),
                 (False, True, False, False), (True, False, True, False), (True, False, 'library', False),
-                ('missing', False, True, False),
+                ('missing', False, True, False), ('timeout', False, False, False), ('timeout', True, False, False),
                 (True, True, True, False), (True, True, 'library', False), (True, False, False, True)]:
             with self.subTest(old=old_broken, candidate=candidate_broken, partial=partial, tampered=tampered), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -249,12 +346,15 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     resources.containers.append(name)
                     resources.runtime_evidence.append({'container': name})
                     return name
-                def execute(client, command):
+                def execute(client, command, **kwargs):
                     if command == ['true']:
                         raise RuntimeError('Broken old container cannot execute commands')
                     phase = command[-1]
                     executions.append((client, phase))
                     if phase == 'old':
+                        self.assertEqual(kwargs.get('timeout'), 300)
+                        if old_broken == 'timeout':
+                            raise RuntimeError('Command timed out after 300s: old installation')
                         if old_broken:
                             raise RuntimeError('old package dependency missing')
                         (root / 'client-before.json').write_text(json.dumps({'installed': {}, 'probe': {}, 'module_state': {},
@@ -268,7 +368,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
                 expected = old_broken and not candidate_broken and not tampered
                 self.assertEqual(result['ok'], expected)
                 if expected:
-                    self.assertIn('baseline packages missing' if old_broken == 'missing' else 'old package dependency missing', result['baseline_failure'])
+                    reason = ('baseline packages missing' if old_broken == 'missing' else
+                              'timed out after 300s' if old_broken == 'timeout' else 'old package dependency missing')
+                    self.assertIn(reason, result['baseline_failure'])
                     new_client = next(client for client, phase in executions if phase == 'replacement')
                     if old_broken == 'missing':
                         self.assertFalse(any(phase == 'old' for _, phase in executions))

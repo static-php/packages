@@ -2,6 +2,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import runpy
 import shutil
@@ -70,8 +71,8 @@ class PublicationRetryPlan(unittest.TestCase):
         merged, divergent = planner['merge_baselines'](values, 'rpm', destination)
         return merged, divergent, destination
 
-    def prepare(self, previous=None, peer=None, request=None, libraries=None):
-        current = self.snapshot('payload', manifest())
+    def prepare(self, previous=None, peer=None, request=None, libraries=None, current_value=None):
+        current = self.snapshot('payload', manifest(current_value))
         baseline = previous or self.snapshot('baseline', manifest(library(1)))
         requested = self.root / 'request.json'
         requested.write_text(json.dumps(request or {'requests': {}}))
@@ -114,6 +115,60 @@ class PublicationRetryPlan(unittest.TestCase):
         retry = plan['publication_retries']['fixture']
         self.assertEqual(retry['published_version'], '0:1.0-2')
         self.assertEqual(retry['published_archive_sha256'], hashlib.sha256(newer).hexdigest())
+
+    def abi_rollout(self, changed_code=False):
+        old, new = b'old ABI archive', b'already validated new ABI archive'
+        first = self.snapshot('owner82', manifest(library(1, old)), {'archives/fixture-1.rpm': old})
+        published = library(2, new)
+        published.update(abi_epoch=2, abi_capability='php-zts-lib-fixture-abi-2')
+        second = self.snapshot('owner83', manifest(published), {'archives/fixture-2.rpm': new})
+        current = library()
+        current.update(abi_epoch=2, abi_capability='php-zts-lib-fixture-abi-2')
+        if changed_code:
+            current['elf']['lib/' + SONAME]['sha256'] = 'changed-runtime-code'
+        return self.prepare(first, second, libraries='fixture', current_value=current)
+
+    def test_partial_abi_rollout_reuses_the_exact_validated_provider_archive(self):
+        with patch.dict(os.environ, BUMP='false', ITERATION=''):
+            plan = self.abi_rollout()
+        self.assertTrue(plan['abi_break'])
+        self.assertEqual(plan['abi_rebuild_roots'], ['fixture'])
+        self.assertEqual(plan['expected_libraries']['fixture']['abi_epoch'], 2)
+        self.assertEqual(plan['publication_retries']['fixture']['published_version'], '0:1.0-2')
+        self.assertEqual(plan['publication_retries']['fixture']['published_archive_sha256'],
+                         hashlib.sha256(b'already validated new ABI archive').hexdigest())
+
+    def test_changed_runtime_bytes_cannot_reuse_an_abi_rollout_archive(self):
+        with patch.dict(os.environ, BUMP='false', ITERATION=''):
+            self.assertEqual(self.abi_rollout(changed_code=True)['publication_retries'], {})
+
+    def test_empty_runtime_asset_map_spellings_reuse_the_published_archive(self):
+        old, new = b'old archive', b'validated archive'
+        previous = library(1, old)
+        previous['runtime_assets'] = []
+        published = library(2, new)
+        published['runtime_assets'] = []
+        current = library()
+        current['runtime_assets'] = {}
+        first = self.snapshot('owner84', manifest(previous), {'archives/fixture-1.rpm': old})
+        second = self.snapshot('owner85', manifest(published), {'archives/fixture-2.rpm': new})
+        plan = self.prepare(first, second, libraries='fixture', current_value=current)
+        self.assertEqual(plan['publication_retries']['fixture']['published_version'], '0:1.0-2')
+
+    def test_changed_runtime_assets_cannot_reuse_a_published_archive(self):
+        current = library()
+        current['runtime_assets'] = {'modules/provider.so': '/usr/lib/php-zts/lib/modules/provider.so'}
+        first = self.snapshot('owner84', manifest(library(1, b'old')), {'archives/fixture-1.rpm': b'old'})
+        second = self.snapshot('owner85', manifest(library(2, b'new')), {'archives/fixture-2.rpm': b'new'})
+        self.assertEqual(self.prepare(first, second, libraries='fixture', current_value=current)['publication_retries'], {})
+
+    def test_explicit_bump_still_repackages_an_abi_rollout_provider(self):
+        with patch.dict(os.environ, BUMP='true', ITERATION=''):
+            self.assertEqual(self.abi_rollout()['publication_retries'], {})
+
+    def test_explicit_iteration_still_repackages_an_abi_rollout_provider(self):
+        with patch.dict(os.environ, BUMP='false', ITERATION='7'):
+            self.assertEqual(self.abi_rollout()['publication_retries'], {})
 
     def test_missing_owner_needs_publication_retry_not_php_compilation(self):
         archive = b'reusable signed library archive'

@@ -157,6 +157,7 @@ jobs:
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     name: publication-${{ inputs.format }}-${{ inputs.target }}${{ inputs.mirror && '-mirror' || '' }}
+                    overwrite: true
                     path: |
                         log/publication-*.log
                         log/publication-*.json

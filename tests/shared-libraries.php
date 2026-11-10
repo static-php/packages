@@ -123,6 +123,10 @@ try {
     $resolve = new ReflectionMethod(\staticphp\step\CreatePackages::class, 'resolvePublishedLibraryVersions');
     $sharedProperty->setValue(null, $unresolved);
     $previousBaselines = getenv('SPP_BASELINE_MANIFESTS');
+    $previousPlan = getenv('SPP_SHARED_LIBRARY_PLAN');
+    $planPath = $temporary . '/selected-libraries.json';
+    file_put_contents($planPath, json_encode(['libraries' => ['top']]));
+    putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
     foreach (['rpm' => '1.0-5.el8', 'deb' => '1.0-5', 'apk' => '1.0-r5'] as $type => $version) {
         $record = ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']];
         $records = [array_replace($record, ['version' => '9.0-99']), array_replace($record, ['architecture' => 'wrong']), array_replace($record, ['provides' => ['php-zts-lib-base-abi-2']]), $record];
@@ -133,6 +137,9 @@ try {
         $resolve->invoke(null);
         expect($unresolved->getPackageVersion('base', $type) === $version, 'Captured native library revision was not resolved for ' . $type);
         expect($unresolved->getPackageVersion('top', $type) === $manifest['libraries']['top']['package_versions'][$type], 'Candidate library revision was overwritten');
+        $unresolved->setPackageVersion('base', $type, $type === 'apk' ? '1.0-r99' : '1.0-99');
+        $resolve->invoke(null);
+        expect($unresolved->getPackageVersion('base', $type) === $version, 'Cached dependency floor was not rebound to the current stream');
     }
     $versionProperty = new ReflectionProperty(\staticphp\step\CreatePackages::class, 'versionArch');
     $previousVersion = $versionProperty->getValue(null);
@@ -163,6 +170,7 @@ try {
     $versionProperty->setValue(null, $previousVersion);
     putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     putenv($previousBaselines === false ? 'SPP_BASELINE_MANIFESTS' : 'SPP_BASELINE_MANIFESTS=' . $previousBaselines);
+    putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     $sharedProperty->setValue(null, null);
     $typeProperty->setValue(null, 'rpm');
     $save($manifest);
@@ -261,13 +269,14 @@ try {
     $bad['libraries']['base']['license_files'] = [];
     $save($bad);
     rejected(static fn () => SharedLibraries::load($temporary), 'must declare runtime files and licenses');
-    symlink('/etc/passwd', $temporary . '/assets/escape');
+    mkdir($temporary . '/assets/outside');
+    symlink('/etc/passwd', $temporary . '/assets/outside/escape');
     $bad = $manifest;
     $bad['libraries']['base']['files'] = array_values(array_diff($bad['libraries']['base']['files'], ['assets/data.txt']));
     $bad['libraries']['base']['runtime_assets'] = ['assets' => '/usr/share/php-zts/base'];
     $save($bad);
     rejected(static fn () => SharedLibraries::load($temporary), 'Escaping buildroot');
-    unlink($temporary . '/assets/escape');
+    unlink($temporary . '/assets/outside/escape');
     $bad = $manifest;
     $bad['libraries']['base']['version'] = 'main';
     $save($bad);

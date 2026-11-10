@@ -12,8 +12,8 @@ test -n "$fingerprint"
 printf '%s\n' warmup > "$GNUPGHOME/warmup"
 gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --local-user "$fingerprint" \
     --sign --output /dev/null "$GNUPGHOME/warmup" <<< "$RPM_SIGNING_PASSWORD"
-python3 - "$GNUPGHOME/reused-signatures" <<'PYTHON'
-import hashlib,json,sys
+python3 - "$GNUPGHOME/reused-signatures" "${BASH_SOURCE[0]%/*}/../../../bin/check-rpm-upgrades" <<'PYTHON'
+import hashlib,json,os,runpy,sys
 from pathlib import Path
 reused = {}
 for receipt in Path('cohort').glob('shared-libs-rpm-*/publication-retries.json'):
@@ -24,6 +24,14 @@ for receipt in Path('cohort').glob('shared-libs-rpm-*/publication-retries.json')
         if digest != item['sha256']:
             raise RuntimeError('Exact publication retry bytes changed before signing: ' + name)
         reused[name] = digest
+if os.environ.get('RPM_HOST') and os.environ.get('RPM_DIRECTORY'):
+    guard = runpy.run_path(sys.argv[2])
+    def read_file(location, missing_ok=False):
+        return guard['read_remote_file'](os.environ['RPM_HOST'], os.environ['RPM_DIRECTORY'], location, missing_ok)
+    published = guard['published_packages'](read_file)
+    for path in sorted(Path('dist/rpm').glob('*.rpm')):
+        if path.name not in reused and guard['reuse_published_signature'](path, published, read_file, os.environ.get('SIGNED_RPM_CACHE')):
+            reused[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
 Path(sys.argv[1]).write_bytes(b''.join(name.encode() + b'\0' for name in sorted(reused)))
 PYTHON
 declare -A existing_signatures=()

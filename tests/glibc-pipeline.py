@@ -32,26 +32,21 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
-    def test_library_baselines_cover_target_stream_revisions_in_both_publish_modes(self):
-        for kind in ('apk', 'deb'):
-            for publish in ('false', 'true'):
-                for streams, expected in [('', '82,83,84,85,86'), ('8.2', '82'), ('8.3,8.6', '83,86')]:
-                    for libraries in (None, ['attr']):
-                        with self.subTest(kind=kind, publish=publish, streams=streams, libraries=libraries), \
-                                patch.dict(os.environ, MATRIX_ARCH='arm64', PHP_VERSIONS=streams, PUBLISH=publish, LIBRARIES=''), \
-                                patch.object(glibc, 'run') as execute:
-                            glibc.baseline(kind, Path('baseline'), libraries=libraries)
-                            command = execute.call_args.args[0]
-                            self.assertEqual(command[command.index('--owners') + 1], expected)
-
-    def test_consumer_baselines_read_the_requested_streams_without_a_canonical_copy(self):
-        for consumers in (False, True):
-            with self.subTest(consumers=consumers), patch.dict(os.environ, MATRIX_ARCH='arm64', PHP_VERSIONS='8.2,8.6'), \
-                    patch.object(glibc, 'run') as execute:
-                glibc.baseline('apk', Path('baseline'), consumers=consumers, libraries=[])
-                command = execute.call_args.args[0]
-                self.assertEqual(command[command.index('--owners') + 1], '82,86')
-                self.assertNotIn('--consumer-stream', command)
+    def test_library_publication_reads_each_selected_owner_after_partial_rollout(self):
+        with patch.dict(os.environ, LIBRARIES='openssl', PUBLISH='true', PHP_VERSIONS='8.4,8.6', MATRIX_ARCH='arm64'), \
+                patch.object(glibc, 'run') as run:
+            for kind in ('apk', 'deb'):
+                glibc.baseline(kind, Path('baseline'), libraries={'openssl', 'zlib'})
+                arguments = run.call_args.args[0]
+                self.assertEqual(arguments[arguments.index('--owners') + 1], '84,86')
+                self.assertEqual(arguments[arguments.index('--libraries') + 1], 'openssl,zlib')
+            with patch.dict(os.environ, PHP_VERSIONS=''):
+                glibc.baseline('apk', Path('baseline'))
+                arguments = run.call_args.args[0]
+                self.assertEqual(arguments[arguments.index('--owners') + 1], '82,83,84,85,86')
+            with patch.dict(os.environ, PUBLISH='false'):
+                glibc.baseline('apk', Path('baseline'))
+                self.assertEqual(run.call_args.args[0][run.call_args.args[0].index('--owners') + 1], '84,86')
 
     def test_publication_rechecks_the_recorded_library_baseline_scope(self):
         for kind in ('rpm', 'deb', 'apk'):
@@ -123,24 +118,6 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(workflow.upgrade_mode( {'php_requests': {'8.5': {'full': True}}}, '8.5'), 'full')
         self.assertEqual(workflow.upgrade_mode( {'php_requests': {'8.5': {'packages': ['curl']}}}, '8.5'), 'shared')
 
-    def test_unchanged_library_plan_never_invokes_the_package_builder(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            sdk, stage = root / 'buildroot', root / 'stage'
-            glibc.write(sdk / 'shared-libraries.json', {'libraries': {'attr': {}}})
-            glibc.write(stage / 'shared-libraries.json', {'libraries': {'attr': {}}})
-            glibc.write(stage / 'shared-library-plan.json', {'libraries': [], 'php_requests': {}})
-            calls = []
-            def execute(arguments, **kwargs):
-                args = [str(value) for value in arguments]
-                calls.append(args)
-                if 'stage-publication-retries' in args:
-                    glibc.write(stage / 'publication-retries.json', {'remaining_libraries': [], 'layout_required': False})
-            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', execute), \
-                    patch.dict(os.environ, TYPE='apk', PACKAGES='', PUBLISH='false'):
-                glibc.package_libraries('apk')
-            self.assertFalse(any(args[:2] == ['php', 'bin/spp'] for args in calls))
-
     def test_native_inventory_capture_isolates_stream_failures(self):
         freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
         captured = []
@@ -163,6 +140,80 @@ class Pipeline(unittest.TestCase):
             self.assertNotIn('error', glibc.read(snapshots / '8.5.json'))
             self.assertIn('HTTP 522', glibc.read(snapshots / '8.6.json')['error'])
             self.assertIn('HTTP 522', glibc.read(stage / 'common/deb/native-inventories/8.6.json')['error'])
+
+    def test_abi_consumer_scope_uses_actual_stream_inventory_and_preserves_explicit_requests(self):
+        plan = {'type': 'apk', 'php_requests': {'8.6': {'full': False, 'packages': ['cli', 'mysqlnd_parsec', 'swoole'],
+                'compile_packages': ['cli', 'mysqlnd_parsec', 'swoole'], 'compile_full': True}},
+                'abi_consumer_requests': {'8.6': {'full': False,
+                    'consumers': ['php-zts-cli', 'php-zts-mysqlnd_parsec', 'php-zts-swoole'],
+                    'packages': ['cli', 'mysqlnd_parsec', 'swoole']}},
+                'expected_consumers': {'8.6': ['php-zts-cli', 'php-zts-mysqlnd_parsec', 'php-zts-swoole']}}
+        snapshot = {'type': 'apk', 'php_stream': '8.6', 'architecture': 'arm64', 'inventory': [
+            {'name': 'php-zts-cli', 'architecture': 'aarch64'},
+            {'name': 'php-zts-mysqlnd_parsec', 'architecture': 'x86_64'}]}
+        original = copy.deepcopy(plan)
+        self.assertFalse(glibc.scope_abi_consumers(plan, dict(snapshot, error='offline'), '8.6'))
+        self.assertEqual(plan, original)
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.6', ['swoole']))
+        self.assertEqual(plan['php_requests']['8.6']['packages'], ['cli', 'swoole'])
+        self.assertEqual(plan['php_requests']['8.6']['compile_packages'], ['cli', 'swoole'])
+        self.assertEqual(plan['expected_consumers']['8.6'], ['php-zts-cli'])
+        self.assertEqual(plan['abi_consumer_requests']['8.6']['packages'], ['cli'])
+        self.assertTrue(plan['php_requests']['8.6']['compile_full'])
+
+    def test_native_inventory_refinement_updates_format_and_common_plans_before_receipts(self):
+        run_path = glibc.runpy.run_path
+        freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+        freezer['snapshot_inventory'] = lambda args: {'type': args.type, 'php_stream': args.php,
+            'architecture': args.arch, 'inventory': [{'name': 'php-zts-cli', 'architecture': args.arch}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            for kind in ('rpm', 'deb'):
+                glibc.write(stage / kind / 'shared-library-plan.json', {'schema': 1, 'type': kind, 'abi_break': True,
+                    'candidate_fingerprint': 'compiled-inputs', 'baseline_fingerprint': 'captured-baseline',
+                    'php_requests': {'8.6': {'full': False, 'packages': ['cli', 'swoole'], 'compile': True, 'compile_full': True}},
+                    'expected_consumers': {'8.6': ['php-zts-cli', 'php-zts-swoole']},
+                    'abi_consumer_requests': {'8.6': {'full': False, 'consumers': ['php-zts-cli', 'php-zts-swoole'], 'packages': ['cli', 'swoole']}}})
+            with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path', side_effect=lambda path: freezer if str(path).endswith('freeze-migration-baseline.py') else run_path(path)), \
+                    patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='arm64', PHP_VERSIONS='8.6', PACKAGES=''):
+                glibc.capture_native_inventories()
+            common = glibc.read(stage / 'common/shared-library-plan.json')
+            self.assertEqual(common['php_requests']['8.6']['packages'], ['cli'])
+            for kind in ('rpm', 'deb'):
+                actual = glibc.read(stage / kind / 'shared-library-plan.json')
+                self.assertEqual(actual, glibc.read(stage / 'common' / kind / 'shared-library-plan.json'))
+                self.assertEqual(actual['candidate_fingerprint'], 'compiled-inputs')
+                self.assertEqual(actual['baseline_fingerprint'], 'captured-baseline')
+                self.assertEqual(actual['expected_consumers']['8.6'], ['php-zts-cli'])
+                self.assertEqual(common['format_selection'][kind]['php_requests']['8.6']['packages'], ['cli'])
+
+    def test_native_bindings_add_stream_specific_consumers_and_skip_completed_abi_rollouts(self):
+        plan = {'type': 'apk', 'libraries': ['openssl'], 'abi_rebuild_roots': ['openssl'],
+                'expected_libraries': {'openssl': {'abi_capability': 'php-zts-lib-openssl-abi-2'}},
+                'abi_core_rebuild_streams': ['8.4'],
+                'php_requests': {'8.4': {'full': False, 'packages': ['cli', 'curl', 'mysqlnd_parsec'], 'compile_full': True}},
+                'expected_consumers': {'8.4': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec']},
+                'abi_consumer_requests': {'8.4': {'full': False, 'consumers': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec'],
+                    'packages': ['cli', 'curl', 'mysqlnd_parsec']}}}
+        snapshot = {'type': 'apk', 'php_stream': '8.4', 'architecture': 'arm64', 'inventory': [
+            {'name': 'php-zts-lib-openssl', 'version': '3.6.5-r1', 'provides': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-cli', 'version': '8.4.27-r4', 'requires': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-mysqlnd', 'version': '8.4.27-r2', 'requires': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-curl', 'version': '8.4.27-r2', 'requires': []}]}
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4'))
+        self.assertEqual(plan['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
+        self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd'])
+        self.assertEqual(plan['published_consumers']['8.4']['php-zts-mysqlnd'], '8.4.27-r2')
+        previous = copy.deepcopy(plan)
+        snapshot['inventory'][0]['provides'] = ['php-zts-lib-openssl-abi-2']
+        for package in snapshot['inventory'][1:3]:
+            package['requires'] = ['php-zts-lib-openssl-abi-2']
+        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4', ['curl']))
+        self.assertEqual(plan['php_requests']['8.4']['packages'], ['curl'])
+        self.assertEqual(plan['expected_consumers']['8.4'], [])
+        snapshot['inventory'].append({'name': 'php-zts-lib-curl', 'requires': ['php-zts-lib-openssl-abi-1']})
+        glibc.scope_abi_consumers(previous, snapshot, '8.4')
+        self.assertEqual(previous['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
 
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
@@ -193,31 +244,6 @@ class Pipeline(unittest.TestCase):
             rejected = subprocess.run(verify, capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn('Recorded package assets changed', rejected.stdout + rejected.stderr)
-
-    def test_real_alpine_target_record_selects_tls_once_per_architecture(self):
-        with tempfile.TemporaryDirectory(prefix='spp-apk-target-record-') as temporary:
-            root = Path(temporary)
-            for arch in ['arm64', 'x86_64']:
-                target = root / arch
-                (target / 'stage').mkdir(parents=True)
-                helpers = target / '.github/actions/shared-libraries'
-                helpers.mkdir(parents=True)
-                shutil.copy2(HELPERS / 'workflow.py', helpers / 'workflow.py')
-                (target / 'stage/shared-library-plan.json').write_text(json.dumps({'php_requests': {
-                    stream: {'full': True} for stream in workflow.STREAMS}}))
-                env = dict(os.environ, TYPE='apk', IN_BUILDER='true', MODE='full', LIBRARIES='',
-                           MATRIX_ARCH=arch, TARGET=arch, ALMA='', CACHE_KEY='fixture', SOURCE_RUN_ID='42',
-                           IMAGE='ghcr.io/example/builder@sha256:' + 'a' * 64)
-                subprocess.run(['bash', HELPERS / 'run.sh', 'record'], cwd=target, env=env, check=True, capture_output=True)
-                shutil.copytree(target / 'stage', root / ('plans-' + arch))
-                shutil.rmtree(target)
-            result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'matrix', '--plans', root], text=True)
-            entries = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
-            self.assertEqual(len(entries), 10)
-            for arch in ['arm64', 'x86_64']:
-                selected = [entry for entry in entries if entry['arch'] == arch]
-                self.assertFalse(any(entry.get('runtime-checks') for entry in selected))
-                self.assertEqual([entry['php-version'] for entry in selected if entry['tls-checks']], ['8.6'])
 
     def test_alpine_inline_completion_removes_the_transfer_job_only_for_successful_sdks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -327,22 +353,6 @@ class Pipeline(unittest.TestCase):
                 archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]
                 self.assertEqual(len(archive_checks), 0 if kind == 'apk' else 2)
                 self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), len(formats))
-
-    def test_consumer_refresh_keeps_streams_and_format_metadata_together(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source, destination = root / 'consumer-baseline', root / 'baseline'
-            glibc.write(source / 'shared-libraries.json', {'consumers': {'8.5': ['php-zts-cli']},
-                'consumer_dependencies': {'8.5': {'php-zts-cli': ['openssl']}},
-                'consumer_inventory_complete': True, 'consumer_inventory_streams': ['8.5'],
-                'consumer_versions': {'8.5': {'php-zts-cli': 'rpm-version'}}})
-            glibc.write(destination / 'shared-libraries.json', {'libraries': {'openssl': {'published_version': 'rpm-version'}},
-                'consumer_versions': {'8.5': {'php-zts-cli': 'rpm-version'}}})
-            glibc.share_consumers(source, destination)
-            result = glibc.read(destination / 'shared-libraries.json')
-            self.assertEqual(result['consumer_dependencies']['8.5']['php-zts-cli'], ['openssl'])
-            self.assertEqual(result['consumer_versions']['8.5']['php-zts-cli'], 'rpm-version')
-            self.assertEqual(result['libraries']['openssl']['published_version'], 'rpm-version')
 
     def test_format_plans_merge_compile_and_packaging_requests_without_extra_compilation(self):
         value = glibc.combine_plans({
@@ -477,19 +487,6 @@ class Pipeline(unittest.TestCase):
             self.assertEqual([value['type'] for value in publish], ['deb'])
             self.assertEqual(publish[0]['package-image-digest'], 'b' * 64)
 
-    def test_tls_checks_are_deduplicated_per_format_and_architecture(self):
-        values = [{'target': 'alma8-' + arch, 'type': kind, 'php-version': stream, 'packages': ''}
-                  for arch in ['x86_64', 'arm64'] for kind in ['rpm', 'deb'] for stream in workflow.STREAMS]
-        workflow.tls_checks(values)
-        self.assertEqual(len([item for item in values if item['tls-checks']]), 4)
-        self.assertTrue(all(item['php-version'] == '8.6' for item in values if item['tls-checks']))
-        partial = [{'target': 'x86_64', 'type': 'apk', 'php-version': '8.6', 'packages': 'imagick'}]
-        workflow.tls_checks(partial)
-        self.assertFalse(partial[0]['tls-checks'])
-        partial[0]['packages'] = 'curl'
-        workflow.tls_checks(partial)
-        self.assertTrue(partial[0]['tls-checks'])
-
     def test_common_abi_cache_transports_receipts_and_keeps_openssl_profiles_separate(self):
         with tempfile.TemporaryDirectory(prefix='spp-format-abi-cache-') as temporary:
             root = Path(temporary)
@@ -545,6 +542,7 @@ class Pipeline(unittest.TestCase):
                 (stage / kind / 'shared-library-plan.json').write_text('{}')
                 (stage / kind / 'baseline').mkdir()
                 (stage / kind / 'baseline/shared-libraries.json').write_text('{}')
+            glibc.write(stage / 'consumer-source-versions.json', {'candidates': [{'name': 'php-zts-imagick'}]})
             calls = []
             def record(arguments, **kwargs):
                 calls.append([str(value) for value in arguments])
@@ -552,18 +550,44 @@ class Pipeline(unittest.TestCase):
                     (root / 'build/8.6').mkdir(parents=True)
             environment = {'PHPV': '8.6', 'COMPILE': 'true', 'COMPILE_PACKAGES': 'imagick', 'PACKAGES': 'imagick',
                            'SOURCE_RUN_ID': '42', 'TARGET': 'alma8-x86_64', 'IMAGE': 'producer', 'TYPE': 'rpm', 'MATRIX_ARCH': 'x86_64'}
-            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', record), patch.dict(os.environ, environment):
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', record), \
+                    patch.object(glibc, 'bind_library_sources'), patch.dict(os.environ, environment):
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
                     glibc.payload()
                     build = next(call for call in calls if call[:3] == ['php', 'bin/spp', 'build'])
                     self.assertFalse(any(value.startswith('--packages=') for value in build))
+                    preflight = next(call for call in calls if len(call) > 1 and call[1].endswith('/source-versions.py'))
+                    self.assertEqual(preflight[preflight.index('--packages') + 1], 'imagick')
                     os.environ['COMPILE'] = 'false'
                     with self.assertRaisesRegex(RuntimeError, 'requires its sealed PHP cache'):
                         glibc.payload()
                 finally:
                     os.chdir(previous)
+
+    def test_php_compilation_uses_verified_sdk_sources_without_changing_extension_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sdk, downloads = root / 'buildroot', root / 'downloads'
+            source = {'hash': 'compiled-hash', 'version': 'previous-library', 'config': {'type': 'ghtar'}}
+            manifest = {'libraries': {'libjxl': {'source_hash': source['hash']}, 'gcc-runtime': {}}}
+            state = {'libraries': {'libjxl': {'artifact': 'libjxl', 'sources': {'libjxl': {'source': source}}}}}
+            snapshot = {'libjxl': {'source': {'hash': 'new-snapshot-hash'}, 'binary': ['retained']},
+                        'ext-imagick': {'source': {'hash': 'selected-extension'}}, 'php-src': {'source': {'hash': 'pinned-php'}}}
+            glibc.write(sdk / 'shared-libraries.json', manifest)
+            glibc.write(sdk / 'shared-library-build-inputs.json', state)
+            glibc.write(downloads / '.cache.json', snapshot)
+            glibc.bind_library_sources(sdk, downloads)
+            actual = glibc.read(downloads / '.cache.json')
+            self.assertEqual(actual['libjxl'], {'source': source, 'binary': ['retained']})
+            self.assertEqual(actual['ext-imagick'], snapshot['ext-imagick'])
+            self.assertEqual(actual['php-src'], snapshot['php-src'])
+            state['libraries']['libjxl']['sources']['libjxl']['source']['hash'] = 'unverified'
+            glibc.write(sdk / 'shared-library-build-inputs.json', state)
+            with self.assertRaisesRegex(RuntimeError, 'source identity differs'):
+                glibc.bind_library_sources(sdk, downloads)
+            self.assertEqual(glibc.read(downloads / '.cache.json'), actual)
 
     def test_signing_preserves_exact_publication_retry_archives(self):
         with tempfile.TemporaryDirectory(prefix='spp-retry-signing-') as temporary:
@@ -634,6 +658,105 @@ class Pipeline(unittest.TestCase):
             elf.write_bytes(content + b'RPM postprocessing mutation')
             with self.assertRaisesRegex(RuntimeError, 'differs from sealed'):
                 archives.verify_extracted(root, {identity: []})
+
+    def test_library_baselines_cover_target_stream_revisions_in_both_publish_modes(self):
+        for kind in ('apk', 'deb'):
+            for publish in ('false', 'true'):
+                for streams, expected in [('', '82,83,84,85,86'), ('8.2', '82'), ('8.3,8.6', '83,86')]:
+                    for libraries in (None, ['attr']):
+                        with self.subTest(kind=kind, publish=publish, streams=streams, libraries=libraries), \
+                                patch.dict(os.environ, MATRIX_ARCH='arm64', PHP_VERSIONS=streams, PUBLISH=publish, LIBRARIES=''), \
+                                patch.object(glibc, 'run') as execute:
+                            glibc.baseline(kind, Path('baseline'), libraries=libraries)
+                            command = execute.call_args.args[0]
+                            self.assertEqual(command[command.index('--owners') + 1], expected)
+
+
+    def test_consumer_baselines_read_the_requested_streams_without_a_canonical_copy(self):
+        for consumers in (False, True):
+            with self.subTest(consumers=consumers), patch.dict(os.environ, MATRIX_ARCH='arm64', PHP_VERSIONS='8.2,8.6'), \
+                    patch.object(glibc, 'run') as execute:
+                glibc.baseline('apk', Path('baseline'), consumers=consumers, libraries=[])
+                command = execute.call_args.args[0]
+                self.assertEqual(command[command.index('--owners') + 1], '82,86')
+                self.assertNotIn('--consumer-stream', command)
+
+
+    def test_unchanged_library_plan_never_invokes_the_package_builder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sdk, stage = root / 'buildroot', root / 'stage'
+            glibc.write(sdk / 'shared-libraries.json', {'libraries': {'attr': {}}})
+            glibc.write(stage / 'shared-libraries.json', {'libraries': {'attr': {}}})
+            glibc.write(stage / 'shared-library-plan.json', {'libraries': [], 'php_requests': {}})
+            calls = []
+            def execute(arguments, **kwargs):
+                args = [str(value) for value in arguments]
+                calls.append(args)
+                if 'stage-publication-retries' in args:
+                    glibc.write(stage / 'publication-retries.json', {'remaining_libraries': [], 'layout_required': False})
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', execute), \
+                    patch.dict(os.environ, TYPE='apk', PACKAGES='', PUBLISH='false'):
+                glibc.package_libraries('apk')
+            self.assertFalse(any(args[:2] == ['php', 'bin/spp'] for args in calls))
+
+
+    def test_consumer_refresh_keeps_streams_and_format_metadata_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination = root / 'consumer-baseline', root / 'baseline'
+            glibc.write(source / 'shared-libraries.json', {'consumers': {'8.5': ['php-zts-cli']},
+                'consumer_dependencies': {'8.5': {'php-zts-cli': ['openssl']}},
+                'consumer_inventory_complete': True, 'consumer_inventory_streams': ['8.5'],
+                'consumer_versions': {'8.5': {'php-zts-cli': 'rpm-version'}}})
+            glibc.write(destination / 'shared-libraries.json', {'libraries': {'openssl': {'published_version': 'rpm-version'}},
+                'consumer_versions': {'8.5': {'php-zts-cli': 'rpm-version'}}})
+            glibc.share_consumers(source, destination)
+            result = glibc.read(destination / 'shared-libraries.json')
+            self.assertEqual(result['consumer_dependencies']['8.5']['php-zts-cli'], ['openssl'])
+            self.assertEqual(result['consumer_versions']['8.5']['php-zts-cli'], 'rpm-version')
+            self.assertEqual(result['libraries']['openssl']['published_version'], 'rpm-version')
+
+
+    def test_real_alpine_target_record_selects_tls_once_per_architecture(self):
+        with tempfile.TemporaryDirectory(prefix='spp-apk-target-record-') as temporary:
+            root = Path(temporary)
+            for arch in ['arm64', 'x86_64']:
+                target = root / arch
+                (target / 'stage').mkdir(parents=True)
+                helpers = target / '.github/actions/shared-libraries'
+                helpers.mkdir(parents=True)
+                shutil.copy2(HELPERS / 'workflow.py', helpers / 'workflow.py')
+                (target / 'stage/shared-library-plan.json').write_text(json.dumps({'php_requests': {
+                    stream: {'full': True} for stream in workflow.STREAMS}}))
+                env = dict(os.environ, TYPE='apk', IN_BUILDER='true', MODE='full', LIBRARIES='',
+                           MATRIX_ARCH=arch, TARGET=arch, ALMA='', CACHE_KEY='fixture', SOURCE_RUN_ID='42',
+                           IMAGE='ghcr.io/example/builder@sha256:' + 'a' * 64)
+                subprocess.run(['bash', HELPERS / 'run.sh', 'record'], cwd=target, env=env, check=True, capture_output=True)
+                shutil.copytree(target / 'stage', root / ('plans-' + arch))
+                shutil.rmtree(target)
+            result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', 'matrix', '--plans', root], text=True)
+            entries = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
+            self.assertEqual(len(entries), 10)
+            for arch in ['arm64', 'x86_64']:
+                selected = [entry for entry in entries if entry['arch'] == arch]
+                self.assertFalse(any(entry.get('runtime-checks') for entry in selected))
+                self.assertEqual([entry['php-version'] for entry in selected if entry['tls-checks']], ['8.6'])
+
+
+    def test_tls_checks_are_deduplicated_per_format_and_architecture(self):
+        values = [{'target': 'alma8-' + arch, 'type': kind, 'php-version': stream, 'packages': ''}
+                  for arch in ['x86_64', 'arm64'] for kind in ['rpm', 'deb'] for stream in workflow.STREAMS]
+        workflow.tls_checks(values)
+        self.assertEqual(len([item for item in values if item['tls-checks']]), 4)
+        self.assertTrue(all(item['php-version'] == '8.6' for item in values if item['tls-checks']))
+        partial = [{'target': 'x86_64', 'type': 'apk', 'php-version': '8.6', 'packages': 'imagick'}]
+        workflow.tls_checks(partial)
+        self.assertFalse(partial[0]['tls-checks'])
+        partial[0]['packages'] = 'curl'
+        workflow.tls_checks(partial)
+        self.assertTrue(partial[0]['tls-checks'])
+
 
 
 if __name__ == '__main__':

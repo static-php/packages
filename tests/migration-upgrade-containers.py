@@ -93,20 +93,22 @@ def report_summary(args, result):
             stream.write('<pre>' + html.escape(summary) + '</pre>\n')
 
 
-def run(command, *, check=True, input=None, cwd=None, env=None):
+def run(command, *, check=True, input=None, cwd=None, env=None, timeout=600):
     process = subprocess.Popen([str(x) for x in command], cwd=cwd, env=env,
                                stdin=subprocess.PIPE if input is not None else None,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
     try:
-        stdout, stderr = process.communicate(input)
-    except BaseException:
+        stdout, stderr = process.communicate(input, timeout=timeout)
+    except BaseException as error:
         process.terminate()
         try:
             process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
+        if isinstance(error, subprocess.TimeoutExpired):
+            raise RuntimeError('Command timed out after {}s: {}'.format(timeout, ' '.join(map(str, command)))) from error
         raise
     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode:
@@ -562,7 +564,7 @@ def configure_client(kind, stream, arch, runtime, modules=True):
     shutil.copy2('/spp/keys/spp-migration.rsa.pub', '/etc/apk/keys/spp-migration.rsa.pub')
     with open('/etc/apk/repositories', 'a') as output:
         output.write('\nhttp://repo:8080/apk\n')
-    run(['apk', 'update'])
+    update_apk_indexes()
     return '/etc/apk/repositories', '/etc/apk/keys/spp-migration.rsa.pub'
 
 
@@ -620,13 +622,24 @@ def assert_disabled_extension(state, probe):
         raise RuntimeError('Upgrade changed or re-enabled the user-disabled extension ' + state['extension'])
 
 
+def update_apk_indexes(*options):
+    for attempt in range(3):
+        try:
+            return run(['apk', 'update', *options])
+        except RuntimeError as error:
+            if attempt == 2 or not re.search(r'DNS:|temporary error|connection (?:reset|refused)|HTTP[^\n]*5\d\d', str(error), re.I):
+                raise
+            annotation('warning', f'APK repository index transport failed; retrying ({attempt + 2}/3)')
+            time.sleep(attempt + 1)
+
+
 def ordinary_upgrade(kind):
     if kind == 'rpm':
         return run(['dnf', 'upgrade', '-y'])
     if kind == 'deb':
         run(['apt-get', 'update'])
         return run(['apt', 'upgrade', '-y'], input='\n' * 32)
-    run(['apk', 'update', '--cache-max-age', '0'])
+    update_apk_indexes('--cache-max-age', '0')
     return run(['apk', 'upgrade'])
 
 
@@ -899,12 +912,12 @@ def inside(args):
         probe = php_probe()
         if not probe['version'].startswith(args.php + '.'):
             raise RuntimeError('Old installation selected the wrong PHP stream')
-        if not probe['curl'] or not probe['fileinfo']:
-            raise RuntimeError('Published CLI lacks expected cURL/Fileinfo')
-        if args.library_only or args.partial_consumers:
-            closure = run(['ldd', '/usr/bin/php-zts'], check=False)
-            if closure.returncode or 'not found' in closure.stdout + closure.stderr or '/php-zts/lib/' not in closure.stdout:
-                raise RuntimeError('Partial updates require an already-shared installed PHP baseline')
+        closure = run(['ldd', '/usr/bin/php-zts'], check=False)
+        shared = not closure.returncode and 'not found' not in closure.stdout + closure.stderr and '/php-zts/lib/' in closure.stdout
+        if not shared and (not probe['curl'] or not probe['fileinfo']):
+            raise RuntimeError('Published static CLI lacks expected builtin cURL/Fileinfo')
+        if (args.library_only or args.partial_consumers) and not shared:
+            raise RuntimeError('Partial updates require an already-shared installed PHP baseline')
         php_ini = run(['/usr/bin/php-zts', '-r', 'echo php_ini_loaded_file();']).stdout
         if not php_ini or not Path(php_ini).is_file():
             raise RuntimeError('Installed PHP has no owned php.ini to customize')
@@ -955,7 +968,7 @@ def inside(args):
             or any(before['probe'][name] and not probe[name] for name in ('curl', 'fileinfo'))):
         raise RuntimeError('Upgrade lost configuration/cURL/Fileinfo')
     for module in ('curl', 'fileinfo'):
-        if 'php-zts-' + module not in after:
+        if before['probe'][module] and 'php-zts-' + module not in after:
             raise RuntimeError('Moved module was not installed automatically: ' + module)
     libraries = sorted(name for name in after if name.startswith('php-zts-lib-'))
     if not libraries:
@@ -1350,7 +1363,7 @@ class PreparedMirror:
                     raise RuntimeError('Requested published baseline packages missing: ' + ', '.join(sorted(missing)))
                 if self.inventory.get('baseline_index_failure'):
                     raise RuntimeError(self.inventory['baseline_index_failure'])
-                resources.exec(client, common + ['--inside', 'old'])
+                resources.exec(client, common + ['--inside', 'old'], timeout=300)
             except RuntimeError as error:
                 self.assert_bound(args)
                 result['baseline_failure'] = str(error)

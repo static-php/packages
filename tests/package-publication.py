@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import zipfile
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -19,6 +21,54 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_published_upgrade_matrix_retries_only_selected_native_cells(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/verify-published-upgrades.yml').read_text())
+        step = workflow['jobs']['prepare']['steps'][0]
+        script = step['run'].split("python3 - <<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            for selection, count in [('', 30), ('rpm:arm64:8.2,apk:x86_64:8.4,rpm:arm64:8.2', 2)]:
+                environment = dict(os.environ, SELECTED_TARGETS=selection, GITHUB_OUTPUT=str(output))
+                subprocess.run([sys.executable, '-c', script], env=environment, check=True)
+                fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(len(json.loads(fields['matrix'])['include']), count)
+                self.assertEqual(fields['any'], 'true')
+                output.unlink()
+            rejected = subprocess.run([sys.executable, '-c', script], env=dict(os.environ,
+                SELECTED_TARGETS='rpm:wrong:8.4', GITHUB_OUTPUT=str(output)), stderr=subprocess.PIPE)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(output.exists())
+
+    def test_retained_metadata_uses_bounded_verified_ranges(self):
+        reader = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/artifact-json.py'))
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr('metadata.json', '{"schema": 1}')
+            archive.writestr('unused-sdk.tar.zst', bytes(2 * 1024 * 1024))
+        raw = data.getvalue()
+        ranges = []
+        def request(session, method, url, **kwargs):
+            if method == 'HEAD':
+                return Mock(status_code=200, headers={'Content-Length': str(len(raw))})
+            match = re.fullmatch(r'bytes=(\d+)-(\d+)', kwargs['headers']['Range'])
+            start, end = map(int, match.groups())
+            ranges.append((start, end))
+            return Mock(status_code=206, headers={'Content-Range': f'bytes {start}-{end}/{len(raw)}'},
+                content=raw[start:end + 1])
+        with patch.dict(reader['RemoteZip'].__init__.__globals__, request=request):
+            with zipfile.ZipFile(reader['RemoteZip']('https://artifact.test/file')) as archive:
+                self.assertEqual(json.loads(archive.read('metadata.json')), {'schema': 1})
+        self.assertLess(sum(end - start + 1 for start, end in ranges), len(raw) // 2)
+
+    def test_retained_metadata_transport_retries_transient_errors(self):
+        reader = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/artifact-json.py'))
+        response = Mock(status_code=200)
+        session = Mock()
+        session.request.side_effect = [Mock(status_code=502), reader['requests'].ConnectionError('reset'), response]
+        with patch.dict(reader['request'].__globals__, time=Mock()):
+            self.assertIs(reader['request'](session, 'GET', 'https://artifact.test'), response)
+        self.assertEqual(session.request.call_count, 3)
+
     def test_upload_failure_report_omits_traceback_and_names_archive(self):
         reason = 'Upload failed for https://mirror.test 85/php-zts-cgi_8.5.12-6_arm64.deb: HTTP 500 after 3 attempts'
         lines = ['Traceback (most recent call last):', '  File "helper.py", line 56',
@@ -396,8 +446,13 @@ class WorkflowContracts(unittest.TestCase):
             mirror = jobs['mirror']
             self.assertIn('publish', mirror['needs'])
             self.assertIn('!cancelled()', mirror['if'])
-            self.assertTrue(mirror['with']['mirror'])
-            self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
+            if name == 'publish-packages.yml':
+                self.assertTrue(mirror['with']['mirror'])
+                self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
+            else:
+                self.assertTrue(mirror['continue-on-error'])
+                self.assertEqual(mirror['permissions'], {'actions': 'write'})
+                self.assertNotIn('uses', mirror)
             self.assertEqual(job['uses'], './.github/workflows/publish-package-cohort.yml')
             self.assertEqual(job['secrets'], 'inherit')
             self.assertTrue(required <= set(job['with']) <= set(declared))
@@ -418,6 +473,26 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")
         self.assertEqual(self.publisher['jobs']['publish-glibc']['steps'], self.publisher['jobs']['publish-apk']['steps'])
+
+    def test_producers_queue_mirrors_without_holding_the_producer_lock(self):
+        for name, kind in [('build-rpm-modular-packages.yml', 'deb'), ('build-apk-forgejo.yml', 'apk')]:
+            job = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']['mirror']
+            step = job['steps'][0]
+            self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
+            with self.subTest(workflow=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / 'gh'
+                executable.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\nPath(os.environ["DISPATCH_LOG"]).write_text(json.dumps(sys.argv[1:]))\n')
+                executable.chmod(0o755)
+                log = root / 'dispatch.json'
+                environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                    DISPATCH_LOG=str(log), GITHUB_REPOSITORY='static-php/packages', GITHUB_REF_NAME='master', GITHUB_RUN_ID='42')
+                subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], env=environment, check=True)
+                self.assertEqual(json.loads(log.read_text()), ['workflow', 'run', 'publish-packages.yml',
+                    '--repo', 'static-php/packages', '--ref', 'master', '-f', 'format=' + kind,
+                    '-f', 'build_run_id=42', '-f', 'mirror_run_id=42'])
+        wrapper = yaml.safe_load((ROOT / '.github/workflows/build-deb-forgejo.yml').read_text())
+        self.assertEqual(wrapper['jobs']['build']['permissions']['actions'], 'write')
 
     def test_publisher_reads_inherited_secrets_directly(self):
         inputs = self.publisher[True]['workflow_call']['inputs']

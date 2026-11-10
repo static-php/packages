@@ -51,11 +51,13 @@ if not paths: raise RuntimeError('Private OpenSSL libcrypto is missing')
 path=next((p for p in paths if os.path.islink(p)),paths[0])
 crypto=ctypes.CDLL(path)
 crypto.OPENSSL_info.argtypes=[ctypes.c_int];crypto.OPENSSL_info.restype=ctypes.c_char_p
+crypto.OPENSSL_version_major.argtypes=[];crypto.OPENSSL_version_major.restype=ctypes.c_uint
 crypto.OPENSSL_init_crypto.argtypes=[ctypes.c_uint64,ctypes.c_void_p];crypto.OPENSSL_init_crypto.restype=ctypes.c_int
 crypto.CONF_modules_load_file.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong];crypto.CONF_modules_load_file.restype=ctypes.c_int
 crypto.OSSL_PROVIDER_load.argtypes=[ctypes.c_void_p,ctypes.c_char_p];crypto.OSSL_PROVIDER_load.restype=ctypes.c_void_p
 crypto.OSSL_PROVIDER_unload.argtypes=[ctypes.c_void_p];crypto.OSSL_PROVIDER_unload.restype=ctypes.c_int
-config=crypto.OPENSSL_info(1001).decode();engines=crypto.OPENSSL_info(1002).decode();modules=crypto.OPENSSL_info(1003).decode()
+config=crypto.OPENSSL_info(1001).decode();modules=crypto.OPENSSL_info(1003).decode()
+engines=crypto.OPENSSL_info(1002).decode() if crypto.OPENSSL_version_major()<4 else None
 if crypto.CONF_modules_load_file(None,None,0)!=1: raise RuntimeError('Private OpenSSL default configuration does not parse')
 if crypto.OPENSSL_init_crypto(0x40,None)!=1: raise RuntimeError('Private OpenSSL default configuration failed')
 provider=crypto.OSSL_PROVIDER_load(None,b'default')
@@ -63,11 +65,11 @@ if not provider: raise RuntimeError('Private OpenSSL default provider failed')
 configuration=pathlib.Path(config)/'openssl.cnf'
 mapped=[x.split()[-1] for x in pathlib.Path('/proc/self/maps').read_text().splitlines() if 'ossl-modules/' in x]
 private=os.path.realpath('/usr/lib/php-zts/lib')
-if any(not os.path.realpath(p).startswith(private+'/') for p in [modules,engines]): raise RuntimeError('Compiled OpenSSL plugin path escapes private library directory')
+if any(not os.path.realpath(p).startswith(private+'/') for p in [modules,engines] if p is not None): raise RuntimeError('Compiled OpenSSL plugin path escapes private library directory')
 if any(not os.path.realpath(p).startswith(private+'/') for p in mapped): raise RuntimeError('Loaded an external provider: '+str(mapped))
 print(json.dumps({'library':path,'config_dir':config,'config_file':str(configuration),'config_exists':configuration.is_file(),
 'config_sha256':subprocess.check_output(['sha256sum',str(configuration)],universal_newlines=True).split()[0] if configuration.is_file() else None,
-'engines_dir':engines,'resolved_engines_dir':os.path.realpath(engines),'modules_dir':modules,'resolved_modules_dir':os.path.realpath(modules),'default_provider_loaded':True,'mapped_provider_modules':mapped}))
+'engines_dir':engines,'resolved_engines_dir':os.path.realpath(engines) if engines is not None else None,'modules_dir':modules,'resolved_modules_dir':os.path.realpath(modules),'default_provider_loaded':True,'mapped_provider_modules':mapped}))
 crypto.OSSL_PROVIDER_unload(provider)
 '''
 
@@ -97,11 +99,11 @@ tls.serve_forever()
 def issuer(directory):
     environment = {key: value for key, value in os.environ.items() if key not in UNSET}
     commands = [
-        ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=SPP ephemeral native trust test', '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(directory / 'ca.key'), '-out', str(directory / 'ca.crt')],
+        ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=SPP ephemeral native trust test', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash', '-keyout', str(directory / 'ca.key'), '-out', str(directory / 'ca.crt')],
         ['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=tls-server', '-keyout', str(directory / 'server.key'), '-out', str(directory / 'server.csr')],
         ['openssl', 'x509', '-req', '-in', str(directory / 'server.csr'), '-CA', str(directory / 'ca.crt'), '-CAkey', str(directory / 'ca.key'), '-CAcreateserial', '-days', '2', '-extfile', str(directory / 'extensions'), '-out', str(directory / 'server.crt')],
     ]
-    (directory / 'extensions').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:tls-server,DNS:localhost,IP:127.0.0.1\n')
+    (directory / 'extensions').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=DNS:tls-server,DNS:localhost,IP:127.0.0.1\n')
     for command in commands:
         subprocess.run(command, env=environment, check=True, capture_output=True, timeout=30)
 

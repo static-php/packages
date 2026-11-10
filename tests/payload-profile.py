@@ -163,6 +163,8 @@ class PayloadProfile(unittest.TestCase):
         self.assertEqual(result['modules'], ['imagick'])
         metadata = helper['extension_metadata'](self.root)
         self.assertEqual(metadata['dependent']['depends'], ['redis'])
+        self.assertEqual(metadata['imagick']['depends'], [])
+        self.assertEqual(helper['extension_metadata'](self.root, include_suggests=True)['imagick']['depends'], ['redis'])
 
     def test_skip_profiles_require_matching_php_and_enabled_tolerance(self):
         manifest = {'schema': 1, 'php_version_id': 80500, 'allow_shared_ext_failure': True,

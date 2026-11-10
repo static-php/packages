@@ -232,6 +232,31 @@ class PayloadCache(unittest.TestCase):
             (selected / 'lib/libfixture.so.1').write_bytes(b'tampered library')
             self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)
 
+    def test_packaging_retains_transitive_php_modules_without_publishing_them(self):
+        payload = self.root / 'build/8.6'
+        self.fixture(payload, 1, php=True)
+        modules = ['mysqlnd_parsec', 'mysqlnd', 'pdo_pgsql', 'pdo', 'swoole', 'swoole-hook-mysql', 'pdo_mysql', 'mysqli', 'unselected']
+        for name in modules:
+            if name != 'swoole-hook-mysql':
+                shutil.copy2(payload / 'modules/imagick-zts-86.so', payload / ('modules/' + name + '-zts-86.so'))
+        config = self.root / 'craft.yml'
+        config.write_text(config.read_text().replace('shared-extensions: [imagick]', 'shared-extensions: [' + ','.join(modules) + ']'))
+        for command in ['record', 'seal']:
+            extra = ['--config', config, '--php-version', '8.6.0RC4', '--arch', 'x86_64'] if command == 'record' else []
+            subprocess.run(['php', ROOT / 'bin/build-payload', command, '--root', payload, *extra], check=True, stdout=subprocess.DEVNULL)
+        original = cache.read(payload / 'build-payload.json')
+        selected = {'mysqlnd_parsec', 'pdo_pgsql', 'swoole'}
+        record, manifest, excluded = cache.packaging_projection(payload, cache.read(payload / 'build-payload.json'),
+            cache.read(payload / 'shared-libraries.json'), selected)
+        for name in ['mysqlnd', 'pdo', 'pdo_mysql', 'mysqli']:
+            path = 'modules/' + name + '-zts-86.so'
+            self.assertNotIn(path, excluded)
+            self.assertEqual(record['files'][path], original['files'][path])
+            self.assertEqual(record['prepared'][path], original['prepared'][path])
+        self.assertIn('modules/unselected-zts-86.so', excluded)
+        self.assertEqual(record['packaging_selection']['packages'], sorted(selected))
+        self.assertEqual(cache.read(payload / 'build-payload.json'), original)
+
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
     def test_unchanged_package_restore_is_small_but_changed_sources_keep_the_full_sdk(self):
         old = self.root / 'old'

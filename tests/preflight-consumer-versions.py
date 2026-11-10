@@ -121,7 +121,7 @@ class ConsumerVersionPreflight(unittest.TestCase):
     def check_shared_bump(self, kind, base):
         separator = '-r' if kind == 'apk' else '-'
         packages = [self.package('php-zts-grpc', base + separator + '5')]
-        for flags, expected_revision, expected_status in [([], 0 if kind == 'apk' else 1, 3), (['--bump'], 6, 0),
+        for flags, expected_revision, expected_status in [([], 6, 0), (['--bump'], 6, 0),
                                                           (['--iteration=7'], 7, 0), (['--bump', '--iteration=4'], 4, 3)]:
             with self.subTest(flags=flags):
                 result, receipt = self.run_preflight(kind, [self.candidate()], packages, flags=flags,

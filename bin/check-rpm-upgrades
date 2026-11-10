@@ -8,6 +8,7 @@ import http.client
 import lzma
 import re
 import shlex
+import struct
 import subprocess
 import sys
 import time
@@ -33,7 +34,7 @@ def read_http_file(base_url, location, missing_ok=False):
         except urllib.error.HTTPError as error:
             if missing_ok and error.code == 404:
                 return None
-            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            if (error.code != 429 and not 500 <= error.code < 600) or attempt == 2:
                 raise RuntimeError('Cannot read published RPM metadata {}: HTTP {}'.format(request.full_url, error.code)) from error
         except (OSError, http.client.IncompleteRead):
             if attempt == 2:
@@ -119,6 +120,44 @@ def local_package(path):
     name, arch, epoch, version, release = output.split('|')
     epoch = epoch if epoch.isdigit() else '0'
     return {'name': name, 'arch': arch, 'version': version, 'evr': '{}:{}-{}'.format(epoch, version, release), 'path': str(path)}
+
+
+def rpm_content(data):
+    if len(data) < 112 or data[:4] != b'\xed\xab\xee\xdb' or data[96:104] != b'\x8e\xad\xe8\x01\0\0\0\0':
+        raise RuntimeError('Invalid RPM signature header')
+    count, size = struct.unpack('>II', data[104:112])
+    offset = (112 + count * 16 + size + 7) & ~7
+    if offset + 16 > len(data) or data[offset:offset + 8] != b'\x8e\xad\xe8\x01\0\0\0\0':
+        raise RuntimeError('Invalid RPM package header')
+    count, size = struct.unpack('>II', data[offset + 8:offset + 16])
+    if offset + 16 + count * 16 + size >= len(data):
+        raise RuntimeError('Truncated RPM package')
+    return data[:96] + data[offset:]
+
+
+def reuse_published_signature(path, published, read_file, cache=None):
+    local = local_package(path)
+    matches = [remote for remote in published
+               if all(remote[key] == local[key] for key in ('name', 'arch', 'evr'))]
+    if not matches:
+        return False
+    content = rpm_content(path.read_bytes())
+    for remote in matches:
+        checksum = remote.get('checksum') or {}
+        algorithm = {'sha': 'sha1'}.get(checksum.get('type'), checksum.get('type'))
+        if algorithm not in ('sha256', 'sha512', 'sha1', 'md5') or not isinstance(checksum.get('value'), str) or not re.fullmatch(r'[0-9a-f]+', checksum['value']):
+            raise RuntimeError('Missing published RPM checksum: ' + remote['name'])
+        cached = Path(cache) / ('published-' + algorithm + '-' + checksum['value']) if cache else None
+        data = cached.read_bytes() if cached and cached.is_file() else read_file(remote['location'])
+        if hashlib.new(algorithm, data).hexdigest() != checksum['value']:
+            raise RuntimeError('Published RPM checksum mismatch: ' + remote['name'])
+        if rpm_content(data) != content:
+            raise RuntimeError('Existing RPM package content differs: ' + local['name'] + ' ' + local['evr'])
+        if cached:
+            cached.write_bytes(data)
+        path.write_bytes(data)
+    print('Reusing published signed RPM: ' + path.name, flush=True)
+    return True
 
 
 def same_archive(local, remote):

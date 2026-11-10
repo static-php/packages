@@ -186,13 +186,6 @@ class SharedLibraryPlan(unittest.TestCase):
             extracted.assert_called_once()
             self.assertEqual((output / 'abi/libfixture.so.1.xml').read_bytes(), b'<abi-corpus/>')
 
-    def test_retained_unpublished_subset_cannot_be_promoted(self):
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'plan.json'
-            path.write_text(json.dumps({'schema': 1, 'build_only': True}))
-            with self.assertRaisesRegex(RuntimeError, 'build/test-only'):
-                planner['cohort'](argparse.Namespace(plan=path))
-
     def test_scoped_library_baseline_preserves_unselected_cached_abi_epochs(self):
         current = manifest({'fixture': library(), 'other': library(epoch=3, soname='libother.so.3')})
         for entry in current['libraries'].values():
@@ -211,31 +204,6 @@ class SharedLibraryPlan(unittest.TestCase):
             self.assertEqual(merged['metadata_scope'], ['fixture'])
             with self.assertRaisesRegex(RuntimeError, 'different library metadata scopes'):
                 planner['merge_baselines']([(previous, temporary), (manifest(), temporary)], 'deb', temporary, set())
-
-    def test_php_only_scope_uses_cached_abi_without_library_metadata(self):
-        with TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            baseline = directory / 'baseline'
-            baseline.mkdir()
-            previous = dict(manifest({}), metadata_scope=[])
-            (baseline / 'shared-libraries.json').write_text(json.dumps(previous))
-            current = manifest({'fixture': dict(library(epoch=3), package_versions={'deb': '1.0-7'})})
-            (directory / 'current.json').write_text(json.dumps(current))
-            args = argparse.Namespace(manifest=str(directory / 'current.json'), baseline=str(baseline),
-                                      root=str(directory), request=None,
-                                      mode='incremental', libraries='', rebuilt_libraries='',
-                                      php_versions='8.5', packages='fpm', type='deb',
-                                      manifest_output=str(directory / 'annotated.json'), output=str(directory / 'plan.json'))
-            with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
-                planner['prepare'](args)
-            plan = json.loads(Path(args.output).read_text())
-            self.assertEqual(plan['libraries'], [])
-            self.assertEqual(plan['php_requests']['8.5']['packages'], ['fpm'])
-            self.assertFalse(any(item['full'] for item in plan['php_requests'].values()))
-            self.assertEqual(json.loads(Path(args.manifest_output).read_text())['libraries'], current['libraries'])
-            args.rebuilt_libraries = 'fixture'
-            with self.assertRaisesRegex(RuntimeError, 'Scoped baselines must cover'):
-                planner['prepare'](args)
 
     def test_missing_debug_baseline_blocks_release(self):
         old = manifest()
@@ -415,62 +383,6 @@ class SharedLibraryPlan(unittest.TestCase):
         plan = self.manual_plan()
         self.assertEqual(plan['libraries'], ['fixture'])
         self.assertFalse(any(value['full'] or value['packages'] for value in plan['php_requests'].values()))
-
-    def test_unchanged_manual_library_without_bump_does_not_repackage(self):
-        self.assertEqual(self.manual_plan(bump=False)['libraries'], [])
-
-    def test_rebuilding_an_already_published_library_does_not_republish_it(self):
-        for selected, packages in [('fixture', None), (None, None), (None, 'curl'), (None, 'frankenphp')]:
-            with self.subTest(selected=selected, packages=packages):
-                plan = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', bump=False, mode='incremental')
-                self.assertEqual(plan['libraries'], [])
-                self.assertFalse(plan['abi_break'])
-                self.assertEqual(plan['expected_members'], [])
-                changed = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', changed=('fixture',), bump=False, mode='incremental')
-                self.assertEqual(changed['libraries'], ['fixture'])
-
-    def test_unrebuilt_cached_library_differences_do_not_join_php_updates(self):
-        for packages in (None, 'curl', 'frankenphp'):
-            with self.subTest(packages=packages):
-                plan = self.manual_plan(selected=None, packages=packages, rebuilt='', changed=('other',), bump=False, mode='incremental')
-                self.assertEqual(plan['libraries'], [])
-                actual = self.manual_plan(selected=None, packages=packages, rebuilt='fixture', changed=('fixture', 'other'), bump=False, mode='incremental')
-                self.assertEqual(actual['libraries'], ['fixture'])
-        explicit = self.manual_plan(selected='other', rebuilt='', changed=('other',), bump=False, mode='incremental')
-        self.assertEqual(explicit['libraries'], ['other'])
-
-    def test_cached_sdk_selection_overrides_broad_download_changes(self):
-        for mode in ('incremental', 'full'):
-            with self.subTest(mode=mode):
-                plan = self.manual_plan(selected=None, rebuilt='other', changed=('other',), bump=False, mode=mode)
-                self.assertEqual(plan['libraries'], ['other'])
-                self.assertEqual(self.manual_plan(selected=None, bump=False, mode=mode)['libraries'], [])
-
-    def test_actual_library_packaging_change_still_selects_the_unchanged_binary(self):
-        plan = self.manual_plan(selected=None, bump=False, metadata=('fixture',))
-        self.assertEqual(plan['libraries'], ['fixture'])
-
-    def test_common_library_dependencies_accept_unchanged_stream_revisions(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            previous, current = manifest(), manifest()
-            previous['libraries']['fixture']['published_version'] = '1.0-r5'
-            previous['stream_libraries'] = {'8.2': copy.deepcopy(previous['libraries']), '8.5': copy.deepcopy(previous['libraries'])}
-            previous['stream_libraries']['8.5']['fixture']['published_version'] = '1.0-r1'
-            (root / 'baseline').mkdir()
-            (root / 'baseline/shared-libraries.json').write_text(json.dumps(previous))
-            (root / 'current.json').write_text(json.dumps(current))
-            args = argparse.Namespace(type='apk', manifest=str(root / 'current.json'), root=str(root),
-                                      baseline=str(root / 'baseline'), mode='incremental', request=None, libraries=None,
-                                      rebuilt_libraries='', php_versions=None, packages=None,
-                                      manifest_output=str(root / 'annotated.json'), output=str(root / 'plan.json'))
-            comparison = {'libraries': {'fixture': {'status': 'unchanged'}}}
-            with patch.dict(namespace, {'compare': Mock(return_value=(current, comparison)),
-                                        'native_compare': lambda kind, left, right: (left > right) - (left < right)}):
-                planner['prepare'](args)
-            self.assertEqual(json.loads(Path(args.output).read_text())['libraries'], [])
-            annotated = json.loads(Path(args.manifest_output).read_text())
-            self.assertEqual(annotated['libraries']['fixture']['package_versions']['apk'], '1.0-r1')
 
     def test_manual_library_set_includes_only_selected_and_actually_rebuilt_libraries(self):
         plan = self.manual_plan(names=('fixture', 'other', 'consumer', 'headerconsumer'),
@@ -682,6 +594,100 @@ class SharedLibraryPlan(unittest.TestCase):
             output = "Symbol table '.dynsym' contains 1 entry:\n  1: 0000000000001000 0 {} GLOBAL DEFAULT 6 {}\n".format(kind, name)
             with self.subTest(kind=kind, name=name), patch.dict(namespace, {'run': Mock(return_value=Mock(returncode=0, stdout=output))}):
                 self.assertEqual(planner['defined_public_symbols']('fixture.so'), expected)
+
+    def test_unchanged_manual_library_without_bump_does_not_repackage(self):
+        self.assertEqual(self.manual_plan(bump=False)['libraries'], [])
+
+
+    def test_rebuilding_an_already_published_library_does_not_republish_it(self):
+        for selected, packages in [('fixture', None), (None, None), (None, 'curl'), (None, 'frankenphp')]:
+            with self.subTest(selected=selected, packages=packages):
+                plan = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', bump=False, mode='incremental')
+                self.assertEqual(plan['libraries'], [])
+                self.assertFalse(plan['abi_break'])
+                self.assertEqual(plan['expected_members'], [])
+                changed = self.manual_plan(selected=selected, packages=packages, rebuilt='fixture', changed=('fixture',), bump=False, mode='incremental')
+                self.assertEqual(changed['libraries'], ['fixture'])
+
+    def test_unrebuilt_cached_library_differences_do_not_join_php_updates(self):
+        for packages in (None, 'curl', 'frankenphp'):
+            with self.subTest(packages=packages):
+                plan = self.manual_plan(selected=None, packages=packages, rebuilt='', changed=('other',), bump=False, mode='incremental')
+                self.assertEqual(plan['libraries'], [])
+                actual = self.manual_plan(selected=None, packages=packages, rebuilt='fixture', changed=('fixture', 'other'), bump=False, mode='incremental')
+                self.assertEqual(actual['libraries'], ['fixture'])
+        explicit = self.manual_plan(selected='other', rebuilt='', changed=('other',), bump=False, mode='incremental')
+        self.assertEqual(explicit['libraries'], ['other'])
+
+    def test_cached_sdk_selection_overrides_broad_download_changes(self):
+        for mode in ('incremental', 'full'):
+            with self.subTest(mode=mode):
+                plan = self.manual_plan(selected=None, rebuilt='other', changed=('other',), bump=False, mode=mode)
+                self.assertEqual(plan['libraries'], ['other'])
+                self.assertEqual(self.manual_plan(selected=None, bump=False, mode=mode)['libraries'], [])
+
+
+    def test_actual_library_packaging_change_still_selects_the_unchanged_binary(self):
+        plan = self.manual_plan(selected=None, bump=False, metadata=('fixture',))
+        self.assertEqual(plan['libraries'], ['fixture'])
+
+
+    def test_common_library_dependencies_accept_unchanged_stream_revisions(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous, current = manifest(), manifest()
+            previous['libraries']['fixture']['published_version'] = '1.0-r5'
+            previous['stream_libraries'] = {'8.2': copy.deepcopy(previous['libraries']), '8.5': copy.deepcopy(previous['libraries'])}
+            previous['stream_libraries']['8.5']['fixture']['published_version'] = '1.0-r1'
+            (root / 'baseline').mkdir()
+            (root / 'baseline/shared-libraries.json').write_text(json.dumps(previous))
+            (root / 'current.json').write_text(json.dumps(current))
+            args = argparse.Namespace(type='apk', manifest=str(root / 'current.json'), root=str(root),
+                                      baseline=str(root / 'baseline'), mode='incremental', request=None, libraries=None,
+                                      rebuilt_libraries='', php_versions=None, packages=None,
+                                      manifest_output=str(root / 'annotated.json'), output=str(root / 'plan.json'))
+            comparison = {'libraries': {'fixture': {'status': 'unchanged'}}}
+            with patch.dict(namespace, {'compare': Mock(return_value=(current, comparison)),
+                                        'native_compare': lambda kind, left, right: (left > right) - (left < right)}):
+                planner['prepare'](args)
+            self.assertEqual(json.loads(Path(args.output).read_text())['libraries'], [])
+            annotated = json.loads(Path(args.manifest_output).read_text())
+            self.assertEqual(annotated['libraries']['fixture']['package_versions']['apk'], '1.0-r1')
+
+    def test_retained_unpublished_subset_cannot_be_promoted(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'plan.json'
+            path.write_text(json.dumps({'schema': 1, 'build_only': True}))
+            with self.assertRaisesRegex(RuntimeError, 'build/test-only'):
+                planner['cohort'](argparse.Namespace(plan=path))
+
+
+    def test_php_only_scope_uses_cached_abi_without_library_metadata(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            baseline = directory / 'baseline'
+            baseline.mkdir()
+            previous = dict(manifest({}), metadata_scope=[])
+            (baseline / 'shared-libraries.json').write_text(json.dumps(previous))
+            current = manifest({'fixture': dict(library(epoch=3), package_versions={'deb': '1.0-7'})})
+            (directory / 'current.json').write_text(json.dumps(current))
+            args = argparse.Namespace(manifest=str(directory / 'current.json'), baseline=str(baseline),
+                                      root=str(directory), request=None,
+                                      mode='incremental', libraries='', rebuilt_libraries='',
+                                      php_versions='8.5', packages='fpm', type='deb',
+                                      manifest_output=str(directory / 'annotated.json'), output=str(directory / 'plan.json'))
+            with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
+                planner['prepare'](args)
+            plan = json.loads(Path(args.output).read_text())
+            self.assertEqual(plan['libraries'], [])
+            self.assertEqual(plan['php_requests']['8.5']['packages'], ['fpm'])
+            self.assertFalse(any(item['full'] for item in plan['php_requests'].values()))
+            self.assertEqual(json.loads(Path(args.manifest_output).read_text())['libraries'], current['libraries'])
+            args.rebuilt_libraries = 'fixture'
+            with self.assertRaisesRegex(RuntimeError, 'Scoped baselines must cover'):
+                planner['prepare'](args)
+
+
 
 
 @unittest.skipUnless(all(shutil.which(tool) for tool in ['gcc', 'abidw', 'abidiff']), 'GCC and libabigail required')

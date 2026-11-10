@@ -212,7 +212,7 @@ jobs:
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Compute source and toolchain fingerprint
                 id: fingerprint
@@ -335,7 +335,7 @@ jobs:
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: ${{ steps.composer-cache.outputs.cache-primary-key }}
 
     compute-build-matrix:
         needs: [setup-matrix, build-libs]
@@ -453,7 +453,7 @@ jobs:
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Build and stage common PHP payload
                 uses: ./.github/actions/php-payload
@@ -495,7 +495,7 @@ jobs:
                 uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
                     path: ~/.cache/composer
-                    key: composer-${{ hashFiles('**/composer.lock') }}
+                    key: ${{ steps.composer-cache.outputs.cache-primary-key }}
 
     compute-package-matrix:
         needs: [compute-build-matrix, build-payload]
@@ -544,7 +544,7 @@ jobs:
             actions: read
         strategy:
             fail-fast: false
-            max-parallel: 4
+            max-parallel: 10
             matrix: ${{ fromJson(needs.compute-package-matrix.outputs.matrix || needs.compute-build-matrix.outputs.package-matrix) }}
         env:
             IMAGE: ${{ matrix.image }}
@@ -664,23 +664,17 @@ jobs:
         secrets: inherit
 
     mirror:
-        name: Mirror (${{ matrix.type }} ${{ matrix.target }})
-        needs: [setup-matrix, compute-build-matrix, publish]
-        if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        name: Queue secondary mirror
+        needs: [compute-build-matrix, publish]
+        if: ${{ !cancelled() && inputs.publish == true && contains(inputs.formats, 'deb') && needs.compute-build-matrix.outputs.publish-any == 'true' }}
+        runs-on: ubuntu-24.04
+        continue-on-error: true
         permissions:
-            contents: read
-            packages: read
-            actions: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        uses: ./.github/workflows/publish-package-cohort.yml
-        with:
-            mirror: true
-            format: ${{ matrix.type }}
-            target: ${{ matrix.target }}
-            arch: ${{ matrix.arch }}
-            image: ${{ matrix.image }}
-            package-image-digest: ${{ matrix.package-image-digest }}
-            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-        secrets: inherit
+            actions: write
+        steps:
+            -   name: Queue mirror independently of the producer lock
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: |
+                    gh workflow run publish-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+                        -f format=deb -f build_run_id="$GITHUB_RUN_ID" -f mirror_run_id="$GITHUB_RUN_ID"

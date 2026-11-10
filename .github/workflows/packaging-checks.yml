@@ -57,6 +57,8 @@ jobs:
                         python3 tests/payload-profile.py
                         python3 tests/openssl-variants.py
                         python3 tests/pinned-library-sources.py
+                        python3 tests/incremental-library-builds.py
+                        python3 tests/spc-library-transition.py
                         python3 tests/upgrade-guards.py
                         python3 tests/migration-upgrade-harness.py
                         python3 tests/migration-baseline.py

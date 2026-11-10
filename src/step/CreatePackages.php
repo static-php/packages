@@ -27,7 +27,8 @@ class CreatePackages
     private static string $packageType = 'rpm';
     private static ?string $iterationOverride = null;
     private static bool $bump = false;
-    private static bool $allLibraryRevisions = false;
+    private static bool $bulkLibraryRevisions = false;
+    private static bool $bulkPackageRevisions = false;
     /** @var array<string, array{0:int,1:?string}> memoised HTTP GET responses (per run) */
     private static array $httpCache = [];
     /** @var array<string,string> resolved iteration per base package (name|version|arch|type) */
@@ -46,6 +47,7 @@ class CreatePackages
         self::$bump = $bump ?? self::$bump;
         self::$debuginfo = $debuginfo ?? self::$debuginfo;
         self::$resolvedIterations = [];
+        self::$bulkPackageRevisions = !$libsOnly && ($packageNames === null || count(array_unique((array) $packageNames)) > 1);
         self::$versionArch = [];
         self::$consumerManifest = [];
         if ($buildroot !== null && !is_file($buildroot . '/shared-libraries.json')) {
@@ -310,6 +312,7 @@ class CreatePackages
 
     private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
     {
+        $version = $type === 'apk' ? self::validApkPackageVersion($version) : $version;
         if ($name === 'php-zts-runtime-layout') {
             return $type === 'apk' ? 0 : 1;
         }
@@ -712,7 +715,7 @@ class CreatePackages
             'aarch64' => 'arm64',
             default => $architecture,
         } : $architecture;
-        self::$allLibraryRevisions = !array_diff($manifest->libraryIds(), $ids) && !array_diff($ids, $manifest->libraryIds());
+        self::$bulkLibraryRevisions = count(array_unique($ids)) > 1;
         try {
             foreach ($ids as $id) {
                 $package = new library($manifest, $id);
@@ -723,7 +726,7 @@ class CreatePackages
                 $packages[] = $package;
             }
         } finally {
-            self::$allLibraryRevisions = false;
+            self::$bulkLibraryRevisions = false;
         }
         foreach ($packages as $package) {
             self::createPackageWithFpm($package, $package->getVersion(), $architecture);
@@ -2491,6 +2494,7 @@ class CreatePackages
 
     private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
     {
+        $version = $packageType === 'apk' ? self::validApkPackageVersion($version) : $version;
         $maxIteration = $packageType === 'apk' ? -1 : 0;
         if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || preg_replace('/-debuginfo$/', '', $name) === 'php-zts-runtime-layout')) {
             foreach (['82', '83', '84', '85', '86'] as $streamOwner) {
@@ -2501,11 +2505,10 @@ class CreatePackages
         $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
         $owner ??= self::getForgejoOwner();
         $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
-        // Full library repackages share one filtered listing across all selected
-        // libraries. Partial requests still query only the requested package.
-        $queryName = self::$allLibraryRevisions && str_starts_with($matchName, 'php-zts-lib-')
+        $queryName = self::$bulkLibraryRevisions && str_starts_with($matchName, 'php-zts-lib-')
             ? 'php-zts-lib-' : preg_replace('/-debuginfo$/', '', $matchName);
-        $query = '&q=' . rawurlencode($queryName);
+        $independent = str_starts_with($matchName, 'php-zts-lib-') || $queryName === 'php-zts-runtime-layout';
+        $query = self::$bulkPackageRevisions && !$independent ? '' : '&q=' . rawurlencode($queryName);
         $packages = [];
         $previous = null;
         for ($page = 1; ; $page++) {

@@ -197,10 +197,21 @@ def valid_overlay(directory, expected=None):
         return None
 
 
+def runtime_overlay(receipt):
+    receipt = copy.deepcopy(receipt)
+    abi_paths = set(mapping(receipt['entry'].get('abi_dump', {}), 'abi_dump').values())
+    if abi_paths & runtime_paths(receipt['entry']):
+        raise RuntimeError('OpenSSL overlay ABI cache overlaps runtime ownership')
+    receipt['files'] = {name: record for name, record in receipt['files'].items() if name not in abi_paths}
+    for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
+        receipt['entry'].pop(field, None)
+    return receipt
+
+
 def export_overlay(sdk, entry, destination, profile, key, abi, identity=None):
     with tempfile.TemporaryDirectory(prefix=".openssl-overlay-", dir=destination.parent) as temporary:
         stage = Path(temporary)
-        files = set(entry_paths(entry))
+        files = runtime_paths(entry)
         for name in list(files):
             debug = "debug/" + name + ".debug"
             if rooted(sdk, debug).is_file():
@@ -212,6 +223,8 @@ def export_overlay(sdk, entry, destination, profile, key, abi, identity=None):
             records[name] = file_record(source)
         exported = copy.deepcopy(entry)
         exported.pop("package_versions", None)
+        for field in ("abi_dump", "abi_dump_hashes", "abi_empty"):
+            exported.pop(field, None)
         receipt = {"schema": 1, "library": "openssl", "profile": profile,
                    "openssldir": PROFILES[profile], "input_fingerprint": key, "compiled_input_fingerprint": key,
                    "source_hash": entry["source_hash"], "version": entry["version"],
@@ -515,6 +528,10 @@ def build(root, sdk, environment, output):
     probe_directory(sdk, PROFILES["rpm"])
     keys = {profile: fingerprint(root, sdk, environment, entry, profile) for profile in PROFILES}
     receipts = {profile: valid_overlay(output / profile, key) for profile, key in keys.items()}
+    for profile, receipt in receipts.items():
+        if receipt is not None and any(field in receipt['entry'] for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty')):
+            receipts[profile] = receipt = runtime_overlay(receipt)
+            write(output / profile / 'overlay.json', receipt)
     rebuilt = []
     if receipts["rpm"] is None or receipts["rpm"]["files"] != {name: file_record(rooted(sdk, name)) for name in receipts["rpm"]["files"]}:
         with tempfile.TemporaryDirectory(prefix=".openssl-abi-", dir=output.parent) as temporary:
@@ -540,6 +557,7 @@ def apply(sdk, variants, profile):
     index = read(variants / "variants.json")
     if index.get("profiles", {}).get(profile, {}).get("receipt_sha256") != file_hash(variants / profile / "overlay.json"):
         raise RuntimeError("OpenSSL variant receipt does not match the sealed profile index")
+    receipt = runtime_overlay(receipt)
     if (receipt["source_hash"] != old["source_hash"] or receipt["version"] != old["version"]
             or receipt["runtime_libdir"] != manifest["runtime_libdir"] or receipt.get("architecture") != manifest["architecture"]
             or receipt["headers_sha256"] != header_digest(sdk) or receipt.get("common_identity") != common_identity(sdk, old)):

@@ -31,8 +31,8 @@ foreach (['deb' => 'debian', 'apk' => 'alpine'] as $type => $registryType) {
 }
 echo "Passed shared library revision lookup using only the primary registry across stream owners.\n";
 
-$allLibraries = new ReflectionProperty(CreatePackages::class, 'allLibraryRevisions');
-$allLibraries->setValue(null, true);
+$bulkLibraries = new ReflectionProperty(CreatePackages::class, 'bulkLibraryRevisions');
+$bulkLibraries->setValue(null, true);
 try {
     $pages = [];
     foreach (['82', '83', '84', '85', '86'] as $owner) {
@@ -51,9 +51,9 @@ try {
         }
     }
 } finally {
-    $allLibraries->setValue(null, false);
+    $bulkLibraries->setValue(null, false);
 }
-echo "Passed batched full-library revision lookup without a full-registry scan.\n";
+echo "Passed batched multi-library revision lookup without a full-registry scan.\n";
 
 $directory = sys_get_temp_dir() . '/spp-library-revisions-' . bin2hex(random_bytes(6));
 mkdir($directory);

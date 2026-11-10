@@ -199,6 +199,52 @@ class VariantTests(unittest.TestCase):
                 self.assertEqual((target / "lib/libother.so.1").read_bytes(), b"unrelated consumer")
         self.assertEqual(cache.read_text(), "classified ABI cache\n")
 
+    def test_cached_profiles_retire_old_abi_metadata_without_recompiling(self):
+        self.build()
+        previous = 'usr/share/php-zts/libraries/abi/openssl/previous.xml'
+        current = 'usr/share/php-zts/libraries/abi/openssl/current.xml'
+        index = variants.read(self.output / 'variants.json')
+        for profile in variants.PROFILES:
+            directory = self.output / profile
+            path = directory / 'files' / previous
+            path.parent.mkdir(parents=True)
+            path.write_text('previous classified ABI\n')
+            receipt = variants.read(directory / 'overlay.json')
+            receipt['entry'].update(abi_dump={'libcrypto.so.3': previous},
+                abi_dump_hashes={'libcrypto.so.3': variants.file_hash(path)}, abi_empty=[])
+            receipt['files'][previous] = variants.file_record(path)
+            variants.write(directory / 'overlay.json', receipt)
+            index['profiles'][profile]['receipt_sha256'] = variants.file_hash(directory / 'overlay.json')
+        variants.write(self.output / 'variants.json', index)
+        previous_cache = self.sdk / previous
+        previous_cache.parent.mkdir(parents=True)
+        previous_cache.write_text('previous classified ABI\n')
+        cache = self.sdk / current
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text('current classified ABI\n')
+        manifest = variants.read(self.sdk / variants.MANIFEST)
+        manifest['libraries']['openssl'].update(abi_dump={'libcrypto.so.3': current},
+            abi_dump_hashes={'libcrypto.so.3': variants.file_hash(cache)}, abi_empty=[])
+        variants.write(self.sdk / variants.MANIFEST, manifest)
+        for refresh in (False, True):
+            if refresh:
+                with patch.object(variants, 'assert_el8'), patch.object(variants, 'probe_directory'), \
+                        patch.object(variants, 'abi_inventory', side_effect=AssertionError('unchanged ABI')), \
+                        patch.object(variants, 'produce', side_effect=AssertionError('unchanged profile')):
+                    result = variants.build(self.root, self.sdk, self.environment, self.output)
+                self.assertEqual(result['rebuilt_profiles'], [])
+            for profile in variants.PROFILES:
+                with self.subTest(profile=profile, refresh=refresh), tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                    target = Path(temporary)
+                    shutil.copytree(self.sdk, target, dirs_exist_ok=True, symlinks=True)
+                    (target / previous).unlink()
+                    variants.apply(target, self.output, profile)
+                    self.assertFalse((target / previous).exists())
+                    self.assertEqual((target / current).read_text(), cache.read_text())
+                    entry = variants.read(target / variants.MANIFEST)['libraries']['openssl']
+                    for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
+                        self.assertEqual(entry[field], manifest['libraries']['openssl'][field])
+
     def test_apply_still_rejects_changed_runtime_ownership(self):
         self.build()
         manifest = variants.read(self.sdk / variants.MANIFEST)
