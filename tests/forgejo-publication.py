@@ -286,6 +286,7 @@ class ForgejoPublication(unittest.TestCase):
             publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper)
 
     def test_runtime_mirror_upload_precedes_large_retained_debug_downloads(self):
+        self.archive(name='php-zts-cli')
         self.archive(name='php-zts-lib-ssl')
         self.archive(name='php-zts-lib-ssl-debuginfo')
         events = []
@@ -299,8 +300,25 @@ class ForgejoPublication(unittest.TestCase):
                 'stage_mirror_dependencies': lambda *_: [], 'stage_mirror_debug': debug}), \
                 patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, 'debug download failed'):
-                publisher['publish_mirror']('upload', self.root, self.root, 'apk', {}, ['85'], helper, False)
-        self.assertEqual(events, [['php-zts-lib-ssl'], 'fetch retained debug', ['php-zts-lib-ssl-debuginfo']])
+                publisher['publish_mirror']('upload', self.root, self.root, 'apk', {('php-zts-cli', '3.6.0-r1', 'x86_64'): '85'}, ['85'], helper, False)
+        self.assertEqual(events, [['php-zts-cli', 'php-zts-lib-ssl'], 'fetch retained debug', ['php-zts-lib-ssl-debuginfo']])
+
+    def test_library_only_mirror_publishes_only_the_selected_archives(self):
+        names = {'php-zts-lib-' + identifier + suffix for identifier in ('libaom', 'libjxl')
+                 for suffix in ('', '-debuginfo')}
+        for name in sorted(names):
+            self.archive(name=name)
+        staged = Mock(side_effect=AssertionError('Unchanged dependencies must not be staged'))
+        uploaded = []
+        def publish(action, host, password, kind, groups, helpers, bootstrap, mirror):
+            uploaded.extend(helpers['package_metadata'](path, kind)[0] for paths in groups.values() for path in paths)
+        with patch.dict(publisher['publish_mirror'].__globals__, {'publish': publish,
+                'stage_mirror_dependencies': staged, 'stage_mirror_debug': staged}), \
+                patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}):
+            publisher['publish_mirror']('upload', self.root, self.root, 'apk', {}, ['85'], helper, False)
+        self.assertEqual(set(uploaded), names)
+        self.assertEqual(len(uploaded), len(names))
+        staged.assert_not_called()
 
     def test_candidate_lookup_batches_selected_names_and_excludes_unrelated_packages(self):
         first = self.archive(name='php-zts-cli')

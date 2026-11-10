@@ -226,10 +226,12 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
 
 def publish_mirror(action, cohort, directory, package_type, owners, selected, helper, bootstrap):
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    deferred = stage_mirror_dependencies(cohort, directory, package_type, helper, selected)
+    consumers = any(not independent(helper['package_metadata'](path, kind)[0])
+                    for path in directory.glob('*.' + package_type))
+    deferred = stage_mirror_dependencies(cohort, directory, package_type, helper, selected) if consumers else []
     failures = []
     for debug_phase in (False, True):
-        if debug_phase:
+        if debug_phase and consumers:
             failures.extend(stage_mirror_debug(cohort, directory, package_type, helper, selected, deferred))
         groups = package_groups(directory, package_type, owners, helper, selected)
         groups = {owner: [path for path in paths
