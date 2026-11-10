@@ -34,8 +34,7 @@ def container_options(identity):
 
 def resource_limits(role, runtime=None):
     memory = 384 if role == 'repo' else 768
-    if (runtime in ('alma8', 'almalinux:8')
-            or role == 'repo' and runtime in ('alma9', 'alma10', 'almalinux:9', 'almalinux:10')):
+    if runtime in ('alma8', 'almalinux:8'):
         memory = 1024
     return {'memory_mib': memory, 'swap_mib': memory, 'cpus': 1}
 

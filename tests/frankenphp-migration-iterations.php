@@ -24,7 +24,7 @@ try {
     foreach ([
         ['rpm', '1.13.3_86.0~rc4', '1.13.3_86.0~rc4-1.el8', 'x86_64', 2, 'rpm/el8/x86_64/8.6/baseline.json'],
         ['deb', '1.13.3+php86.0~rc4', '1.13.3+php86.0~rc4-1', 'amd64', 2, 'deb/x86_64/8.6/baseline.json'],
-        ['apk', '1.13.3p86.0_rc4', '1.13.3p86.0_rc4-r0', 'x86_64', 1, 'apk/x86_64/8.6/baseline.json'],
+        ['apk', '1.13.3.0_p86_p0_rc4', '1.13.3p86.0_rc4-r0', 'x86_64', 1, 'apk/x86_64/8.6/baseline.json'],
     ] as [$type, $version, $published, $arch, $expected, $relative]) {
         $path = $root . '/' . $type . '.json';
         if (isset($options['baseline-root'])) {

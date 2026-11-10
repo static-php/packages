@@ -200,7 +200,6 @@ jobs:
                     ABI_REBUILD_LIBRARIES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-rebuild-libraries }}
                     ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-break }}
                     ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-core-rebuild }}
-                    RUNTIME_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request || '{}').runtime-checks }}
                     TLS_CHECKS: ${{ fromJson(steps.classification.outputs.inline-request || '{}').tls-checks }}
             -   name: Pack buildroot
                 if: inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
@@ -323,7 +322,6 @@ jobs:
             COMPILE_PACKAGES: ${{ matrix.compile-packages }}
             ABI_BREAK: ${{ matrix.abi-break }}
             ABI_CORE_REBUILD: ${{ matrix.abi-core-rebuild }}
-            RUNTIME_CHECKS: ${{ matrix.runtime-checks }}
             TLS_CHECKS: ${{ matrix.tls-checks }}
             ABI_REBUILD_LIBRARIES: ${{ matrix.abi-rebuild-libraries }}
             LIBRARY_ONLY: ${{ matrix.library-only || false }}

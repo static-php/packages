@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -27,22 +27,10 @@ class AssetRedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def split_key(key):
-    match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]{0,170})-([0-9]{4})-([0-9]{2})", key)
-    if not match:
-        if re.fullmatch(r"(?:buildroot-|php-payload-)[A-Za-z0-9_.-]{1,160}", key):
-            return key + ".tar.zst", "cache"
-        raise CacheError("Invalid compiled cache identity")
-    prefix, year, week = match.groups()
-    try:
-        date.fromisocalendar(int(year), int(week), 1)
-    except ValueError as error:
-        raise CacheError("Invalid cache ISO week") from error
-    return prefix + ".tar.zst", "cache-" + year + "-" + week
-
-
 def cache_names(key):
-    asset, _ = split_key(key)
+    if not re.fullmatch(r"(?:buildroot-|php-payload-)[A-Za-z0-9_.-]{1,160}", key):
+        raise CacheError("Invalid compiled cache identity")
+    asset = key + ".tar.zst"
     name = re.sub(r"-[a-f0-9]{32,64}$", "", asset.removesuffix(".tar.zst"))
     name = re.sub(r"^buildroot-shared-", "buildroot-", name)
     return name + ".tar.zst", name + ".json"
@@ -84,16 +72,6 @@ class GitHub:
 
     def api(self, suffix, **kwargs):
         return self.request("https://api.github.com/repos/" + self.repository + suffix, **kwargs)
-
-    def tags(self):
-        tags = []
-        for page in range(1, 11):
-            releases = self.api("/releases?per_page=100&page=" + str(page))
-            self.release_ids.update({value["tag_name"]: value["id"] for value in releases})
-            tags.extend(value["tag_name"] for value in releases if re.fullmatch(r"cache(?:-[0-9]{4}-[0-9]{2})?", value.get("tag_name", "")) and not value.get("draft"))
-            if len(releases) < 100:
-                break
-        return sorted(set(tags), reverse=True)
 
     def download(self, tag, asset, destination):
         if tag not in self.asset_inventories:
@@ -179,12 +157,11 @@ class GitHub:
 
 class ReleaseCache:
     def __init__(self, backend, key, path, seed_key=""):
-        self.legacy_asset, _ = split_key(key)
         self.tag = "cache"
         self.asset, self.receipt = cache_names(key)
         if seed_key and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,220}", seed_key):
             raise CacheError("Invalid compatibility cache key")
-        self.backend, self.key, self.path, self.seed_key = backend, self.legacy_asset.removesuffix(".tar.zst"), Path(path), seed_key
+        self.backend, self.key, self.path, self.seed_key = backend, key, Path(path), seed_key
 
     def metadata(self, tag, name, temporary):
         destination = temporary / "metadata.json"
@@ -200,13 +177,10 @@ class ReleaseCache:
         return value
 
     def validate(self, value, expected_key=None, compatibility=True):
-        if value.get("schema") not in (1, 2) or not isinstance(value.get("key"), str):
+        if value.get("schema") != 2 or not isinstance(value.get("key"), str):
             raise CacheError("Unsupported cache metadata")
-        asset, tag = split_key(value["key"])
-        hashed_asset = asset.removesuffix(".tar.zst") + "-" + str(value.get("sha256")) + ".tar.zst"
         simple_asset, _ = cache_names(value["key"])
-        allowed = [asset, hashed_asset] if value["schema"] == 1 else [simple_asset]
-        if simple_asset != self.asset or value.get("asset") not in allowed or value.get("tag") != tag:
+        if simple_asset != self.asset or value.get("asset") != simple_asset or value.get("tag") != self.tag:
             raise CacheError("Cache metadata does not identify its exact artifact")
         if expected_key is not None and value["key"] != expected_key:
             raise CacheError("Exact cache identity mismatch")
@@ -217,15 +191,13 @@ class ReleaseCache:
         if 'asset_id' in value and (type(value['asset_id']) is not int or value['asset_id'] < 1):
             raise CacheError('Cache metadata has an invalid asset ID')
 
-    def install(self, tag, asset, value, temporary):
+    def install(self, value, temporary):
         candidate = temporary / "buildroot.tar.zst"
-        downloaded = (self.backend.download_id(value['asset_id'], candidate) if value and value.get('schema') == 2 and value.get('asset_id')
-                      else self.backend.download(tag, asset, candidate))
+        downloaded = (self.backend.download_id(value['asset_id'], candidate) if value.get('asset_id')
+                      else self.backend.download(self.tag, value['asset'], candidate))
         if not downloaded:
-            if value is not None:
-                raise CacheError('Compiled cache receipt points to a missing archive; refusing a cold rebuild: ' + asset)
-            return False
-        if value is not None and (candidate.stat().st_size != value["size"] or digest(candidate) != value["sha256"]):
+            raise CacheError('Compiled cache receipt points to a missing archive; refusing a cold rebuild: ' + value['asset'])
+        if (candidate.stat().st_size != value["size"] or digest(candidate) != value["sha256"]):
             raise CacheError("Compiled buildroot cache checksum mismatch")
         candidate.replace(self.path)
         return True
@@ -253,40 +225,19 @@ class ReleaseCache:
 
     def _restore(self, required=False):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tags = [self.tag] + [tag for tag in self.backend.tags() if tag != self.tag]
         with tempfile.TemporaryDirectory(prefix="buildroot-cache-", dir=self.path.parent) as directory:
             temporary = Path(directory)
-            candidates = {}
-            for tag in tags:
-                exact_key = self.key if tag == self.tag else self.key + "-" + tag.removeprefix("cache-")
-                value = self.metadata(tag, self.receipt, temporary)
-                if value is not None:
-                    self.validate(value, compatibility=False)
-                    candidates[tag] = value
-                    if value["key"] == exact_key:
-                        self.validate(value, exact_key)
-                        if self.install(tag, value["asset"], value, temporary):
-                            return {"cache-hit": "true", "seed-hit": "false", "cache-current": str(tag == self.tag).lower(), "restored-key": exact_key}
-                value = self.metadata(tag, self.legacy_asset + ".json", temporary)
-                if value is not None:
-                    self.validate(value, exact_key)
-                elif self.seed_key:
-                    continue
-                if self.install(tag, value["asset"] if value is not None else self.legacy_asset, value, temporary):
-                    return {"cache-hit": "true", "seed-hit": "false", "cache-current": str(tag == self.tag).lower(), "restored-key": exact_key}
-            if not required and self.seed_key:
-                for tag in tags:
-                    value = candidates.get(tag)
-                    if value is not None and value.get("compatibility") == self.seed_key:
-                        self.validate(value)
-                        if self.install(tag, value["asset"], value, temporary):
-                            return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
-                    value = self.metadata(tag, self.seed_key + ".json", temporary)
-                    if value is None:
-                        continue
+            value = self.metadata(self.tag, self.receipt, temporary)
+            if value is not None:
+                self.validate(value, compatibility=False)
+                if value["key"] == self.key:
+                    self.validate(value, self.key)
+                    self.install(value, temporary)
+                    return {"cache-hit": "true", "seed-hit": "false", "cache-current": "true", "restored-key": self.key}
+                if not required and self.seed_key and value.get("compatibility") == self.seed_key:
                     self.validate(value)
-                    if self.install(value["tag"], value["asset"], value, temporary):
-                        return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
+                    self.install(value, temporary)
+                    return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
         if required:
             raise CacheError("No exact compiled buildroot cache found for " + self.key)
         return {"cache-hit": "false", "seed-hit": "false", "cache-current": "false", "restored-key": ""}

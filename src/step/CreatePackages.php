@@ -147,7 +147,6 @@ class CreatePackages
                 }
             }
             if ($includeCli) {
-                self::prepareMigrationCutoffs();
                 self::createSapiPackage('cli');
             }
         }
@@ -161,7 +160,6 @@ class CreatePackages
             }
             self::createExtensionPackages();
             if (in_array('cli', self::$sapis, true)) {
-                self::prepareMigrationCutoffs();
                 self::createSapiPackage('cli');
             }
         }
@@ -335,25 +333,14 @@ class CreatePackages
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         [$phpVersion] = self::getPhpVersionAndArchitecture();
         preg_match('/^(\d+\.\d+)/', $phpVersion, $targetStream);
-        $advanceAbi = false;
-        if (($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) !== false && $planPath !== '') {
-            $plan = self::migrationBaseline($planPath);
-            if (($plan['schema'] ?? null) !== 1 || ($plan['type'] ?? null) !== $type) {
-                throw new RuntimeException('Invalid shared-library package plan');
-            }
-            $advanceAbi = ($plan['abi_break'] ?? false) === true && isset($plan['published_consumers'][$targetStream[1]][$matchName]);
-        }
         foreach ($paths as $path) {
             $data = self::migrationBaseline($path);
             if (isset($data['type']) && $data['type'] !== $type) {
                 continue;
             }
-            if (array_key_exists($targetStream[1], $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
-                continue;
-            }
             $packages = array_merge($data['packages'] ?? [], $data['published_packages'] ?? []);
             foreach ($data['consumer_versions'] ?? [] as $stream => $consumers) {
-                if (array_key_exists($stream, $data['migration_cutoffs'] ?? []) && !$advanceAbi) {
+                if ($stream !== $targetStream[1]) {
                     continue;
                 }
                 if (isset($consumers[$matchName])) {
@@ -366,6 +353,9 @@ class CreatePackages
                     continue;
                 }
                 $published = preg_replace('/^\d+:/', '', $package['version']);
+                if ($type === 'apk') {
+                    $published = self::validApkPackageVersion($published);
+                }
                 $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
                 if (preg_match($pattern, $published, $release)) {
                     $minimum = max($minimum, (int) $release[1] + 1);
@@ -583,16 +573,26 @@ class CreatePackages
             return;
         }
         $type = self::$packageType;
+        $selected = [];
+        if ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) {
+            $selected = self::migrationBaseline($planPath)['libraries'] ?? [];
+        }
         $packages = [];
         foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
             $baseline = self::migrationBaseline($path);
             if (($baseline['type'] ?? null) === $type) {
+                if (isset($baseline['php_stream'])) {
+                    [$phpVersion] = self::getPhpVersionAndArchitecture();
+                    if (!str_starts_with($phpVersion, $baseline['php_stream'] . '.')) {
+                        continue;
+                    }
+                }
                 array_push($packages, ...($baseline['packages'] ?? []), ...($baseline['published_packages'] ?? []));
             }
         }
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         foreach (self::$sharedLibraries->libraryIds() as $id) {
-            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null) {
+            if (self::$sharedLibraries->getPackageVersion($id, $type) !== null && ($packages === [] || in_array($id, $selected, true))) {
                 continue;
             }
             $source = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
@@ -627,7 +627,7 @@ class CreatePackages
             return match ($process->getExitCode()) {0 => 0, 11 => 1, 12 => -1, default => throw new RuntimeException('Cannot compare captured migration RPM versions')};
         }
         if ($type === 'apk') {
-            $process = new Process(['apk', 'version', '-t', $left, $right]);
+            $process = new Process(['apk', 'version', '-t', self::validApkPackageVersion($left), self::validApkPackageVersion($right)]);
             $process->mustRun();
             return match (trim($process->getOutput())) {'=' => 0, '>' => 1, '<' => -1, default => throw new RuntimeException('Cannot compare captured migration APK versions')};
         }
@@ -642,36 +642,6 @@ class CreatePackages
             }
         }
         return 0;
-    }
-
-    private static function prepareMigrationCutoffs(): void
-    {
-        if (getenv('SPP_MIGRATION_CUTOFFS') || !getenv('SPP_BASELINE_MANIFESTS')) {
-            return;
-        }
-        $baselines = json_decode((string) getenv('SPP_BASELINE_MANIFESTS'), true, 512, JSON_THROW_ON_ERROR);
-        if (!is_array($baselines) || !array_is_list($baselines)) {
-            throw new RuntimeException('SPP_BASELINE_MANIFESTS must be a JSON array of captured baseline manifests');
-        }
-        if ($baselines === []) {
-            return;
-        }
-        $output = TEMP_DIR . '/migration-cutoffs-' . self::$packageType . '.json';
-        [$version] = self::getPhpVersionAndArchitecture();
-        preg_match('/^(\d+\.\d+)/', $version, $stream);
-        $arguments = ['python3', BASE_PATH . '/bin/shared-library-plan', 'migration-cutoffs', '--type', self::$packageType,
-            '--artifacts', DIST_PATH . '/' . self::$packageType, '--php-version', $stream[1], '--output', $output];
-        foreach ($baselines as $baseline) {
-            if (!is_string($baseline) || !is_file($baseline)) {
-                throw new RuntimeException('Missing captured migration baseline');
-            }
-            $arguments[] = '--baseline-manifest';
-            $arguments[] = $baseline;
-        }
-        $process = new Process($arguments);
-        $process->setTimeout(null);
-        $process->mustRun();
-        putenv('SPP_MIGRATION_CUTOFFS=' . $output);
     }
 
     private static function migrationConflicts(): array
@@ -2483,7 +2453,7 @@ class CreatePackages
      * {name}-{version} (for RPM: on the given arch/dist) and return it + 1.
      *
      * Sources:
-     *   - rpm  -> autoindex at {SPP_RPM_REPO_URL}/{arch}/el{N}/  (createrepo dir listing)
+     *   - rpm  -> autoindex at {SPP_RPM_REPO_URL}/{arch}/el8/  (createrepo dir listing)
      *   - deb  -> Forgejo   {SPP_FORGEJO_HOST}/api/v1/packages/{owner}?type=debian
      *   - apk  -> Forgejo   {SPP_FORGEJO_HOST}/api/v1/packages/{owner}?type=alpine
      *
@@ -2499,12 +2469,9 @@ class CreatePackages
             $baseUrl = getenv('SPP_RPM_REPO_URL') ?: 'https://rpm.henderkes.com';
             $pattern = '#' . preg_quote($name, '#') . '-' . preg_quote($version, '#')
                 . '-(\d+)(?:\.[^."/]+){0,2}\.' . preg_quote($architecture, '#') . '\.rpm#';
-            foreach (['el8', 'el9', 'el10'] as $repository) {
-                $url = rtrim($baseUrl, '/') . "/{$architecture}/{$repository}/";
-                [$code, $body] = self::httpGet($url);
-                if ($code === 404) {
-                    continue;
-                }
+            $url = rtrim($baseUrl, '/') . "/{$architecture}/el8/";
+            [$code, $body] = self::httpGet($url);
+            if ($code !== 404) {
                 if ($code !== 200 || $body === null) {
                     throw new RuntimeException("--bump: failed to fetch RPM index {$url} (HTTP {$code})");
                 }
@@ -2579,7 +2546,7 @@ class CreatePackages
             }
             else {
                 // apk registry version: {version}-r{iteration}
-                if (preg_match('/^' . preg_quote($version, '/') . '-r(\d+)$/', $remoteVersion, $m)) {
+                if (preg_match('/^' . preg_quote($version, '/') . '-r(\d+)$/', self::validApkPackageVersion($remoteVersion), $m)) {
                     $maxIteration = max($maxIteration, (int)$m[1]);
                 }
             }
@@ -2620,7 +2587,7 @@ class CreatePackages
         // listing is far smaller/faster than the HTML autoindex (e.g. 0.8MB/2s vs 4MB/120s);
         // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
         // both payloads, so the same regex extracts iterations either way.
-        $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
+        $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--connect-timeout', '10', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
         if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
             $owner = rawurldecode($m[1]);
             $password = getenv('FORGEJO_PASSWORD') ?: '';
@@ -2628,18 +2595,23 @@ class CreatePackages
                 $arguments = [...$arguments, '--user', $owner . ':' . $password];
             }
         }
-        $process = new Process([...$arguments, $url]);
-        $process->run();
-        if (!$process->isSuccessful()) {
-            return [0, null]; // transport failure: do not cache, allow a retry
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $process = new Process([...$arguments, $url]);
+            $process->setTimeout(100);
+            $process->run();
+            $output = $process->getOutput();
+            $nl = strrpos($output, "\n");
+            $result = $process->isSuccessful() && $nl !== false
+                ? [(int) substr($output, $nl + 1), substr($output, 0, $nl)] : [0, null];
+            if (!in_array($result[0], [0, 408, 425, 429, 500, 502, 503, 504], true)) {
+                self::$httpCache[$url] = $result;
+                return $result;
+            }
+            if ($attempt < 3) {
+                fwrite(STDERR, "Retrying GET {$url} after HTTP {$result[0]} (attempt " . ($attempt + 1) . "/3)\n");
+                usleep(1000000 * $attempt);
+            }
         }
-        $output = $process->getOutput();
-        $nl = strrpos($output, "\n");
-        if ($nl === false) {
-            return [0, null];
-        }
-        $result = [(int)substr($output, $nl + 1), substr($output, 0, $nl)];
-        self::$httpCache[$url] = $result;
         return $result;
     }
 
@@ -2674,7 +2646,7 @@ class CreatePackages
     }
 
     /**
-     * Get distribution version for RPM filenames (e.g., "el9", "el8", "fc39")
+     * Get distribution version for RPM filenames (e.g., "el8", "fc39")
      */
     private static function getDistVersion(): string
     {

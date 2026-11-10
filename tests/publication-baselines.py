@@ -30,7 +30,7 @@ class PublicationBaselines(unittest.TestCase):
         args = dict(type='deb', arch='amd64', host='https://fixture.invalid',
                     owner=None, owners=None, password_env='LIB_PASSWORD',
                     consumer_password_env='PASSWORD', base_url=None,
-                    remote_directory=None, baseline_directory=[], baseline_url=[],
+                    remote_directory=None,
                     output=str(self.root / 'baseline'))
         return SimpleNamespace(**dict(args, **values))
 
@@ -49,26 +49,68 @@ class PublicationBaselines(unittest.TestCase):
         self.assertEqual(result['consumer_versions']['8.6']['php-zts-cli'], '86')
         self.assertEqual(result['architecture'], 'x86_64')
 
-    def test_default_baseline_reads_only_php85_and_shares_dependencies(self):
+    def test_default_baseline_keeps_each_php_streams_own_consumers(self):
         owners = []
         def capture(args):
             owners.append(args.owner)
             value = planner['empty_manifest']()
-            value.update(consumer_inventory_complete=True, consumer_inventory_stream='8.5')
-            value['consumers'] = {'8.5': ['php-zts-cli']}
-            value['consumer_dependencies'] = {'8.5': {'php-zts-cli': ['openssl']}}
-            value['consumer_versions'] = {'8.5': {'php-zts-cli': '8.5.12-1'}}
+            stream = args.owner[0] + '.' + args.owner[1:]
+            name = 'php-zts-imagick' if stream == '8.2' else 'php-zts-curl'
+            value.update(consumer_inventory_complete=True, consumer_inventory_streams=[stream])
+            value['consumers'] = {stream: [name]}
+            value['consumer_dependencies'] = {stream: {name: ['imagemagick' if stream == '8.2' else 'curl']}}
+            value['consumer_versions'] = {stream: {name: stream + '.1-1'}}
             planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
         with patch.dict(plan_globals, {'baseline_single': capture}):
             planner['baseline'](self.baseline_args())
         result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
-        self.assertEqual(owners, ['85'])
+        self.assertEqual(owners, ['82', '83', '84', '85', '86'])
         self.assertTrue(result['consumer_inventory_complete'])
         for stream in planner['STREAMS']:
-            self.assertEqual(result['consumer_dependencies'][stream], {'php-zts-cli': ['openssl']})
-            self.assertEqual(result['consumers'][stream], ['php-zts-cli'])
-            if stream != '8.5':
-                self.assertEqual(result['consumer_versions'][stream], {})
+            name = 'php-zts-imagick' if stream == '8.2' else 'php-zts-curl'
+            self.assertEqual(result['consumer_dependencies'][stream], {name: ['imagemagick' if stream == '8.2' else 'curl']})
+            self.assertEqual(result['consumers'][stream], [name])
+            self.assertEqual(result['consumer_versions'][stream], {name: stream + '.1-1'})
+        self.assertEqual(result['consumer_inventory_streams'], list(planner['STREAMS']))
+
+    def test_apk_library_baseline_retains_the_highest_target_stream_revision(self):
+        def capture(args):
+            version = '2.5.2-r5' if args.owner == '82' else '2.5.2-r1'
+            value = planner['empty_manifest']()
+            value['libraries']['attr'] = {'version': '2.5.2', 'source_hash': 'same-source',
+                                          'elf': {}, 'published_version': version,
+                                          'package_versions': {'apk': version}}
+            planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
+        def compare(kind, left, right):
+            left, right = int(left.rsplit('-r', 1)[1]), int(right.rsplit('-r', 1)[1])
+            return (left > right) - (left < right)
+        with patch.dict(plan_globals, {'baseline_single': capture, 'native_compare': compare}):
+            planner['baseline'](self.baseline_args(type='apk', owners='82,83,84,85,86', skip_consumers=True))
+        result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
+        self.assertEqual(result['libraries']['attr']['published_version'], '2.5.2-r5')
+        self.assertEqual(result['libraries']['attr']['package_versions']['apk'], '2.5.2-r5')
+        self.assertEqual(result['stream_libraries']['8.2']['attr']['published_version'], '2.5.2-r5')
+        self.assertEqual(result['stream_libraries']['8.5']['attr']['published_version'], '2.5.2-r1')
+        self.assertEqual(result['publication_drift'], [])
+        self.assertEqual(planner['source_changes'](result, result), {})
+        result['stream_libraries']['8.2']['attr']['source_hash'] = 'older-source'
+        self.assertEqual(planner['source_changes'](result, dict(result, stream_libraries={})), {'attr': 'changed'})
+
+    def test_native_consumer_discovery_reads_the_matching_stream_owner(self):
+        for kind in ('deb', 'apk'):
+            for owner in ('82', '85', '86'):
+                with self.subTest(kind=kind, owner=owner):
+                    args = self.baseline_args(type=kind, owner=owner, libraries='', output=str(self.root / (kind + owner)))
+                    helper = {'get_remote_packages': Mock(return_value=[])}
+                    stream = owner[0] + '.' + owner[1:]
+                    discover = Mock(return_value={'php-zts-cli': stream + '.1-r2'})
+                    with patch.dict(plan_globals, {'published_consumers': discover}), patch.object(runpy, 'run_path', return_value=helper):
+                        planner['baseline_single'](args)
+                    discover.assert_called_once()
+                    self.assertEqual(discover.call_args.args[2], owner)
+                    result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
+                    self.assertEqual(result['consumer_versions'][stream], {'php-zts-cli': stream + '.1-r2'})
+                    self.assertTrue(all(not versions for target, versions in result['consumer_versions'].items() if target != stream))
 
     def test_no_rebuild_skips_deb_and_apk_consumer_archives(self):
         for kind in ['deb', 'apk']:
@@ -81,23 +123,6 @@ class PublicationBaselines(unittest.TestCase):
                     planner['baseline_single'](args)
                 result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
                 self.assertFalse(result['consumer_inventory_complete'])
-
-    def test_php_migration_is_detected_from_native_metadata_without_archives(self):
-        for kind in ['rpm', 'deb', 'apk']:
-            for provides in [[], ['php-zts-shared-runtime-85']]:
-                with self.subTest(kind=kind, provides=provides):
-                    index = Mock(return_value=([{'name': 'php-zts-cli', 'version': '8.5.12-1', 'provides': provides}], None, None))
-                    native = {'rpm_index': index, 'deb_index': index, 'apk_index': index,
-                              'latest_packages': lambda kind, packages: {p['name']: p for p in packages}}
-                    args = self.baseline_args(type=kind, arch='arm64', php_versions='8.5', base_url='https://fixture/el8')
-                    with patch.object(runpy, 'run_path', return_value=native):
-                        self.assertEqual(planner['unmigrated_consumers'](args), [] if provides else ['8.5'])
-                    self.assertEqual(index.call_args.args[1], 'arm64' if kind == 'deb' else 'aarch64')
-
-    def test_php_migration_probe_does_not_hide_repository_failures(self):
-        native = {'apk_index': Mock(side_effect=RuntimeError('repository unavailable'))}
-        with patch.object(runpy, 'run_path', return_value=native), self.assertRaisesRegex(RuntimeError, 'repository unavailable'):
-            planner['unmigrated_consumers'](self.baseline_args(type='apk', php_versions='8.5'))
 
     def test_unchanged_selection_does_not_read_unrelated_package_archives(self):
         args = self.baseline_args(type='deb', owner='85', skip_consumers=True, abi_libraries='', libraries='zlib')
@@ -119,22 +144,6 @@ class PublicationBaselines(unittest.TestCase):
             planner['baseline_single'](args)
         result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
         self.assertFalse(result['consumer_inventory_complete'])
-
-    def test_historical_rpm_urls_share_a_highest_version_baseline(self):
-        sources = []
-        def capture(args):
-            sources.append(args.base_url)
-            value = planner['empty_manifest']()
-            value['consumer_versions'] = {'8.6': {'php-zts-cli': args.base_url.rsplit('el', 1)[1]}}
-            planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
-        args = self.baseline_args(type='rpm', arch='x86_64', base_url='https://fixture/el8',
-                                  baseline_url=['https://fixture/el9', 'https://fixture/el10'])
-        with patch.dict(plan_globals, {'baseline_single': capture,
-                                      'native_compare': lambda kind, a, b: (int(a) > int(b)) - (int(a) < int(b))}):
-            planner['baseline'](args)
-        result = json.loads((self.root / 'baseline/shared-libraries.json').read_text())
-        self.assertEqual(len(sources), 3)
-        self.assertEqual(result['consumer_versions']['8.6']['php-zts-cli'], '10')
 
     def test_confirmed_absent_stream_owner_does_not_discard_existing_baselines(self):
         response = requests.Response()
@@ -225,6 +234,19 @@ class PublicationBaselines(unittest.TestCase):
             planner['cohort'](args)
         self.assertEqual(len(json.loads(Path(args.output).read_text())['files']), 1)
 
+    def test_publication_progress_checks_each_streams_library_baseline(self):
+        previous = planner['empty_manifest']()
+        entry = {'version': '2.5.2', 'source_hash': 'same-source', 'published_version': '2.5.2-r5'}
+        previous['libraries']['attr'] = entry
+        previous['stream_libraries'] = {'8.2': {'attr': entry}, '8.5': {'attr': dict(entry, published_version='2.5.2-r1')}}
+        current = json.loads(json.dumps(previous))
+        current['stream_libraries']['8.5']['attr']['published_version'] = '2.5.2-r6'
+        versions = {(None, 'php-zts-lib-attr'): '2.5.2-r6'}
+        plan = {'expected_libraries': {'attr': {'version': '2.5.2', 'source_hash': 'same-source'}}}
+        self.assertTrue(planner['candidate_progress'](current, previous, plan, versions))
+        current['stream_libraries']['8.5']['attr']['source_hash'] = 'unrelated-source'
+        self.assertFalse(planner['candidate_progress'](current, previous, plan, versions))
+
     def cutoff_args(self, names):
         baseline = planner['empty_manifest']()
         baseline['consumer_versions'] = {'8.6': names}
@@ -235,9 +257,42 @@ class PublicationBaselines(unittest.TestCase):
                                output=str(self.root / 'cutoffs.json'))
 
     def test_missing_published_module_blocks_cli_migration(self):
-        args = self.cutoff_args({'php-zts-redis': '0:6.3.0_86.0~rc4-3.el10'})
+        args = self.cutoff_args({'php-zts-redis': '0:6.3.0_86.0~rc4-3.el8'})
         with self.assertRaisesRegex(RuntimeError, 'Missing published migration consumers: php-zts-redis'):
             planner['migration_cutoffs'](args)
+
+    def test_existing_shared_runtime_allows_unchanged_consumers_but_rejects_downgrades(self):
+        for kind, version in [('rpm', '1.13.5_83.36-6'), ('deb', '1.13.5+php83.36-6'), ('apk', '1.13.5.0_p83_p36-r6')]:
+            with self.subTest(kind=kind):
+                directory = self.root / kind
+                directory.mkdir()
+                artifacts = directory / 'artifacts'
+                artifacts.mkdir()
+                (artifacts / ('candidate.' + kind)).write_bytes(b'native archive fixture')
+                baseline = directory / 'baseline.json'
+                baseline.write_text(json.dumps({'schema': 1, 'type': kind, 'php_stream': '8.3', 'architecture': 'x86_64',
+                    'packages': [{'name': 'php-zts-cli', 'version': '8.3.36-r6' if kind == 'apk' else '8.3.36-6',
+                                  'architecture': 'x86_64', 'provides': ['php-zts-shared-runtime-83-abi20230831-1']},
+                                 {'name': 'frankenphp', 'version': version, 'architecture': 'x86_64'}]}))
+                candidate = dict(name='frankenphp', version=version, evr='0:' + version, arch='x86_64')
+                original = runpy.run_path
+                def modules(path):
+                    if Path(path).name == 'check-rpm-upgrades':
+                        return dict(guard, local_package=lambda *_: candidate)
+                    if Path(path).name == 'forgejo-helper':
+                        return {'package_metadata': lambda *_: ('frankenphp', candidate['version'], 'x86_64')}
+                    return original(path)
+                args = SimpleNamespace(type=kind, baseline_manifest=[str(baseline)], artifacts=str(artifacts),
+                                       php_version='8.3', output=str(directory / 'cutoffs.json'))
+                with patch.dict(plan_globals, {'native_compare': lambda kind, left, right: (left > right) - (left < right)}), \
+                        patch.object(plan_globals['runpy'], 'run_path', side_effect=modules):
+                    planner['migration_cutoffs'](args)
+                    result = json.loads(Path(args.output).read_text())
+                    self.assertEqual(result['formats'][kind]['frankenphp'], ('0:' if kind == 'rpm' else '') + version)
+                    candidate['version'] = version[:-1] + '5'
+                    candidate['evr'] = '0:' + candidate['version']
+                    with self.assertRaisesRegex(RuntimeError, 'advance published version'):
+                        planner['migration_cutoffs'](args)
 
     def test_already_shared_module_inherits_first_cutoff_without_repackaging(self):
         args = self.cutoff_args({'php-zts-intl': 'new-module'})
@@ -255,26 +310,26 @@ class PublicationBaselines(unittest.TestCase):
         frozen = {'schema': 1, 'type': 'rpm', 'php_stream': '8.6', 'architecture': 'x86_64',
                   'packages': [{'name': 'php-zts-cli', 'version': '8.6.0~rc4-1.el8', 'epoch': '0', 'architecture': 'x86_64'}],
                   'published_packages': [{'name': 'php-zts-cli', 'version': '8.6.0~rc4-1.el8', 'epoch': '0', 'architecture': 'x86_64'},
-                                         {'name': 'php-zts-redis', 'version': '6.3.0_86.0~rc4-3.el10', 'epoch': '0', 'architecture': 'x86_64'},
-                                         {'name': 'php-zts-redis', 'version': '6.3.0_85.12-100.el10', 'epoch': '0', 'architecture': 'x86_64'}]}
+                                         {'name': 'php-zts-redis', 'version': '6.3.0_86.0~rc4-3.el8', 'epoch': '0', 'architecture': 'x86_64'},
+                                         {'name': 'php-zts-redis', 'version': '6.3.0_85.12-100.el8', 'epoch': '0', 'architecture': 'x86_64'}]}
         path = self.root / 'frozen.json'
         path.write_text(json.dumps(frozen))
         result = planner['cutoff_baseline'](path, 'rpm')
-        self.assertEqual(result['consumer_versions']['8.6']['php-zts-redis'], '0:6.3.0_86.0~rc4-3.el10')
-        self.assertEqual(result['consumer_versions']['8.5']['php-zts-redis'], '0:6.3.0_85.12-100.el10')
+        self.assertEqual(result['consumer_versions']['8.6']['php-zts-redis'], '0:6.3.0_86.0~rc4-3.el8')
+        self.assertEqual(result['consumer_versions']['8.5']['php-zts-redis'], '0:6.3.0_85.12-100.el8')
 
     def test_frozen_rpm_inventory_keeps_every_stream_and_filters_architecture(self):
         frozen = {'schema': 1, 'type': 'rpm', 'php_stream': '8.6', 'architecture': 'x86_64',
                   'packages': [], 'published_packages': [
-                      {'name': 'php-zts-cli', 'version': f'{stream}.35-10.el10', 'epoch': '0', 'architecture': 'x86_64'}
+                      {'name': 'php-zts-cli', 'version': f'{stream}.35-10.el8', 'epoch': '0', 'architecture': 'x86_64'}
                       for stream in planner['STREAMS']] + [
-                      {'name': 'php-zts-cli', 'version': '8.2.35-99.el10', 'epoch': '0', 'architecture': 'aarch64'},
+                      {'name': 'php-zts-cli', 'version': '8.2.35-99.el8', 'epoch': '0', 'architecture': 'aarch64'},
                       {'name': 'php-zts-runtime-layout', 'version': '1-1', 'epoch': '0', 'architecture': 'noarch'}]}
         path = self.root / 'frozen.json'
         path.write_text(json.dumps(frozen))
         result = planner['cutoff_baseline'](path, 'rpm')
         for stream in planner['STREAMS']:
-            self.assertEqual(result['consumer_versions'][stream], {'php-zts-cli': f'0:{stream}.35-10.el10'})
+            self.assertEqual(result['consumer_versions'][stream], {'php-zts-cli': f'0:{stream}.35-10.el8'})
 
     def test_frozen_deb_inventory_stays_in_its_owner_stream(self):
         frozen = {'schema': 1, 'type': 'deb', 'php_stream': '8.6', 'architecture': 'amd64',

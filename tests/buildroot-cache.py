@@ -67,9 +67,6 @@ class MemoryBackend:
         Path(destination).write_bytes(self.assets[key])
         return True
 
-    def tags(self):
-        return sorted({tag for tag, asset in self.assets}, reverse=True)
-
     def download(self, tag, name, destination):
         self.events.append(("download", tag, name))
         if (tag, name) not in self.assets:
@@ -109,19 +106,6 @@ class ReleaseCacheTests(unittest.TestCase):
     def restore(self, key=None, seed=None, required=False):
         return cache.ReleaseCache(self.backend, key or self.key, self.path, self.seed if seed is None else seed).restore(required)
 
-    def store_weekly(self, week='2026-43'):
-        value = self.store()
-        del self.backend.assets['cache', value['asset']]
-        del self.backend.assets['cache', cache.cache_names(self.key)[1]]
-        value['key'] = self.key + '-' + week
-        asset, tag = cache.split_key(value['key'])
-        legacy = asset.removesuffix('.tar.zst') + '-' + value['sha256'] + '.tar.zst'
-        value.update(schema=1, asset=legacy, tag=tag)
-        self.backend.assets.update({(tag, legacy): self.path.read_bytes(),
-                                    (tag, asset + '.json'): json.dumps(value).encode(),
-                                    (tag, self.seed + '.json'): json.dumps(value).encode()})
-        return value
-
     def test_save_uses_one_readable_archive_and_one_receipt(self):
         value = self.store()
         events = [event for event in self.backend.events if event[0] == "upload"]
@@ -136,17 +120,11 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(value['compatibility'], self.seed)
         self.assertEqual(value['tag'], 'cache')
 
-    def test_old_dated_input_never_creates_another_weekly_release(self):
-        value = self.store(self.key + '-2026-45')
-        self.assertEqual(value['tag'], 'cache')
-        self.assertEqual(value['key'], self.key)
-        self.assertEqual({tag for tag, _ in self.backend.assets}, {'cache'})
-
     def test_asset_names_do_not_expose_fingerprints(self):
         for prefix, expected in [('buildroot-shared-apk-arm64', 'buildroot-apk-arm64'),
                                  ('buildroot-shared-glibc-alma8-arm64', 'buildroot-glibc-alma8-arm64'),
                                  ('php-payload-musl-aarch64-84', 'php-payload-musl-aarch64-84')]:
-            key = prefix + '-' + 'a' * 32 + '-2026-45'
+            key = prefix + '-' + 'a' * 32
             self.assertEqual(cache.cache_names(key), (expected + '.tar.zst', expected + '.json'))
 
     def test_new_source_replaces_the_same_slot_and_remains_a_compatible_seed(self):
@@ -217,25 +195,11 @@ class ReleaseCacheTests(unittest.TestCase):
                 self.store(newer, body=b'updated library payload')
                 self.assertEqual(len(self.backend.assets), 2)
 
-    def test_older_exact_cache_wins_over_newer_compatible_seed(self):
-        self.store_weekly()
-        newer = self.key.replace('a' * 32, 'b' * 32)
-        self.store(newer, body=b'newer source payload')
-        result = self.restore()
-        self.assertEqual(result['cache-hit'], 'true')
-        self.assertEqual(result['cache-current'], 'false')
-        self.assertEqual(self.path.read_bytes(), b'compiled library payload')
-
     def test_replaced_toolchain_slot_is_a_miss_instead_of_an_invalid_exact_hit(self):
         self.store(seed='other-toolchain')
         result = self.restore(self.key.replace('a' * 32, 'b' * 32))
         self.assertEqual(result['cache-hit'], 'false')
         self.assertEqual(result['seed-hit'], 'false')
-
-    def test_existing_hashed_cache_and_seed_pointer_remain_readable(self):
-        self.store_weekly()
-        self.assertEqual(self.restore()['cache-hit'], 'true')
-        self.assertEqual(self.restore(self.key.replace('a' * 32, 'b' * 32))['seed-hit'], 'true')
 
     def test_exact_hit_is_verified_and_current(self):
         self.store()
@@ -244,17 +208,16 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(result, {"cache-hit": "true", "seed-hit": "false", "cache-current": "true", "restored-key": self.key})
         self.assertEqual(self.path.read_bytes(), b"compiled library payload")
 
-    def test_weekly_sdk_restores_and_promotes_to_the_persistent_cache(self):
-        value = self.store_weekly()
+    def test_current_receipt_without_asset_id_uses_verified_named_archive(self):
+        value = self.store()
+        del value['asset_id']
+        self.backend.assets['cache', cache.cache_names(self.key)[1]] = json.dumps(value).encode()
         self.path.unlink()
-        result = self.restore()
-        self.assertEqual(result["cache-hit"], "true")
-        self.assertEqual(result["cache-current"], "false")
-        self.assertEqual(result["restored-key"], self.key + '-2026-43')
-        saved = cache.ReleaseCache(self.backend, self.key, self.path, self.seed).save()
-        self.assertEqual(saved["sha256"], value["sha256"])
-        self.assertEqual(saved['tag'], 'cache')
-        self.assertEqual(self.restore()["cache-current"], "true")
+        self.assertEqual(self.restore()['cache-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'compiled library payload')
+        self.backend.assets['cache', value['asset']] = b'corrupted payload'
+        with self.assertRaisesRegex(cache.CacheError, 'checksum'):
+            self.restore()
 
     def test_new_source_uses_previous_compatible_sdk_as_seed(self):
         self.store()
@@ -304,24 +267,6 @@ class ReleaseCacheTests(unittest.TestCase):
         result = self.restore()
         self.assertEqual(result, {"cache-hit": "false", "seed-hit": "false", "cache-current": "false", "restored-key": ""})
         self.assertEqual(self.path.read_bytes(), b"local user file")
-
-    def test_legacy_exact_cache_remains_available_to_existing_consumers(self):
-        asset, tag = cache.split_key(self.key)
-        self.backend.assets[tag, asset] = b"legacy exact SDK"
-        self.assertEqual(self.restore(seed="", required=True)["cache-hit"], "true")
-        self.assertEqual(self.path.read_bytes(), b"legacy exact SDK")
-        self.assertEqual(self.restore()["cache-hit"], "false")
-
-    def test_legacy_exact_receipt_cannot_claim_a_different_source_key(self):
-        value = self.store()
-        asset, tag = cache.split_key(self.key)
-        value["key"] = self.key.replace("a" * 32, "d" * 32)
-        value["asset"] = cache.split_key(value["key"])[0]
-        value['schema'] = 1
-        del self.backend.assets[tag, cache.cache_names(self.key)[1]]
-        self.backend.assets[tag, asset + ".json"] = json.dumps(value).encode()
-        with self.assertRaisesRegex(cache.CacheError, "identity"):
-            self.restore()
 
     def test_invalid_key_is_rejected(self):
         for key in ["../escape-2026-43", "no-week", "sdk-2026-54", "sdk-2026-00", "s" * 200 + "-2026-43"]:
@@ -376,11 +321,6 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(download.call_count, 1)
         sleep.assert_not_called()
 
-    def test_cache_listing_timeout_can_fall_back_to_a_fresh_build(self):
-        with mock.patch.object(self.backend, "tags", side_effect=TimeoutError("timed out")) as tags, mock.patch.object(cache.time, "sleep"):
-            self.assertEqual(self.restore()["cache-hit"], "false")
-        self.assertEqual(tags.call_count, 3)
-
 
 class GitHubDownloadTests(unittest.TestCase):
     def test_missing_release_and_empty_release_do_not_request_download_urls(self):
@@ -388,8 +328,8 @@ class GitHubDownloadTests(unittest.TestCase):
             with self.subTest(release=release):
                 github = cache.GitHub("owner/repository")
                 with mock.patch.object(github, "api", side_effect=[release, []]) as api, mock.patch.object(cache.urllib.request, "build_opener") as opener:
-                    self.assertFalse(github.download("cache-2026-45", "absent", "unused"))
-                    self.assertFalse(github.download("cache-2026-45", "other", "unused"))
+                    self.assertFalse(github.download("cache", "absent", "unused"))
+                    self.assertFalse(github.download("cache", "other", "unused"))
                 self.assertEqual(api.call_count, calls)
                 opener.assert_not_called()
 
@@ -400,9 +340,9 @@ class GitHubDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(github, "api", side_effect=[{"id": 17}, first, second]) as api, mock.patch.object(cache.urllib.request, "build_opener") as opener:
             opener.return_value.open.return_value = io.BytesIO(b"compiled SDK")
             path = Path(temporary) / "sdk"
-            self.assertTrue(github.download("cache-2026-45", "sdk.tar.zst", path))
+            self.assertTrue(github.download("cache", "sdk.tar.zst", path))
             self.assertEqual(path.read_bytes(), b"compiled SDK")
-            self.assertFalse(github.download("cache-2026-45", "missing", path))
+            self.assertFalse(github.download("cache", "missing", path))
             request = opener.return_value.open.call_args.args[0]
             self.assertEqual(request.full_url, "https://api.github.com/repos/owner/repository/releases/assets/123")
             self.assertEqual(request.get_header("Accept"), "application/octet-stream")

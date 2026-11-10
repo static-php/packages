@@ -59,9 +59,9 @@ try {
     define('BASE_PATH', dirname(__DIR__));
     define('INI_PATH', BASE_PATH . '/src/ini');
     define('SPP_TYPE', $type);
-    define('SPP_PHP_VERSION', '8.6');
+    define('SPP_PHP_VERSION', '8.5');
     define('SPP_TARGET', null);
-    define('SPP_PREFIX', $type === 'rpm' ? '-zts' : '-zts86');
+    define('SPP_PREFIX', $type === 'rpm' ? '-zts' : '-zts85');
     define('BUILD_ROOT_PATH', $root . '/buildroot');
     define('BUILD_BIN_PATH', BUILD_ROOT_PATH . '/bin');
     define('BUILD_LIB_PATH', BUILD_ROOT_PATH . '/lib');
@@ -79,7 +79,7 @@ try {
     check(is_string($helpers), 'Cannot load package path helpers');
     eval('use staticphp\\step\\CreatePackages;' . $helpers);
     (new ReflectionProperty(CreatePackages::class, 'prefix'))->setValue(null, SPP_PREFIX);
-    (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, ['8.6.0', 'x86_64']);
+    (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, ['8.5.0', 'x86_64']);
 
     foreach (['8.2', '8.3', '8.4', '8.5', '8.6'] as $version) {
         foreach ([null, ['cli'], ['curl'], ['fileinfo'], ['devel']] as $packages) {
@@ -148,14 +148,14 @@ try {
     echo "Passed {$type} cURL shared selection for PHP 8.2–8.6, weak SAPI recommendations, Swoole dependency/loading order, INI ownership and ELF library dependencies.\n";
 
     if (isset($options['native'])) {
-        (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, ['8.6.0', 'x86_64']);
+        (new ReflectionProperty(CreatePackages::class, 'versionArch'))->setValue(null, ['8.5.0', 'x86_64']);
         (new ReflectionProperty(CreatePackages::class, 'iterationOverride'))->setValue(null, '1');
         $method = new ReflectionMethod(CreatePackages::class, match ($type) {
             'rpm' => 'createRpmPackage', 'deb' => 'createDebPackage', 'apk' => 'createApkPackage',
         });
         ob_start();
         try {
-            $method->invoke(null, $curl, '8.6.0', 'x86_64');
+            $method->invoke(null, $curl, '8.5.0', 'x86_64');
         } finally {
             file_put_contents($root . '/package.log', ob_get_clean());
         }

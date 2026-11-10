@@ -51,7 +51,7 @@ permissions:
     actions: read
 
 concurrency:
-    group: ${{ inputs.mirror && 'shared-publish-host2' || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}
+    group: ${{ inputs.mirror && format('shared-publish-host2-{0}-{1}', inputs.format, inputs.target) || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}
     cancel-in-progress: false
     queue: max
 

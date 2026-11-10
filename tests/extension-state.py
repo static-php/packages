@@ -93,7 +93,7 @@ class ExtensionState(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('SPP_NATIVE_EXTENSION_STATE') == '1', 'Set SPP_NATIVE_EXTENSION_STATE=1 for native package probes')
     def test_native_upgrades_keep_disabled_modules(self):
-        for kind, image in [('rpm', 'almalinux:8'), ('deb', 'debian:11'), ('apk', 'alpine:3.21')]:
+        for kind, image in [('rpm', 'almalinux:8'), ('deb', 'debian:11'), ('apk', 'alpine:3.24')]:
             with self.subTest(kind=kind):
                 tool = 'nfpm' if kind == 'apk' else 'fpm'
                 binary = os.environ.get('SPP_' + tool.upper() + '_BINARY') or shutil.which(tool)

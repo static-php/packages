@@ -83,6 +83,14 @@ function migrationVersionContracts(string $root): void
             ['deb', '3.8.1+php86.0~rc4', '3.8.1+php86.0~rc4+ext', '3.8.1+php86.0~rc4+ext-1', 'amd64'],
             ['apk', '3.8.1p86.0_rc4', '3.8.1p86.0_rc4_p0', '3.8.1p86.0_rc4_p0-r1', 'x86_64'],
         ];
+        foreach ($cases as &$case) {
+            if ($case[0] === 'apk') {
+                foreach ([1, 2, 3] as $field) {
+                    $case[$field] = CreatePackages::validApkPackageVersion($case[$field]);
+                }
+            }
+        }
+        unset($case);
         foreach ($cases as [$type, $proposed, $legacy, $published, $architecture]) {
             foreach (['freezer', 'consumers'] as $kind) {
                 $name = 'php-zts-imagick';
@@ -103,27 +111,6 @@ function migrationVersionContracts(string $root): void
                 }
             }
         }
-        foreach ([
-            ['rpm', '3.6.0~alpha1_86.0~rc4', '3.6.0_86.0~rc4+ext~alpha1', '3.6.0_86.0~rc4+ext~alpha1-2.el10'],
-            ['deb', '3.6.0~alpha1+php86.0~rc4', '3.6.0+php86.0~rc4+ext~alpha1', '3.6.0+php86.0~rc4+ext~alpha1-2'],
-        ] as [$type, $proposed, $legacy, $published]) {
-            $path = $directory . '/' . $type . '-prerelease.json';
-            file_put_contents($path, json_encode(['type' => $type, 'packages' => [['name' => 'php-zts-redis', 'version' => $published, 'architecture' => 'x86_64']]], JSON_THROW_ON_ERROR));
-            putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$path], JSON_THROW_ON_ERROR));
-            migrationCheck(CreatePackages::migrationPackageVersion($type, 'php-zts-redis', $proposed, 'x86_64') === $legacy, $type . ' lost the legacy extension prerelease spelling');
-            foreach (['alpha2', 'beta1', 'rc1', ''] as $phase) {
-                $candidate = str_replace('~alpha1', $phase === '' ? '' : '~' . $phase, $proposed);
-                $expected = str_replace('~alpha1', $phase === '' ? '' : '~' . $phase, $legacy);
-                $selected = CreatePackages::migrationPackageVersion($type, 'php-zts-redis', $candidate, 'x86_64');
-                migrationCheck($selected === $expected, $type . ' loses the actual updated extension phase in its legacy migration format');
-                migrationCheck(CreatePackages::migrationUpstreamVersion($type, $selected . '-1') === '3.6.0' . ($phase === '' ? '' : '~' . $phase), $type . ' migration version masks the actual updated extension source phase');
-                if ($type === 'rpm') {
-                    $comparison = new Process(['rpmdev-vercmp', $published, $selected . '-1']);
-                    $comparison->run();
-                    migrationCheck($comparison->getExitCode() === 12, 'Native RPM ordering rejects a newer legacy-format extension phase');
-                }
-            }
-        }
         $path = $directory . '/deb-normalized-name.json';
         file_put_contents($path, json_encode(['type' => 'deb', 'packages' => [['name' => 'php-zts-pdo-sqlite', 'version' => '1.2.3+php86.0~rc4+ext-4', 'architecture' => 'amd64']]], JSON_THROW_ON_ERROR));
         putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$path], JSON_THROW_ON_ERROR));
@@ -135,7 +122,7 @@ function migrationVersionContracts(string $root): void
         try {
             foreach ($cases as [$type, $proposed, $legacy, $published, $architecture]) {
                 $path = $directory . '/' . $type . '-first-shared-revision.json';
-                $revision = static fn (int $value): string => $type === 'apk' ? '-r' . $value : '-' . $value . ($type === 'rpm' ? '.el10' : '');
+                $revision = static fn (int $value): string => $type === 'apk' ? '-r' . $value : '-' . $value . ($type === 'rpm' ? '.el8' : '');
                 $baseline = ['type' => $type, 'packages' => [['name' => 'php-zts-imagick', 'version' => $legacy . $revision(9), 'architecture' => $architecture]]];
                 file_put_contents($path, json_encode($baseline, JSON_THROW_ON_ERROR));
                 putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$path], JSON_THROW_ON_ERROR));
@@ -398,13 +385,10 @@ try {
 
     if ($type === 'rpm') {
         putenv('SPP_RPM_REPO_URL=https://rpm-migration.invalid');
-        $indexes = [];
-        foreach (['el8' => 6, 'el9' => 7, 'el10' => 9] as $distribution => $revision) {
-            $indexes['https://rpm-migration.invalid/x86_64/' . $distribution . '/'] = [200, 'php-zts-contract-8.6.0~rc4-' . $revision . '.' . $distribution . '.x86_64.rpm'];
-        }
+        $indexes = ['https://rpm-migration.invalid/x86_64/el8/' => [200, 'php-zts-contract-8.6.0~rc4-9.el8.x86_64.rpm']];
         (new ReflectionProperty(CreatePackages::class, 'httpCache'))->setValue(null, $indexes);
-        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-contract', '8.6.0~rc4', 'x86_64', 'rpm') === 10, 'Neutral RPM release discovery lost a higher historic EL9/EL10 revision');
-        $comparison = new Process(['rpmdev-vercmp', '8.6.0~rc4-9.el10', '8.6.0~rc4-10']);
+        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-contract', '8.6.0~rc4', 'x86_64', 'rpm') === 10, 'RPM release discovery lost the published EL8 revision');
+        $comparison = new Process(['rpmdev-vercmp', '8.6.0~rc4-9.el8', '8.6.0~rc4-10']);
         $comparison->run();
         migrationCheck($comparison->getExitCode() === 12 && str_contains($comparison->getOutput(), ' < '), 'Native RPM ordering rejects the suffix-free migration revision');
     }
@@ -418,7 +402,7 @@ try {
         foreach ($hosts as $host) {
             foreach (['82', '83', '84', '85', '86'] as $owner) {
                 $revision = $host === $hosts[1] && $owner === '85' ? 12 : ($host === $hosts[0] && $owner === '86' ? 10 : 1);
-                $url = $host . '/api/v1/packages/' . $owner . '?type=debian&q=php-zts-lib-&limit=1000&page=';
+                $url = $host . '/api/v1/packages/' . $owner . '?type=debian&q=php-zts-lib-migration-contract&limit=1000&page=';
                 $indexes[$url . '1'] = [200, json_encode([['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-' . $revision]])];
                 $indexes[$url . '2'] = [200, '[]'];
             }
@@ -569,7 +553,7 @@ try {
     migrationCheck(str_contains($headers[$libraryName], 'php-zts-runtime-layout'), 'Independently installed library lacks a hard layout dependency');
     migrationCheck(!str_contains($headers[$libraryName], 'php-zts-cli'), 'Independent library depends on a PHP stream');
     migrationCheck(!str_contains($headers['php-zts-runtime-layout'], 'php-zts-cli'), 'Runtime layout depends on a PHP stream');
-    migrationCheck(str_contains($headers['php-zts-runtime-layout'], $type === 'rpm' ? "\n1-8\n" : "Version: 1-8\n"), 'Runtime layout version is PHP-tagged');
+    migrationCheck(str_contains($headers['php-zts-runtime-layout'], $type === 'rpm' ? "\n2-8\n" : "Version: 2-8\n"), 'Runtime layout version is PHP-tagged');
     migrationCheck(str_contains($headers['php-zts-embed'], 'php-zts-runtime-layout'), 'Embed lacks a hard layout dependency');
     $physical = $type === 'rpm' ? '/usr/lib64' : '/usr/lib';
     $layoutRoot = $extractions['php-zts-runtime-layout'];

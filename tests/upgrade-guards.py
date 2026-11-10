@@ -37,8 +37,8 @@ class UpgradeGuards(unittest.TestCase):
         self.assertEqual(request.call_count, 3)
 
     def test_rpm_library_ordering_is_php_independent(self):
-        local = {'name': 'php-zts-lib-openssl', 'arch': 'x86_64', 'version': '3.0.1', 'evr': '0:3.0.1-1.el10'}
-        remote = dict(local, version='3.1.0', evr='0:3.1.0-1.el10')
+        local = {'name': 'php-zts-lib-openssl', 'arch': 'x86_64', 'version': '3.0.1', 'evr': '0:3.0.1-1.el8'}
+        remote = dict(local, version='3.1.0', evr='0:3.1.0-1.el8')
         commands = Mock(run=lambda *args, **kwargs: Mock(returncode=12, stderr=''))
         with patch.dict(rpm_globals, {'subprocess': commands}), self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
             rpm['verify_package'](local, [remote], '8.6')
@@ -108,10 +108,10 @@ class UpgradeGuards(unittest.TestCase):
 
     def test_rpm_reads_epoch_and_compressed_primary(self):
         repomd = b'<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/primary.xml.gz"/></data></repomd>'
-        primary = b'<metadata xmlns="http://linux.duke.edu/metadata/common"><package><name>php-zts-xdebug</name><arch>x86_64</arch><version epoch="1" ver="3.6.0_86.0+ext" rel="1.el10"/></package></metadata>'
+        primary = b'<metadata xmlns="http://linux.duke.edu/metadata/common"><package><name>php-zts-xdebug</name><arch>x86_64</arch><version epoch="1" ver="3.6.0_86.0+ext" rel="1.el8"/></package></metadata>'
         read = Mock(side_effect=[repomd, gzip.compress(primary)])
         result = rpm['published_packages'](read)
-        self.assertEqual(result[0]['evr'], '1:3.6.0_86.0+ext-1.el10')
+        self.assertEqual(result[0]['evr'], '1:3.6.0_86.0+ext-1.el8')
 
     def test_rpm_ssh_failure_prevents_verification(self):
         with patch.dict(rpm_globals, {'subprocess': Mock(run=lambda *args, **kwargs: Mock(returncode=255, stderr=b'offline'))}):
@@ -132,8 +132,8 @@ class UpgradeGuards(unittest.TestCase):
             rpm['published_packages'](Mock(side_effect=[old, None] * 3))
 
     def test_rpm_refuses_lower_version(self):
-        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el10'}
-        remote = dict(local, version='3.7.0_86.0+ext', evr='0:3.7.0_86.0+ext-1.el10')
+        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el8'}
+        remote = dict(local, version='3.7.0_86.0+ext', evr='0:3.7.0_86.0+ext-1.el8')
         with TemporaryDirectory() as directory:
             directory = Path(directory)
             metadata = {
@@ -155,8 +155,8 @@ class UpgradeGuards(unittest.TestCase):
             self.assertEqual(manifest.read_bytes(), b'safe.rpm\0')
 
     def test_rpm_stream_isolation(self):
-        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el10'}
-        remote = dict(local, version='9.0.0_85.0+ext', evr='0:9.0.0_85.0+ext-1.el10')
+        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el8'}
+        remote = dict(local, version='9.0.0_85.0+ext', evr='0:9.0.0_85.0+ext-1.el8')
         commands = Mock()
         with patch.dict(rpm_globals, {'subprocess': commands}):
             rpm['verify_package'](local, [remote], '8.6')
@@ -173,27 +173,27 @@ class UpgradeGuards(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('apk'), 'apk required')
     def test_apk_native_comparison(self):
-        self.assertTrue(forgejo['version_is_newer']('alpine', '3.7.0p86.0_p0-r0', '3.6.0p86.0_p0-r0'))
-        self.assertFalse(forgejo['version_is_newer']('alpine', '3.6.0_pre_beta2_p86-r0', '3.6.0p86.0_rc3_p0_alpha1-r0'))
-        published = '1.13.1p82.35_p0-r0'
-        self.assertTrue(forgejo['version_is_newer']('alpine', published, '1.13.1p82.35-r1'))
-        self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.2p82.35-r0', published))
-        self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.1p82.36-r0', published))
+        self.assertTrue(forgejo['version_is_newer']('alpine', '3.7.0.0_p86_p0_p0-r0', '3.6.0.0_p86_p0_p0-r0'))
+        self.assertFalse(forgejo['version_is_newer']('alpine', '3.6.0_pre_beta2_p86-r0', '3.6.0.0_p86_p0_rc3_p0_alpha1-r0'))
+        published = '1.13.1.0_p82_p35_p0-r0'
+        self.assertTrue(forgejo['version_is_newer']('alpine', published, '1.13.1.0_p82_p35-r1'))
+        self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.2.0_p82_p35-r0', published))
+        self.assertTrue(forgejo['version_is_newer']('alpine', '1.13.1.0_p82_p36-r0', published))
 
     @unittest.skipUnless(shutil.which('rpmdev-vercmp'), 'rpmdev-vercmp required')
     def test_rpm_suffix_removal(self):
-        remote = {'name': 'frankenphp', 'arch': 'aarch64', 'version': '1.13.1_82.35+ext', 'evr': '0:1.13.1_82.35+ext-1.el10'}
-        local = dict(remote, version='1.13.1_82.35', evr='0:1.13.1_82.35-2.el10')
+        remote = {'name': 'frankenphp', 'arch': 'aarch64', 'version': '1.13.1_82.35+ext', 'evr': '0:1.13.1_82.35+ext-1.el8'}
+        local = dict(remote, version='1.13.1_82.35', evr='0:1.13.1_82.35-2.el8')
         with self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
             rpm['verify_package'](local, [remote], '8.2')
         for version in ['1.13.2_82.35', '1.13.1_82.36']:
             with self.subTest(version=version):
-                rpm['verify_package'](dict(remote, version=version, evr=f'0:{version}-1.el10'), [remote], '8.2')
+                rpm['verify_package'](dict(remote, version=version, evr=f'0:{version}-1.el8'), [remote], '8.2')
 
     @unittest.skipUnless(shutil.which('rpmdev-vercmp'), 'rpmdev-vercmp required')
     def test_rpm_native_epoch_comparison(self):
-        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el10'}
-        remote = dict(local, evr='1:3.6.0_86.0+ext-1.el10')
+        local = {'name': 'php-zts-xdebug', 'arch': 'x86_64', 'version': '3.6.0_86.0+ext', 'evr': '0:3.6.0_86.0+ext-1.el8'}
+        remote = dict(local, evr='1:3.6.0_86.0+ext-1.el8')
         with self.assertRaisesRegex(RuntimeError, 'Refusing upload'):
             rpm['verify_package'](local, [remote], '8.6')
 

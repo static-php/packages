@@ -58,19 +58,17 @@ def package_groups(directory, package_type, owners, helper, selected_owners=None
     return groups
 
 
-def publication_mode(cohort, package_type, plan_path=None):
+def validate_plans(cohort, package_type, plan_path=None):
     paths = [plan_path] if plan_path else sorted(cohort.rglob('shared-library-plan.json'))
     plans = [json.loads(path.read_text()) for path in paths]
     plans = [plan for plan in plans if plan.get('type') == package_type]
     if not plans:
         raise RuntimeError('Shared-library publication requires its format-specific build plan')
-    modes = {(bool(plan.get('bootstrap')), bool(plan.get('abi_break'))) for plan in plans}
-    if len(modes) != 1:
+    if len({bool(plan.get('abi_break')) for plan in plans}) != 1:
         raise RuntimeError('Conflicting shared-library publication plans')
-    return modes.pop()
 
 
-def publication_order(groups, helper, kind, bootstrap):
+def publication_order(groups, helper, kind, mirror=False):
     ordered = []
     for owner, paths in groups.items():
         for path in paths:
@@ -81,11 +79,11 @@ def publication_order(groups, helper, kind, bootstrap):
             elif name == LAYOUT_PACKAGE:
                 phase = 0
             elif name.startswith('php-zts-lib-'):
-                phase = 1 if bootstrap else 3
+                phase = 1 if mirror else 3
             elif name in ('php-zts', 'php-zts-cli'):
-                phase = 3 if bootstrap else 2
+                phase = 3 if mirror else 2
             else:
-                phase = 2 if bootstrap else 1
+                phase = 2 if mirror else 1
             ordered.append((phase, owner, path))
     return sorted(ordered, key=lambda item: (item[0], item[1], item[2].name))
 
@@ -179,7 +177,7 @@ def verify_debian_indexes(host, password, groups, helper):
     return verifier['verify_indexes'](host, password, groups, helper)
 
 
-def publish(action, host, password, kind, groups, helper, bootstrap, mirror=False):
+def publish(action, host, password, kind, groups, helper, mirror=False):
     if action not in ('check', 'upload'):
         raise RuntimeError('Unknown publication action: ' + action)
     digests = {path: helper['archive_sha256'](path) for paths in groups.values() for path in paths}
@@ -197,7 +195,7 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
         raise RuntimeError('A cohort archive changed during publication preflight')
     if action == 'check':
         return
-    ordered = publication_order(selected, helper, kind, bootstrap)
+    ordered = publication_order(selected, helper, kind, mirror)
     completed = {owner: [] for owner in selected}
     def upload(item):
         index, (_, owner, path) = item
@@ -224,12 +222,14 @@ def publish(action, host, password, kind, groups, helper, bootstrap, mirror=Fals
                            + ' | '.join(failures[:5]))
 
 
-def publish_mirror(action, cohort, directory, package_type, owners, selected, helper, bootstrap):
+def publish_mirror(action, cohort, directory, package_type, owners, selected, helper):
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    deferred = stage_mirror_dependencies(cohort, directory, package_type, helper, selected)
+    consumers = any(not independent(helper['package_metadata'](path, kind)[0])
+                    for path in directory.glob('*.' + package_type))
+    deferred = stage_mirror_dependencies(cohort, directory, package_type, helper, selected) if consumers else []
     failures = []
     for debug_phase in (False, True):
-        if debug_phase:
+        if debug_phase and consumers:
             failures.extend(stage_mirror_debug(cohort, directory, package_type, helper, selected, deferred))
         groups = package_groups(directory, package_type, owners, helper, selected)
         groups = {owner: [path for path in paths
@@ -239,7 +239,7 @@ def publish_mirror(action, cohort, directory, package_type, owners, selected, he
         if not groups:
             continue
         try:
-            publish(action, helper['host2'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, True, mirror=True)
+            publish(action, helper['host2'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, mirror=True)
         except RuntimeError as error:
             failures.append(str(error))
             print(str(error) + '; continuing with remaining mirror packages', flush=True)
@@ -264,12 +264,12 @@ def main(argv=None):
     selected = [stream.replace('.', '') for stream in os.environ.get('PUBLICATION_PHP_STREAMS', '').split(',') if stream]
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
-    bootstrap, _ = publication_mode(cohort, args.package_type, args.plan)
+    validate_plans(cohort, args.package_type, args.plan)
     if args.host_number == '2':
-        publish_mirror(args.action, cohort, args.directory, args.package_type, owners, selected, helper, bootstrap)
+        publish_mirror(args.action, cohort, args.directory, args.package_type, owners, selected, helper)
     else:
         groups = package_groups(args.directory, args.package_type, owners, helper, selected)
-        publish(args.action, helper['host1'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, bootstrap)
+        publish(args.action, helper['host1'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper)
 
 
 

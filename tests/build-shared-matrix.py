@@ -26,7 +26,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORMATS = {'alpine': 'apk', 'debian': 'deb', 'alma8': 'rpm', 'alma9': 'rpm', 'alma10': 'rpm'}
+FORMATS = {'alpine': 'apk', 'debian': 'deb', 'alma8': 'rpm'}
 STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 CUSTOM_MASTERS = {
     'ext-apcu': 'https://github.com/krakjoe/apcu.git',
@@ -359,7 +359,7 @@ class Target:
                     self.builder('prepare library ABI', ['python3', 'bin/shared-library-plan', 'prepare',
                                  '--type', self.kind, '--manifest', '/build/buildroot/shared-libraries.json',
                                  '--root', '/build/buildroot', '--baseline', '/build/.validation/empty-baseline',
-                                 '--mode', 'full', '--bootstrap', '--manifest-output', '/build/buildroot/shared-libraries.json',
+                                 '--mode', 'full', '--manifest-output', '/build/buildroot/shared-libraries.json',
                                  '--output', '/build/.validation/library-plan.json'])
                 self.builder('package libraries', ['php', 'bin/spp', 'package', '--libs-only', '--phpv=8.4',
                              '--type=' + self.kind, '--iteration=1', '--debuginfo'])

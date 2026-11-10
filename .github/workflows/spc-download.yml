@@ -69,12 +69,14 @@ jobs:
                     path: .download-state
                     key: spc-downloads-lock
 
-            -   name: Seed empty state if missing
+            -   name: Restore source comparison baseline
+                env:
+                    FORCE_FULL: ${{ inputs.force_full }}
                 run: |
                     set -euo pipefail
-                    mkdir -p .download-state
-                    [[ -f .download-state/lock.prev.json ]] || echo '{}' > .download-state/lock.prev.json
-                    [[ -f .download-state/meta.prev.json ]] || echo '{}' > .download-state/meta.prev.json
+                    args=()
+                    if [[ "$FORCE_FULL" == true ]]; then args+=(--allow-empty); fi
+                    python3 .github/actions/shared-libraries/source-state.py --root . --repository "$GITHUB_REPOSITORY" --before "$GITHUB_RUN_ID" --allow-source-cache "${args[@]}"
 
             -   name: Download extensions
                 run: |

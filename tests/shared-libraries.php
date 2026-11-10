@@ -99,8 +99,8 @@ try {
     preg_match_all('/\(NEEDED\).*?\[([^\]]+)\]/', run(['readelf', '--dynamic', $temporary . '/lib/libbase.so.1.0']), $baseNeeded);
     preg_match_all('/\(NEEDED\).*?\[([^\]]+)\]/', run(['readelf', '--dynamic', $temporary . '/lib/libtop.so.2']), $topNeeded);
     $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => $architecture, 'runtime_libdir' => $runtime, 'libraries' => [
-        'base' => ['version' => '1.0', 'package_versions' => ['rpm' => '1.0-2.el9', 'deb' => '1.0-2', 'apk' => '1.0-r2'], 'source_hash' => hash('sha256', 'base'), 'license' => 'MIT', 'license_files' => ['license/base.txt'], 'files' => ['lib/libbase.so.1.0', 'lib/libbase.so.1', 'lib/libbase.so', 'license/base.txt', 'assets/data.txt'], 'elf' => ['lib/libbase.so.1.0' => ['soname' => 'libbase.so.1', 'needed' => $baseNeeded[1], 'runpath' => [$runtime]]], 'runtime_assets' => ['assets/data.txt' => '/usr/share/php-zts/base/data.txt'], 'abi_dump' => ['libbase.so.1' => 'abi/base.xml']],
-        'top' => ['version' => '2.1RC2', 'package_versions' => ['rpm' => '2.1~rc2-2.el9', 'deb' => '2.1~rc2-2', 'apk' => '2.1_rc2-r2'], 'source_hash' => hash('sha256', 'top'), 'license' => 'BSD-2-Clause', 'license_files' => ['license/top.txt'], 'files' => ['lib/libtop.so.2', 'lib/libtop.so'], 'elf' => ['lib/libtop.so.2' => ['soname' => 'libtop.so.2', 'needed' => $topNeeded[1], 'runpath' => [$runtime]]], 'depends' => ['base'], 'abi_epoch' => 2, 'abi_capability' => 'php-zts-lib-top-abi-2'],
+        'base' => ['version' => '1.0', 'package_versions' => ['rpm' => '1.0-2.el8', 'deb' => '1.0-2', 'apk' => '1.0-r2'], 'source_hash' => hash('sha256', 'base'), 'license' => 'MIT', 'license_files' => ['license/base.txt'], 'files' => ['lib/libbase.so.1.0', 'lib/libbase.so.1', 'lib/libbase.so', 'license/base.txt', 'assets/data.txt'], 'elf' => ['lib/libbase.so.1.0' => ['soname' => 'libbase.so.1', 'needed' => $baseNeeded[1], 'runpath' => [$runtime]]], 'runtime_assets' => ['assets/data.txt' => '/usr/share/php-zts/base/data.txt'], 'abi_dump' => ['libbase.so.1' => 'abi/base.xml']],
+        'top' => ['version' => '2.1RC2', 'package_versions' => ['rpm' => '2.1~rc2-2.el8', 'deb' => '2.1~rc2-2', 'apk' => '2.1_rc2-r2'], 'source_hash' => hash('sha256', 'top'), 'license' => 'BSD-2-Clause', 'license_files' => ['license/top.txt'], 'files' => ['lib/libtop.so.2', 'lib/libtop.so'], 'elf' => ['lib/libtop.so.2' => ['soname' => 'libtop.so.2', 'needed' => $topNeeded[1], 'runpath' => [$runtime]]], 'depends' => ['base'], 'abi_epoch' => 2, 'abi_capability' => 'php-zts-lib-top-abi-2'],
     ]];
     $save = static function (array $value) use ($temporary): void {
         file_put_contents($temporary . '/shared-libraries.json', json_encode($value, JSON_THROW_ON_ERROR));
@@ -134,6 +134,34 @@ try {
         expect($unresolved->getPackageVersion('base', $type) === $version, 'Captured native library revision was not resolved for ' . $type);
         expect($unresolved->getPackageVersion('top', $type) === $manifest['libraries']['top']['package_versions'][$type], 'Candidate library revision was overwritten');
     }
+    $versionProperty = new ReflectionProperty(\staticphp\step\CreatePackages::class, 'versionArch');
+    $previousVersion = $versionProperty->getValue(null);
+    $previousPlan = getenv('SPP_SHARED_LIBRARY_PLAN');
+    $planPath = $temporary . '/library-plan.json';
+    putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
+    $typeProperty->setValue(null, 'apk');
+    $baselinePaths = [];
+    foreach (['8.2' => '1.0-r5', '8.5' => '1.0-r1'] as $stream => $version) {
+        $path = $temporary . '/stream-' . $stream . '.json';
+        file_put_contents($path, json_encode(['type' => 'apk', 'php_stream' => $stream, 'packages' => [
+            ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']],
+        ]]));
+        $baselinePaths[] = $path;
+    }
+    putenv('SPP_BASELINE_MANIFESTS=' . json_encode($baselinePaths));
+    foreach (['8.2' => '1.0-r5', '8.5' => '1.0-r1'] as $stream => $version) {
+        $versionProperty->setValue(null, [$stream . '.1', $architecture]);
+        foreach ([[], ['base']] as $selected) {
+            file_put_contents($planPath, json_encode(['libraries' => $selected]));
+            $unresolved->setPackageVersion('base', 'apk', '1.0-r9');
+            $resolve->invoke(null);
+            $expected = $selected === [] ? $version : '1.0-r9';
+            expect($unresolved->getPackageVersion('base', 'apk') === $expected, 'Library dependency revision came from the wrong PHP stream or replaced an incoming candidate');
+            expect(in_array('php-zts-lib-base>=' . $expected, $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Generated dependency floor ignored the stream baseline');
+        }
+    }
+    $versionProperty->setValue(null, $previousVersion);
+    putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     putenv($previousBaselines === false ? 'SPP_BASELINE_MANIFESTS' : 'SPP_BASELINE_MANIFESTS=' . $previousBaselines);
     $sharedProperty->setValue(null, null);
     $typeProperty->setValue(null, 'rpm');
@@ -141,7 +169,7 @@ try {
     $payload = [$temporary . '/php' => '/usr/bin/php-zts-test'];
     expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)', 'php-zts-lib-top-abi-2'], 'Consumer must require its direct owner and ABI capability');
     expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2', 'php-zts-lib-top-abi-2'], 'APK prerelease version not normalized');
-    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el9', 'php-zts-lib-base-abi-1'], 'Transitive library dependency missing');
+    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8', 'php-zts-lib-base-abi-1'], 'Transitive library dependency missing');
     expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)', 'php-zts-lib-base-abi-1'], 'Declared dlopen dependencies missing');
     expect(SharedLibraries::normalizeVersion('v3.8.0') === '3.8.0', 'Leading version marker retained');
     expect(SharedLibraries::normalizeVersion('libssh2-1.11.1') === '1.11.1', 'Artifact tag prefix retained');
@@ -158,7 +186,7 @@ try {
     expect($config['files'][$temporary . '/assets/data.txt'] === '/usr/share/php-zts/base/data.txt', 'Runtime asset path incorrect');
     expect($config['files'][$temporary . '/abi/base.xml'] === '/usr/share/php-zts/libraries/abi/base/libbase.so.1.xml', 'ABI dump missing from package');
     $metadata = json_decode(file_get_contents($temporary . '/library-base.json'), true, 512, JSON_THROW_ON_ERROR);
-    expect($metadata['package_version'] === '1.0-2.el9' && $metadata['package_versions']['apk'] === '1.0-r2', 'Published metadata lost resolved library revisions');
+    expect($metadata['package_version'] === '1.0-2.el8' && $metadata['package_versions']['apk'] === '1.0-r2', 'Published metadata lost resolved library revisions');
     expect($metadata['abi_capability'] === 'php-zts-lib-base-abi-1' && $metadata['id'] === 'base', 'Installed library ABI metadata missing');
     $debugSource = $temporary . '/library-base/debug/lib/libbase.so.1.0.debug';
     expect($package->getDebuginfoFpmConfig()['files'][$debugSource] === '/usr/lib/debug' . $runtime . '/libbase.so.1.0.debug', 'Library debuginfo path incorrect');
@@ -235,6 +263,7 @@ try {
     rejected(static fn () => SharedLibraries::load($temporary), 'must declare runtime files and licenses');
     symlink('/etc/passwd', $temporary . '/assets/escape');
     $bad = $manifest;
+    $bad['libraries']['base']['files'] = array_values(array_diff($bad['libraries']['base']['files'], ['assets/data.txt']));
     $bad['libraries']['base']['runtime_assets'] = ['assets' => '/usr/share/php-zts/base'];
     $save($bad);
     rejected(static fn () => SharedLibraries::load($temporary), 'Escaping buildroot');

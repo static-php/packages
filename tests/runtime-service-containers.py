@@ -505,7 +505,7 @@ def main():
     parser.add_argument('--probe-only', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    args.image = args.image or {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.21'}[args.type]
+    args.image = args.image or {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.24'}[args.type]
     if not args.probe_only and any(not path or not path.exists() for path in [args.old_repo, args.candidate_repo, args.library_repo, args.key]):
         parser.error('Provide existing signed old/candidate/library repository directories and their public key')
     harness = Harness(args)

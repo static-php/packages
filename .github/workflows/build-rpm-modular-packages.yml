@@ -244,12 +244,10 @@ jobs:
                     bash .github/actions/shared-libraries/run.sh native-inventories
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
-                    echo "inline-package=$(jq -s 'all(.[]; .build_only == true)' stage/rpm/shared-library-plan.json stage/deb/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
             -   name: Build single PHP stream in the restored SDK workspace
                 if: steps.classification.outputs.inline-stream != ''
                 uses: ./.github/actions/php-payload
                 env:
-                    INLINE_PACKAGE: ${{ inputs.publish != true && inputs.packages != '' && steps.classification.outputs.inline-package == 'true' }}
                     PHPV: ${{ steps.classification.outputs.inline-stream }}
                     PACKAGES: ${{ fromJson(steps.classification.outputs.inline-request || '{}').packages }}
                     COMPILE: ${{ fromJson(steps.classification.outputs.inline-request || '{}').compile }}
@@ -557,6 +555,7 @@ jobs:
             MATRIX_ARCH: ${{ matrix.arch }}
             PHPV: ${{ matrix.php-version }}
             PACKAGES: ${{ matrix.packages }}
+            TLS_CHECKS: ${{ matrix.tls-checks }}
             MODE: ${{ inputs.mode || 'full' }}
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
@@ -579,60 +578,47 @@ jobs:
                     name: shared-sdk-glibc-${{ matrix.target }}
                     path: stage
             -   name: Download common PHP payload
-                if: matrix.library-only != true && matrix.packaged != true
+                if: matrix.library-only != true
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
             -   name: Extract sealed common payload
-                if: matrix.library-only != true && matrix.packaged != true
+                if: matrix.library-only != true
                 run: zstd -dc php-payload.tar.zst | tar -xpf -
             -   name: Download matching library packages
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     name: shared-libs-${{ matrix.type }}-${{ matrix.target }}
                     path: library-stage
-            -   name: Select native validation baseline
-                run: echo "BUILD_ONLY=$(jq -r '.build_only // false' library-stage/shared-library-plan.json)" >> "$GITHUB_ENV"
             -   name: Copy matching library archives
                 run: |
                     mkdir -p "dist/$TYPE" library-stage/libraries
                     find library-stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;
-                    if [[ -d library-stage/consumers ]]; then cp -a library-stage/consumers/. "dist/$TYPE/"; fi
             -   name: Prepare native baseline comparison tools
-                if: env.BUILD_ONLY != 'true'
                 run: |
                     sudo apt-get update
                     sudo apt-get install -y python3-rpm rpm2cpio zstd
             -   name: Freeze actual published baseline
-                if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
                 uses: ./.github/actions/native-baseline
             -   name: Package sealed payload without compilation
-                if: matrix.library-only != true && matrix.packaged != true
+                if: matrix.library-only != true
                 run: |
                     docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
                         -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \
                         -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
                         "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package
-            -   name: Verify custom prefix extension update triggers
-                if: matrix.runtime-checks == true && env.BUILD_ONLY != 'true'
-                run: python3 tests/runtime-consumer-triggers.py --type "$TYPE" --image "$PACKAGING_IMAGE" --output stage/consumer-trigger-native.json
-            -   name: Verify unpublished package installation
-                if: env.BUILD_ONLY == 'true'
-                run: python3 .github/actions/shared-libraries/glibc.py test-packages
-            -   name: Verify ordinary static to shared upgrade
-                if: env.BUILD_ONLY != 'true'
+            -   name: Verify ordinary package upgrade
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
-                    TLS_CHECKS: ${{ matrix.tls-checks }}
                 run: |
                     args=()
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
                     profile=auto
                     if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                     else
-                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json --plan "stage/$TYPE/shared-library-plan.json" --php-stream "$PHPV")
+                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/$TYPE/shared-library-plan.json" --php-stream "$PHPV")
                         if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
                     fi
                     python3 tests/migration-upgrade-containers.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts "dist/$TYPE" --baseline-dir stage/published-baseline --report "dist/$TYPE/native-upgrade-receipt.json" --profile "$profile" "${args[@]}"

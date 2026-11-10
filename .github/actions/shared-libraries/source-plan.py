@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import runpy
 import subprocess
 from pathlib import Path
 
@@ -454,9 +455,11 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
     base_inputs = {stream: digest({"configuration": configuration, "php": current_meta.get("php_versions", {}).get(stream),
                                   "php_source": current_meta.get("php_source_hashes", {}).get(stream),
                                   'core_artifacts': {name: value for name, value in stream_artifacts(current, current_meta, stream).items() if name.replace('_', '-') in compiled_in}}) for stream in STREAMS}
-    library_package_change = library_package_configuration is not None and previous_meta.get('shared_library_package_configuration') != library_package_configuration
+    library_package_change = (library_package_configuration is not None
+                              and previous_meta.get('shared_library_package_configuration') is not None
+                              and previous_meta['shared_library_package_configuration'] != library_package_configuration)
     package_libraries = sorted((build_inputs or {}).get('libraries', {})) if library_package_change else []
-    old_variants = previous_meta.get('shared_variant_configuration', {})
+    old_variants = previous_meta.get('shared_variant_configuration', variants or {})
     variant_requests = {profile: ['openssl'] for profile in old_variants.keys() | (variants or {}).keys()
                         if old_variants.get(profile) != (variants or {}).get(profile)} if variants is not None else {}
     format_requests = {}
@@ -468,8 +471,11 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
                 packages = sorted(set(old.get('packages', [])) | set(new.get('packages', [])))
                 format_requests[kind] = {stream: {'full': False, 'packages': packages} for stream in STREAMS}
     return {"schema": 1, "requests": requests, "package_requests": package_requests,
+            'source_comparison_available': bool(previous_meta.get('shared_configuration')), 'force_full': bool(force),
             'format_package_requests': format_requests,
             'library_package_requests': package_libraries, 'variant_package_requests': variant_requests,
+            'library_package_baseline': previous_meta.get('shared_library_package_configuration'),
+            'variant_package_baselines': previous_meta.get('shared_variant_configuration', {}),
             "libraries": sorted(set(libraries)), "library_build_inputs": library_build_inputs, "configuration": configuration,
             "package_configuration": package_configuration, "payload_core_inputs": base_inputs,
             "payload_component_inputs": component_inputs,
@@ -477,22 +483,32 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
 
 
 def reconcile(original, sources, metadata, configuration, packaging, components, inventory, library_packaging, variants, compiled_in=None, active=None,
-              format_package_configuration=None):
+              format_package_configuration=None, automatic=False):
     effective = plan(sources, sources, metadata, metadata, configuration=configuration,
-                     package_configuration=packaging, components=components, build_inputs=inventory,
+                     package_configuration=None if automatic else packaging, components=components, build_inputs=inventory,
                      library_ids=set(inventory['managed_library_artifacts']),
-                     library_package_configuration=library_packaging, variants=variants, compiled_in=compiled_in, active=active,
-                     format_package_configuration=format_package_configuration)
+                     library_package_configuration=None if automatic else library_packaging, variants=None if automatic else variants,
+                     compiled_in=compiled_in, active=active,
+                     format_package_configuration=None if automatic else format_package_configuration)
     for field in ('requests', 'package_requests'):
         for stream, request in original.get(field, {}).items():
+            if automatic and field == 'package_requests':
+                request = dict(full=False, packages=['pie'] if 'pie' in request.get('packages', []) else [])
+                if not request['packages']:
+                    continue
             current = effective[field].setdefault(stream, {'full': False, 'packages': []})
             current['full'] |= bool(request.get('full'))
             current['packages'] = [] if current['full'] else sorted(set(current['packages']) | set(request.get('packages', [])))
-    for field in ('libraries', 'library_build_inputs', 'library_package_requests'):
+    for field in ('libraries', 'library_build_inputs'):
         effective[field] = sorted(set(effective[field]) | set(original.get(field, [])))
+    if not automatic and original.get('library_package_baseline') is not None:
+        effective['library_package_requests'] = sorted(set(effective['library_package_requests']) | set(original.get('library_package_requests', [])))
     for kind, names in original.get('variant_package_requests', {}).items():
-        effective['variant_package_requests'][kind] = sorted(set(effective['variant_package_requests'].get(kind, [])) | set(names))
+        if not automatic and kind in original.get('variant_package_baselines', {}):
+            effective['variant_package_requests'][kind] = sorted(set(effective['variant_package_requests'].get(kind, [])) | set(names))
     for kind, requests in original.get('format_package_requests', {}).items():
+        if automatic:
+            continue
         for stream, request in requests.items():
             current = effective['format_package_requests'].setdefault(kind, {}).setdefault(stream, {'full': False, 'packages': []})
             current['full'] |= bool(request.get('full'))
@@ -524,14 +540,25 @@ def main():
     if args.reconcile:
         if args.output is None:
             parser.error('--reconcile requires --output; pinned snapshot files must remain immutable')
-        request = reconcile(read('downloads/build-plan.json'), read('downloads/.cache.json'), metadata,
+        original = read('downloads/build-plan.json')
+        if not original.get('source_comparison_available'):
+            snapshot = read('downloads/.source-snapshot.json')
+            helper = runpy.run_path(str(Path(__file__).with_name('source-state.py')))
+            helper['restore'](root, snapshot['repository'], snapshot['run_id'], allow_empty=original.get('force_full', False))
+            original = plan(read('.download-state/lock.prev.json'), read('downloads/.cache.json'),
+                            read('.download-state/meta.prev.json'), metadata, force=original.get('force_full', False),
+                            configuration=configuration, library_ids=library_ids, build_inputs=inventory,
+                            components=components, compiled_in=core_components(root), active=active_components(root))
+        request = reconcile(original, read('downloads/.cache.json'), metadata,
                             configuration, packaging, components, inventory, library_packaging, variants, core_components(root), active_components(root),
-                            format_package_identities(root))
+                            format_package_identities(root), automatic=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(request, sort_keys=True, indent=2) + '\n')
         print('effective-plan=' + str(args.output))
         return
-    request = plan(read(".download-state/lock.prev.json"), read("downloads/.cache.json"), read(".download-state/meta.prev.json"), metadata, args.force_full, configuration, library_ids, inventory, packaging, components, library_packaging, variants, core_components(root), active_components(root), format_package_identities(root))
+    request = plan(read(".download-state/lock.prev.json"), read("downloads/.cache.json"), read(".download-state/meta.prev.json"), metadata,
+                   force=args.force_full, configuration=configuration, library_ids=library_ids, build_inputs=inventory,
+                   components=components, compiled_in=core_components(root), active=active_components(root))
     request["build_inputs"] = inventory
     metadata["shared_configuration"] = configuration
     metadata["shared_package_configuration"] = packaging

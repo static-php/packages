@@ -157,8 +157,6 @@ def main():
     parser.add_argument('--host')
     parser.add_argument('--remote-directory')
     parser.add_argument('--base-url')
-    parser.add_argument('--baseline-directory', action='append', default=[])
-    parser.add_argument('--baseline-url', action='append', default=[])
     parser.add_argument('--strict-cohort', action='store_true')
     parser.add_argument('--php-version')
     parser.add_argument('--files-from', required=True, type=Path)
@@ -166,15 +164,13 @@ def main():
     arguments = parser.parse_args()
     if not arguments.base_url and not (arguments.host and arguments.remote_directory):
         parser.error('Provide --base-url or --host and --remote-directory')
+    if arguments.remote_directory and not arguments.host:
+        parser.error('--remote-directory requires --host')
     published = []
     if arguments.base_url:
         published.extend(published_packages(lambda location, missing_ok=False: read_http_file(arguments.base_url, location, missing_ok)))
-    for directory in ([arguments.remote_directory] if arguments.remote_directory else []) + arguments.baseline_directory:
-        if not arguments.host:
-            parser.error('--baseline-directory requires --host')
-        published.extend(published_packages(lambda location, missing_ok=False: read_remote_file(arguments.host, directory, location, missing_ok)))
-    for url in arguments.baseline_url:
-        published.extend(published_packages(lambda location, missing_ok=False: read_http_file(url, location, missing_ok)))
+    if arguments.remote_directory:
+        published.extend(published_packages(lambda location, missing_ok=False: read_remote_file(arguments.host, arguments.remote_directory, location, missing_ok)))
     files = list(arguments.directory.glob('*.rpm'))
     if not files:
         raise RuntimeError('No RPM packages to verify')

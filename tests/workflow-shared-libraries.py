@@ -157,8 +157,8 @@ class SourcePlanTests(unittest.TestCase):
                 target = root / 'plans/shared-plans-deb-amd64'
                 target.mkdir(parents=True)
                 (target / 'target.json').write_text(json.dumps({'target': 'amd64', 'arch': 'amd64', 'image': 'pinned'}))
-                result = {'schema': 1, 'candidate_fingerprint': 'candidate', 'bootstrap': False, 'libraries': {name: {'status': 'breaking' if breaking and name == 'fixture' else 'compatible'} for name in candidate['libraries']}}
-                args = argparse.Namespace(manifest=str(root / 'current.json'), baseline=str(baseline), request=str(root / 'request.json'), bootstrap=False, mode='incremental', root=str(root), libraries=None, php_versions=None, packages=None, type='deb', manifest_output=str(root / 'annotated.json'), output=str(target / 'shared-library-plan.json'))
+                result = {'schema': 1, 'candidate_fingerprint': 'candidate', 'libraries': {name: {'status': 'breaking' if breaking and name == 'fixture' else 'compatible'} for name in candidate['libraries']}}
+                args = argparse.Namespace(manifest=str(root / 'current.json'), baseline=str(baseline), request=str(root / 'request.json'), mode='incremental', root=str(root), libraries=None, php_versions=None, packages=None, type='deb', manifest_output=str(root / 'annotated.json'), output=str(target / 'shared-library-plan.json'))
                 with mock.patch.dict(namespace, {'compare': mock.Mock(return_value=(json.loads(json.dumps(candidate)), result))}):
                     planner['prepare'](args)
                 prepared = json.loads(Path(args.output).read_text())
@@ -195,17 +195,17 @@ class MatrixTests(unittest.TestCase):
     def write_plan(self, root, target, requests, **extra):
         directory = root / ('shared-plans-rpm-' + target)
         directory.mkdir()
-        (directory / 'target.json').write_text(json.dumps({'target': target, 'arch': 'x86_64', 'alma': target[4]}))
+        (directory / 'target.json').write_text(json.dumps({'target': target, 'arch': target.split('-', 1)[1], 'alma': '8'}))
         (directory / 'shared-library-plan.json').write_text(json.dumps(dict(php_requests=requests, **extra)))
 
-    def test_failed_alma_does_not_remove_successful_alma(self):
+    def test_failed_architecture_does_not_remove_successful_architecture(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
             root = Path(temporary)
-            for target in ['alma8-x86_64', 'alma9-x86_64']:
+            for target in ['alma8-x86_64', 'alma8-arm64']:
                 self.write_plan(root, target, {'8.4': {'full': True, 'packages': []}})
-            builds, publish = workflow.matrix(root, ['8.4'], ['alma9-x86_64'])
-            self.assertEqual([item['target'] for item in builds], ['alma9-x86_64'])
-            self.assertEqual([item['target'] for item in publish], ['alma9-x86_64'])
+            builds, publish = workflow.matrix(root, ['8.4'], ['alma8-arm64'])
+            self.assertEqual([item['target'] for item in builds], ['alma8-arm64'])
+            self.assertEqual([item['target'] for item in publish], ['alma8-arm64'])
 
     def test_compatible_library_update_publishes_without_php(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
@@ -230,9 +230,23 @@ class MatrixTests(unittest.TestCase):
             builds, _ = workflow.matrix(root, ['8.4'])
             self.assertEqual(builds[0]['packages'], 'imagick,redis')
 
+    def test_removed_el_targets_are_rejected_before_registry_or_repository_reads(self):
+        for alma in ('9', '10'):
+            for kind in ('rpm', 'glibc'):
+                argv = ['workflow.py', 'setup', '--type=' + kind, '--alma-versions=' + alma, '--resolve-images']
+                with self.subTest(kind=kind, alma=alma), mock.patch('sys.argv', argv), \
+                        mock.patch.object(workflow.subprocess, 'check_output') as inspect:
+                    with self.assertRaisesRegex(RuntimeError, 'Only the EL8'):
+                        workflow.main()
+                    inspect.assert_not_called()
+            result = subprocess.run([sys.executable, str(ROOT / 'bin/freeze-migration-baseline.py'),
+                '--type=rpm', '--php=8.5', '--arch=x86_64', '--el=el' + alma, '--output=unused'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('invalid choice', result.stderr)
+
     def test_builder_tags_are_resolved_once_and_pinned_for_all_arches(self):
         digest = 'sha256:' + '1' * 64
-        for kind, calls, targets in [('rpm', 3, 6), ('glibc', 2, 2), ('apk', 1, 2)]:
+        for kind, calls, targets in [('rpm', 1, 2), ('glibc', 2, 2), ('apk', 1, 2)]:
             output = io.StringIO()
             argv = ['workflow.py', 'setup', '--type=' + kind, '--resolve-images']
             with self.subTest(kind=kind), mock.patch('sys.argv', argv), mock.patch('sys.stdout', output), mock.patch.object(workflow.subprocess, 'check_output', return_value=json.dumps({'digest': digest})) as inspect:
@@ -252,7 +266,7 @@ class ProgramStackTests(unittest.TestCase):
         script = r'''
 require $argv[1] . '/vendor/autoload.php';
 $result = [];
-foreach (['apk' => '3.21', 'deb' => '11', 'rpm' => '8'] as $type => $os) {
+foreach (['apk' => '3.24', 'deb' => '11', 'rpm' => '8'] as $type => $os) {
     foreach (['x86_64', 'aarch64'] as $arch) {
         foreach (['8.2', '8.3', '8.4', '8.5', '8.6', '8.10'] as $version) {
             $libdir = $type === 'rpm' ? '/usr/lib64' : '/usr/lib';
@@ -648,9 +662,13 @@ class WorkflowContractTests(unittest.TestCase):
     def test_glibc_validation_only_cannot_publish_or_save_release_caches(self):
         data = dict(self.workflows())['build-rpm-modular-packages.yml']
         self.assertIn('inputs.publish == true', data['jobs']['publish']['if'])
+        runner = (ROOT / '.github/actions/shared-libraries/run.sh').read_text()
+        self.assertNotIn('--baseline-directory', runner)
+        self.assertIn('--remote-directory \"$RPM_DIRECTORY\"', runner)
         cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
         self.assertIn('inputs.publish == true', cache['if'])
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
+        self.assertEqual(data['jobs']['package']['env']['TLS_CHECKS'], '${{ matrix.tls-checks }}')
         publish = self.publication_steps(data)
         names = [step['name'] for step in publish]
         self.assertLess(names.index('Verify selected build target'), names.index('Publish each validated PHP stream independently'))

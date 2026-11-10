@@ -75,7 +75,7 @@ def main():
         raise KeyboardInterrupt('Interrupted by signal ' + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
     report = {'schema': 1, 'ok': False, 'scope': __doc__, 'cells': [], 'shared_migration_pass': False}
-    for kind, image in [('apk', 'alpine:3.21'), ('deb', 'debian:11')]:
+    for kind, image in [('apk', 'alpine:3.24'), ('deb', 'debian:11')]:
         if args.type not in ('all', kind):
             continue
         cell = {'type': kind, 'ok': False}

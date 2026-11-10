@@ -485,7 +485,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
             try:
                 mirror.ledger()
                 mirror.assert_bound(args)
-                for name, value in [('runtime', 'alma9'), ('php', '8.5'), ('partial_consumers', True), ('allow_emulation', True)]:
+                for name, value in [('runtime', 'debian'), ('php', '8.5'), ('partial_consumers', True), ('allow_emulation', True)]:
                     other = SimpleNamespace(**vars(args))
                     setattr(other, name, value)
                     with self.assertRaises(harness['PreparedInputError']):
@@ -592,6 +592,40 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual(calls, ['php-zts-cli'])
             self.assertTrue(json.loads(report.read_text())['interrupted'])
 
+    def test_verified_unchanged_partial_candidates_complete_without_claiming_an_update(self):
+        baseline = {'selection': {'profile': 'all', 'complete': True},
+                    'packages': [{'name': name} for name in ('php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-xdebug')]}
+        class Unchanged(PreparedStub):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.inventory = {'incoming_changes': ['frankenphp-debuginfo', 'php-zts-xdebug-debuginfo'], 'incoming': [
+                    {'name': name + suffix, 'version': '1.2.3-r2'} for name in ('frankenphp', 'php-zts-xdebug')
+                    for suffix in ('', '-debuginfo')]}
+                if defect == 'mismatched-debug':
+                    self.inventory['incoming'][-1]['version'] = '1.2.3-r3'
+                if defect == 'changed-runtime':
+                    self.inventory['incoming_changes'].append('php-zts-xdebug')
+        for defect in (None, 'wrong-version', 'missing-coverage', 'second-upgrade', 'mismatched-debug', 'changed-runtime'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / 'report.json'
+                arguments = ['migration-upgrade-containers.py', '--type', 'apk', '--php', '8.5', '--arch', 'x86_64',
+                    '--baseline-dir', '/unused', '--artifacts', '/unused', '--profile', 'all', '--partial-consumers', '--report', str(report)]
+                def checked(args, prepared=None):
+                    versions = {name: '1.2.3-r2' for name in args.profile.split(',')}
+                    after = dict(versions)
+                    if defect == 'wrong-version':
+                        after['php-zts-xdebug'] = '1.2.3-r1'
+                    if defect == 'missing-coverage':
+                        versions.pop('php-zts-xdebug', None)
+                    return {'ok': True, 'applicable': False, 'second_upgrade_noop': defect != 'second-upgrade',
+                            'actual_old_versions': versions, 'new_versions': after}
+                with patch.dict(scope, {'load_baseline': lambda *args: baseline, 'cell': checked, 'PreparedMirror': Unchanged}), \
+                        patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
+                    self.assertEqual(harness['main'](), 0 if defect is None else 1)
+                result = json.loads(report.read_text())
+                self.assertFalse(result['applicable'])
+                self.assertEqual(result['unchanged_candidates_validated'], defect is None)
+
     def test_unaffected_profiles_do_not_claim_a_successful_partial_update(self):
         baseline = {'selection': {'profile': 'all', 'complete': True}, 'packages': [{'name': 'php-zts-cli'}]}
         with tempfile.TemporaryDirectory(prefix='spp-migration-unaffected-') as directory:
@@ -604,9 +638,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertFalse(json.loads(report.read_text())['applicable'])
 
     def test_successful_package_manager_exit_cannot_hide_held_packages(self):
-        before = {'php-zts-cli': '1-7.el10', 'php-zts-imagick': '1-4.el10', 'unrelated-os-package': '1'}
+        before = {'php-zts-cli': '1-7.el8', 'php-zts-imagick': '1-4.el8', 'unrelated-os-package': '1'}
         candidates = {'php-zts-cli': {'version': '1-8'}, 'php-zts-imagick': {'version': '1-5'}}
-        for after in [dict(before), {'php-zts-cli': '1-8', 'php-zts-imagick': '1-4.el10'}]:
+        for after in [dict(before), {'php-zts-cli': '1-8', 'php-zts-imagick': '1-4.el8'}]:
             with self.assertRaisesRegex(RuntimeError, 'held back'):
                 harness['assert_upgrade'](before, after, candidates, ['php-zts-cli', 'php-zts-imagick'])
         harness['assert_upgrade'](before, {'php-zts-cli': '1-8', 'php-zts-imagick': '1-5'},
@@ -629,6 +663,11 @@ class MigrationUpgradeHarness(unittest.TestCase):
             harness['assert_upgrade'](before, before, candidates, list(before))
         with self.assertRaisesRegex(RuntimeError, 'php-zts-runtime-layout'):
             harness['assert_upgrade'](before, dict(after, **{'php-zts-runtime-layout': '2-r0'}), candidates, list(before))
+
+    def test_held_library_diagnostics_include_installed_candidate_and_baseline_versions(self):
+        before = {'php-zts-lib-attr': '2.5.2-r5'}
+        with self.assertRaisesRegex(RuntimeError, r'php-zts-lib-attr: installed=2\.5\.2-r5, candidate=2\.5\.2-r2, baseline=2\.5\.2-r5'):
+            harness['assert_upgrade'](before, before, {'php-zts-lib-attr': {'version': '2.5.2-r2'}}, list(before))
 
     def test_native_library_profile_has_no_artificial_php_dependency(self):
         names = ['php-zts-lib-zlib', 'php-zts-runtime-layout']
@@ -791,12 +830,12 @@ class MigrationUpgradeHarness(unittest.TestCase):
             old, new = Path(directory) / 'old', Path(directory) / 'new'
             for path in (old, new):
                 (path / 'repodata').mkdir(parents=True)
-            (old / 'old.el10.rpm').write_bytes(b'old package')
+            (old / 'old.el8.rpm').write_bytes(b'old package')
             (old / 'repodata/oldhash.xml').write_bytes(b'cached old metadata')
             (old / 'repodata/repomd.xml').write_bytes(b'old root')
             (new / 'repodata/repomd.xml').write_bytes(b'new root')
             harness['copy_historical'](old, new)
-            self.assertEqual((new / 'old.el10.rpm').read_bytes(), b'old package')
+            self.assertEqual((new / 'old.el8.rpm').read_bytes(), b'old package')
             self.assertEqual((new / 'repodata/oldhash.xml').read_bytes(), b'cached old metadata')
             self.assertEqual((new / 'repodata/repomd.xml').read_bytes(), b'new root')
 

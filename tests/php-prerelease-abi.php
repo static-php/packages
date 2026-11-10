@@ -149,7 +149,7 @@ try {
                 'apk' => abiCommand(['tar', '-xOf', '-', '.PKGINFO'], abiCommand(['gzip', '-dc', $artifact[0]])),
             };
             if ($package instanceof pie) {
-                $expected = match ($type) {'rpm' => '1.5.5_86', 'deb' => '1.5.5+php86', 'apk' => '1.5.5p86'};
+                $expected = match ($type) {'rpm' => '1.5.5_86', 'deb' => '1.5.5+php86', 'apk' => '1.5.5.0_p86'};
                 abiCheck(str_contains($header, $expected . ($type === 'apk' ? '-r' : '-') . $revision), 'PIE archive has a PHP prerelease in its version');
                 abiCheck(!str_contains($header, '-shared-runtime-'), 'PIE archive requires a compiled PHP ABI');
             } else {

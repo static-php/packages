@@ -23,7 +23,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
-        -e PUBLICATION_PHP_STREAMS \
+        -e PUBLICATION_PHP_STREAMS -e TLS_CHECKS \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
 
@@ -60,7 +60,7 @@ case "$command" in
     native-inventories)
         python3 .github/actions/shared-libraries/glibc.py native-inventories
         ;;
-    classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-inline-package)
+    classify|glibc-classify|glibc-record|glibc-payload|glibc-package)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
@@ -81,6 +81,7 @@ case "$command" in
         python3 .github/actions/shared-libraries/incremental-build.py plan --root . \
             --compatibility "$(cat stage/library-compatibility)" --libraries "${LIBRARIES:-}" \
             --output stage/library-build-plan.json
+        python3 .github/actions/shared-libraries/glibc.py baseline
         python3 .github/actions/shared-libraries/incremental-build.py run --root . \
             --plan stage/library-build-plan.json --type "$TYPE"
         if python3 -c 'import json,sys; sys.exit(not json.load(open("stage/library-build-plan.json")).get("rebuilt_libraries"))'; then
@@ -100,6 +101,7 @@ case "$command" in
         baseline_stage=stage
         if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi
         baseline_args=(--packages "${PACKAGES:-}")
+        if [[ "${TLS_CHECKS:-false}" == true ]]; then baseline_args+=(--tls); fi
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json"); fi
         python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
             --inventory "$baseline_stage/native-inventories/$PHPV.json" "${baseline_args[@]}"
@@ -144,7 +146,6 @@ case "$command" in
         SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for pattern in ["baseline/shared-libraries.json", "published-baseline/baseline.json"] for p in pathlib.Path("stage").glob(pattern)]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
         php bin/spp package "${flags[@]}"
-        python3 .github/actions/shared-libraries/glibc.py test-dependencies
         python3 .github/actions/shared-libraries/workflow.py receipt --kind consumer --php-stream "$PHPV" \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \
             --output "dist/$TYPE/shared-library-build-receipt.json"
@@ -174,7 +175,8 @@ case "$command" in
 import os, runpy
 from pathlib import Path
 helper = runpy.run_path('.github/actions/shared-libraries/glibc.py')
-helper['baseline'](os.environ['TYPE'], Path('current-baseline'))
+plan = helper['read'](Path('cohort') / ('shared-libs-' + os.environ['TYPE'] + '-' + os.environ['TARGET']) / 'shared-library-plan.json')
+helper['publication_baseline'](os.environ['TYPE'], Path('current-baseline'), plan)
 PY
         fi
         baseline_args=()
@@ -183,7 +185,7 @@ PY
         fi
         python3 bin/shared-library-plan cohort --plan "$libs/shared-library-plan.json" --artifacts "dist/$TYPE" --type "$TYPE" "${baseline_args[@]}" "${scope_args[@]}" --output cohort-result.json
         if [[ "$TYPE" == rpm ]]; then
-            python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --baseline-directory "${RPM_DIRECTORY%/el8}/el9" --baseline-directory "${RPM_DIRECTORY%/el8}/el10"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"
+            python3 bin/check-rpm-upgrades --host "$RPM_HOST" --remote-directory "$RPM_DIRECTORY"                 --strict-cohort --files-from rpm-upload-files "dist/$TYPE"
         fi
         ;;
     *) echo "Unknown shared-library workflow command: $command" >&2; exit 1 ;;

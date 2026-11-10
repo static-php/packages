@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upgrade genuine published static packages through an unchanged signed local repo.
+"""Upgrade genuine published packages through an unchanged signed local repo.
 
 The mirror uses a disposable test signing key established before the old install.
 Its archives come from the frozen published baseline, never generated fixtures.
@@ -29,8 +29,7 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 ARCHITECTURE = runpy.run_path(str(HERE / 'container-architecture.py'))
-RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'alma9': ('rpm', 'almalinux:9'),
-            'alma10': ('rpm', 'almalinux:10'), 'debian': ('deb', 'debian:11'),
+RUNTIMES = {'alma8': ('rpm', 'almalinux:8'), 'debian': ('deb', 'debian:11'),
             'alpine': ('apk', 'alpine:3.24')}
 WARNING = re.compile(r'PHP Startup:|Unable to (?:load dynamic library|initialize module)|symbol lookup error|already loaded', re.I)
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_.-]*$')
@@ -137,7 +136,7 @@ def load_baseline(root, kind, stream, arch):
         raise RuntimeError('Baseline PHP stream/architecture does not match the requested cell')
     origin = record.get('origin', {})
     if not (record.get('real_published') is True or origin.get('real_published') is True):
-        raise RuntimeError('Migration requires a real published static baseline, not a fixture')
+        raise RuntimeError('Upgrade validation requires a real published baseline, not a fixture')
     if not origin.get('publication_url'):
         raise RuntimeError('Baseline has no published origin URL')
     packages = record.get('packages', [])
@@ -399,6 +398,14 @@ def newer(kind, old, new):
         if result.returncode not in (0, 1):
             raise RuntimeError('Cannot compare Debian package versions')
         return result.returncode == 0
+    valid = []
+    for version in (old, new):
+        result = run(['apk', 'version', '--check', version], check=False)
+        if result.returncode not in (0, 1):
+            raise RuntimeError('Cannot validate APK version: ' + version)
+        valid.append(result.returncode == 0)
+    if not all(valid):
+        return valid[1] and not valid[0]
     return run(['apk', 'version', '-t', old, new]).stdout.strip() == '<'
 
 
@@ -630,7 +637,9 @@ def assert_upgrade(before, after, candidate, names):
         if name not in candidate:
             raise RuntimeError('Installed package has no migration candidate: ' + name)
         if after.get(name) != candidate[name]['version']:
-            raise RuntimeError('Ordinary upgrade held back or failed to advance ' + name)
+            raise RuntimeError('Ordinary upgrade held back or failed to advance ' + name
+                               + ': installed=' + str(after.get(name)) + ', candidate=' + candidate[name]['version']
+                               + ', baseline=' + before[name])
     removed = {name for name in set(before) - set(after) if managed(name)}
     if removed:
         raise RuntimeError('Ordinary upgrade removed installed packages: ' + ', '.join(sorted(removed)))
@@ -891,7 +900,7 @@ def inside(args):
         if not probe['version'].startswith(args.php + '.'):
             raise RuntimeError('Old installation selected the wrong PHP stream')
         if not probe['curl'] or not probe['fileinfo']:
-            raise RuntimeError('Published static CLI lacks expected builtin cURL/Fileinfo')
+            raise RuntimeError('Published CLI lacks expected cURL/Fileinfo')
         if args.library_only or args.partial_consumers:
             closure = run(['ldd', '/usr/bin/php-zts'], check=False)
             if closure.returncode or 'not found' in closure.stdout + closure.stderr or '/php-zts/lib/' not in closure.stdout:
@@ -1177,8 +1186,6 @@ class PreparedMirror:
             parent = repository / ('aarch64' if args.arch == 'arm64' else 'x86_64')
             parent.mkdir()
             (parent / 'el8').symlink_to('../current', target_is_directory=True)
-            for el in ('el9', 'el10'):
-                (parent / el).symlink_to('el8', target_is_directory=True)
         elif args.type == 'apk':
             parent = repository / 'apk'
             parent.mkdir()
@@ -1434,6 +1441,26 @@ def cell(args, prepared=None):
     return result
 
 
+def verified_unchanged_candidates(inventory, results):
+    candidates = {package['name']: package['version'] for package in inventory.get('incoming', [])
+                  if not package['name'].endswith(('-debuginfo', '-dbgsym'))}
+    changes = inventory.get('incoming_changes')
+    if not candidates or not isinstance(changes, list) or any(not name.endswith(('-debuginfo', '-dbgsym')) for name in changes):
+        return False
+    for package in inventory.get('incoming', []):
+        base = package['name'].removesuffix('-debuginfo').removesuffix('-dbgsym')
+        if candidates.get(base) != package['version']:
+            return False
+    covered = set()
+    for receipt in results:
+        if receipt.get('ok') is not True or receipt.get('second_upgrade_noop') is not True:
+            continue
+        before, after = receipt.get('actual_old_versions', {}), receipt.get('new_versions', {})
+        covered.update(name for name, version in candidates.items()
+                       if before.get(name) == version and after.get(name) == version)
+    return candidates.keys() <= covered
+
+
 def suite(args, baseline, profiles):
     mirror = PreparedMirror(args, baseline=baseline)
     results = []
@@ -1479,8 +1506,10 @@ def suite(args, baseline, profiles):
                     or receipt.get('cleanup', {}).get('complete') is False):
                 break
         exercised = any(item.get('applicable', item.get('ok', False)) for item in results)
-        result.update(ok=len(results) == len(execution_profiles) and all(item['ok'] for item in results) and exercised,
-                      applicable=exercised, interrupted=any(item.get('interrupted') for item in results))
+        unchanged = not exercised and (getattr(args, 'partial_consumers', False) or args.library_only) and verified_unchanged_candidates(getattr(mirror, 'inventory', {}), results)
+        result.update(ok=len(results) == len(execution_profiles) and all(item['ok'] for item in results) and (exercised or unchanged),
+                      applicable=exercised, unchanged_candidates_validated=bool(unchanged),
+                      interrupted=any(item.get('interrupted') for item in results))
     except BaseException as error:
         result.update(ok=False, error=str(error), interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)))
     finally:

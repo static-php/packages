@@ -778,7 +778,7 @@ class MatrixDriver(unittest.TestCase):
                 self.assertIn('reuse library baseline', result['error'])
                 self.assertFalse(result.get('cleanup_errors'), result)
 
-    def test_default_runtime_matrix_has_one_rpm_set_and_extra_els_are_smokes(self):
+    def test_default_runtime_matrix_uses_only_supported_targets(self):
         calls = []
         def cell(*arguments, **options):
             calls.append((arguments, options))
@@ -788,12 +788,12 @@ class MatrixDriver(unittest.TestCase):
         self.assertEqual(len(calls), 15)
         self.assertEqual({arguments[0] for arguments, _ in calls}, {'alma8', 'debian', 'alpine'})
         calls.clear()
-        with patch.dict(scope, {'cell': cell, 'run': lambda *args, **kwargs: subprocess.CompletedProcess([], 0, '', '')}), patch.object(sys, 'argv', ['shared-runtime-containers.py', '--os', 'alma10', '--php', '8.6', '--artifacts', '/unused']), patch('sys.stdout', new_callable=io.StringIO):
+        with patch.dict(scope, {'cell': cell, 'run': lambda *args, **kwargs: subprocess.CompletedProcess([], 0, '', '')}), patch.object(sys, 'argv', ['shared-runtime-containers.py', '--os', 'alma8', '--php', '8.6', '--artifacts', '/unused']), patch('sys.stdout', new_callable=io.StringIO):
             self.assertEqual(harness['main'](), 0)
-        self.assertEqual(calls[0][0][-2:], (False, False))
+        self.assertEqual(calls[0][0][-2:], (True, True))
 
     def test_retired_multidistro_builder_cannot_start_another_compile(self):
-        arguments = ['build-shared-matrix.py', '--os', 'debian,alma9', '--php-versions', '8.2']
+        arguments = ['build-shared-matrix.py', '--os', 'debian,alma8', '--php-versions', '8.2']
         with patch.object(sys, 'argv', arguments), patch.object(subprocess, 'run', side_effect=AssertionError('Retired builder invoked Docker')), patch('sys.stderr', new_callable=io.StringIO) as errors:
             with self.assertRaises(SystemExit) as error:
                 matrix['main']()
@@ -846,7 +846,7 @@ class MatrixDriver(unittest.TestCase):
             self.assertEqual((baseline / 'dist/deb/php-zts-lib-fixture_1.0-2.deb').read_text(), 'original package')
             self.assertTrue(all(not directory.exists() for directory in directories))
             report = root / 'report.md'
-            prior = {'os': 'alma9', 'libraries': True, 'cells': [{'php': '8.5', 'ok': False, 'stage': 'build', 'error': 'previous failure'}]}
+            prior = {'os': 'alma8', 'libraries': True, 'cells': [{'php': '8.5', 'ok': False, 'stage': 'build', 'error': 'previous failure'}]}
             matrix['write_report'](report, [prior], 'prior-run', 25)
             matrix['write_report'](report, [result], 'targeted-rerun', 2)
             text = report.read_text()

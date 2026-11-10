@@ -304,7 +304,7 @@ def main():
         return 0
     if args.type is None or args.output is None or any(path is None or not path.exists() for path in [args.repo, args.key]):
         parser.error('Provide --type, signed native --repo, its public --key, and --output')
-    args.image = args.image or {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.21'}[args.type]
+    args.image = args.image or {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.24'}[args.type]
     args.probe_only = False
     harness = Harness(args)
     status = 1

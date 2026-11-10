@@ -5,6 +5,7 @@ declare(strict_types=1);
 
 use staticphp\Command\TestCommand;
 use staticphp\step\CreatePackages;
+use Symfony\Component\Process\Process;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -166,7 +167,11 @@ function preflightConsumerVersions(array $options): array
         if ($options['bump'] ?? false) {
             $revision = $type === 'apk' ? 0 : 1;
             foreach (array_keys($published[$stream][$name] ?? []) as $old) {
-                if (preflightBaseVersion($type, $old) === $base && preg_match($type === 'apk' ? '/-r(\d+)$/' : '/-(\d+)(?:\.[A-Za-z0-9.+_~]+)?$/', $old, $release)) {
+                $publishedBase = preflightBaseVersion($type, $old);
+                if ($type === 'apk') {
+                    $publishedBase = CreatePackages::validApkPackageVersion($publishedBase);
+                }
+                if ($publishedBase === $base && preg_match($type === 'apk' ? '/-r(\d+)$/' : '/-(\d+)(?:\.[A-Za-z0-9.+_~]+)?$/', $old, $release)) {
                     $revision = max($revision, (int) $release[1] + 1);
                 }
             }
@@ -189,7 +194,17 @@ function preflightConsumerVersions(array $options): array
             $oldUpstream = CreatePackages::migrationUpstreamVersion($type, $old);
             $phase = $type !== 'apk' || $oldUpstream === null ? 0
                 : $compare(CreatePackages::toApkVersion($upstream), CreatePackages::toApkVersion($oldUpstream));
-            $ordering = $compare($version, $old);
+            if ($type === 'apk') {
+                $normalized = CreatePackages::validApkPackageVersion($old);
+                $valid = new Process(['apk', 'version', '--check', $normalized]);
+                $valid->run();
+                if (!in_array($valid->getExitCode(), [0, 1], true)) {
+                    $valid->mustRun();
+                }
+                $ordering = $valid->isSuccessful() ? $compare($version, $normalized) : ($numeric > 0 ? 1 : -1);
+            } else {
+                $ordering = $compare($version, $old);
+            }
             if ($numeric < 0 || $phase < 0 || $ordering < 0) {
                 $receipt['rejected'][] = ['php_stream' => $stream, 'name' => $name, 'candidate' => $version,
                     'published' => $old, 'reason' => $numeric < 0 ? 'upstream-version-rollback' : ($phase < 0 ? 'upstream-phase-rollback' : 'native-version-downgrade')];

@@ -41,20 +41,32 @@ if (CreatePackages::getRemoteNextIteration('php-zts-lib-zlib', '1.3.1', 'aarch64
 
 echo "Passed remote revision pagination checks.\n";
 
+putenv('SPP_RPM_REPO_URL=https://example.com');
+foreach (['php-zts-lib-fixture', 'php-zts-xdebug', 'frankenphp'] as $name) {
+    $cache->setValue(null, [
+        'https://example.com/x86_64/el8/' => [200, "{$name}-1.2.3-4.x86_64.rpm"],
+        'https://example.com/x86_64/el9/' => [500, null],
+        'https://example.com/x86_64/el10/' => [500, null],
+    ]);
+    if (CreatePackages::getRemoteNextIteration($name, '1.2.3', 'x86_64', 'rpm') !== 5) {
+        throw new RuntimeException('RPM revision selection must use EL8 without querying retired repositories');
+    }
+}
+putenv('SPP_RPM_REPO_URL');
+echo "Passed library, extension and SAPI revision selection with unavailable retired repositories.\n";
+
 $baseline = tempnam(sys_get_temp_dir(), 'spp-revision-floor-');
 putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$baseline]));
 putenv('SPP_RPM_REPO_URL=https://example.com');
 try {
     foreach (['rpm', 'deb', 'apk'] as $type) {
         $version = $type === 'apk' ? '2.2.0.0_p83_p36_p0' : '2.2.0+php83.36';
-        $cutoff = $type === 'apk' ? '2.2.0p83.36_p0-r1' : $version . '-2' . ($type === 'rpm' ? '.el9' : '');
+        $cutoff = $type === 'apk' ? '2.2.0p83.36_p0-r1' : $version . '-2' . ($type === 'rpm' ? '.el8' : '');
         file_put_contents($baseline, json_encode(['schema' => 1, 'type' => $type, 'architecture' => 'x86_64',
             'migration_cutoffs' => ['8.3' => ['php-zts-amqp' => $cutoff]]], JSON_THROW_ON_ERROR));
         $pages = [];
         foreach (['x86_64', 'aarch64'] as $arch) {
-            foreach (['el8', 'el9', 'el10'] as $el) {
-                $pages["https://example.com/{$arch}/{$el}/"] = [200, '[]'];
-            }
+            $pages["https://example.com/{$arch}/el8/"] = [200, '[]'];
         }
         foreach (['debian', 'alpine'] as $kind) {
             $pages["https://example.com/api/v1/packages/86?type={$kind}&q=php-zts-amqp&limit=1000&page=1"] = [200, '[]'];
@@ -127,3 +139,65 @@ try {
     unlink($baseline);
     rmdir($directory);
 }
+
+$retryDirectory = sys_get_temp_dir() . '/spp-revision-http-' . bin2hex(random_bytes(6));
+mkdir($retryDirectory);
+$originalPath = getenv('PATH');
+$originalProcessEnvironment = [$_ENV, $_SERVER];
+$retryState = $retryDirectory . '/state.json';
+$http = new ReflectionMethod(CreatePackages::class, 'httpGet');
+file_put_contents($retryDirectory . '/curl', <<<'PHP'
+#!/usr/bin/env php
+<?php
+$path = __DIR__ . '/state.json';
+$state = json_decode(file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+$index = $state['attempts']++;
+$state['urls'][] = end($argv);
+file_put_contents($path, json_encode($state, JSON_THROW_ON_ERROR));
+$response = $state['responses'][min($index, count($state['responses']) - 1)];
+if ($response[0] === 0) {
+    exit(7);
+}
+echo $response[1] . "\n" . $response[0];
+PHP);
+chmod($retryDirectory . '/curl', 0755);
+putenv('PATH=' . $retryDirectory . ':' . $originalPath);
+$_ENV['PATH'] = $_SERVER['PATH'] = $retryDirectory . ':' . $originalPath;
+try {
+    foreach ([
+        'temporary-server' => [[[500, 'first error'], [502, 'second error'], [200, 'final body']], 3, [200, 'final body']],
+        'temporary-connection' => [[[0, ''], [200, 'connected']], 2, [200, 'connected']],
+        'permanent-error' => [[[403, 'forbidden']], 1, [403, 'forbidden']],
+        'exhausted-retries' => [[[503, 'unavailable']], 3, [503, 'unavailable']],
+    ] as $name => [$responses, $attempts, $expected]) {
+        $cache->setValue(null, []);
+        $url = 'https://fixture.invalid/' . $name;
+        file_put_contents($retryState, json_encode(['attempts' => 0, 'urls' => [], 'responses' => $responses], JSON_THROW_ON_ERROR));
+        if ($http->invoke(null, $url) !== $expected) {
+            throw new RuntimeException('Incorrect revision HTTP result after ' . $name);
+        }
+        $state = json_decode(file_get_contents($retryState), true, 512, JSON_THROW_ON_ERROR);
+        if ($state['attempts'] !== $attempts || $state['urls'] !== array_fill(0, $attempts, $url)) {
+            throw new RuntimeException('Incorrect bounded revision HTTP attempts for ' . $name);
+        }
+        if ($expected[0] === 503) {
+            file_put_contents($retryState, json_encode(['attempts' => 0, 'urls' => [], 'responses' => [[200, 'recovered']]], JSON_THROW_ON_ERROR));
+            if ($http->invoke(null, $url) !== [200, 'recovered']) {
+                throw new RuntimeException('Transient revision HTTP failure was cached');
+            }
+        } else {
+            $http->invoke(null, $url);
+            if (json_decode(file_get_contents($retryState), true, 512, JSON_THROW_ON_ERROR)['attempts'] !== $attempts) {
+                throw new RuntimeException('Stable revision HTTP result was not reused');
+            }
+        }
+    }
+} finally {
+    putenv('PATH=' . $originalPath);
+    [$_ENV, $_SERVER] = $originalProcessEnvironment;
+    unlink($retryDirectory . '/curl');
+    unlink($retryState);
+    rmdir($retryDirectory);
+    $cache->setValue(null, []);
+}
+echo "Passed bounded revision lookup retries, successful body isolation and transient-error cache handling.\n";

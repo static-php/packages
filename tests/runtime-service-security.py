@@ -38,7 +38,7 @@ class ServiceContainerSecurity(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def harness(self, engine='podman', kind='deb'):
-        image = {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.21'}[kind]
+        image = {'rpm': 'almalinux:8', 'deb': 'debian:11', 'apk': 'alpine:3.24'}[kind]
         harness = scope['Harness'](SimpleNamespace(container_engine=engine, type=kind, image=image,
                                                   php_stream='8.6', probe_only=True, arch='x86_64'))
         self.addCleanup(harness.temporary.cleanup)

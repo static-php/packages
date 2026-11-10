@@ -80,7 +80,7 @@ class PublicationRetryPlan(unittest.TestCase):
                                   peer_baseline=str(peer) if peer else None,
                                   mode='incremental', request=str(requested), libraries=libraries,
                                   rebuilt_libraries=None, php_versions=None, packages=None,
-                                  bootstrap=False, manifest_output=str(self.root / 'annotated.json'),
+                                  manifest_output=str(self.root / 'annotated.json'),
                                   output=str(self.root / 'plan.json'))
         with patch.dict(namespace, {'dump_abi': Mock(),
                                     'abi_difference': Mock(return_value='compatible')}):

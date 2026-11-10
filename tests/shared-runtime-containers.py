@@ -38,11 +38,9 @@ import uuid
 
 
 BASES = {
-    'alpine': ('apk', 'alpine:3.21'),
+    'alpine': ('apk', 'alpine:3.24'),
     'debian': ('deb', 'debian:11'),
     'alma8': ('rpm', 'almalinux:8'),
-    'alma9': ('rpm', 'almalinux:9'),
-    'alma10': ('rpm', 'almalinux:10'),
 }
 FULL_BASES = ('alma8', 'debian', 'alpine')
 PHP_VERSIONS = ('8.2', '8.3', '8.4', '8.5', '8.6')
@@ -743,43 +741,35 @@ def build_fixtures(kind):
         run(['gcc', main, library, f'-Wl,--enable-new-dtags,-rpath,{private}', '-o', executable])
         libraries[abi] = {private + '/' + library.name: library}
         binaries[abi] = executable
-    static = root / 'static-consumer'
-    run(['gcc', '-DSPP_VALUE=1', main, source, '-o', static])
     consumers = ('php-zts-runtime-fixture82', 'php-zts-runtime-fixture86')
     library_name = 'php-zts-lib-runtime-fixture'
     for stage, lib_version, abi, revisions in (
-        ('static', None, None, (1, 1)),
         ('shared', '1.0.0', 1, (2, 2)),
         ('compatible', '1.1.0', 1, (2, 2)),
         ('incomplete', '2.0.0', 2, (3, 2)),
         ('complete', '2.0.0', 2, (3, 3)),
     ):
         directory = root / stage
-        if abi:
-            fixture_package(kind, directory, library_name, lib_version, libraries[abi],
-                            provides=[f'{library_name}-abi-{abi}'])
+        fixture_package(kind, directory, library_name, lib_version, libraries[abi],
+                        provides=[f'{library_name}-abi-{abi}'])
         for name, revision in zip(consumers, revisions):
             consumer_abi = 2 if revision == 3 else 1
-            deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})', f'{library_name}-abi-{consumer_abi}'] if revision > 1 else []
+            deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})', f'{library_name}-abi-{consumer_abi}']
             fixture_package(kind, directory, name, f'{revision}.0.0',
-                            {'/usr/bin/' + name: binaries[consumer_abi] if revision > 1 else static}, depends=deps)
+                            {'/usr/bin/' + name: binaries[consumer_abi]}, depends=deps)
         index_repo(kind, directory)
 
 
 def fixture_checks(kind):
     consumers = ['php-zts-runtime-fixture82', 'php-zts-runtime-fixture86']
     library = 'php-zts-lib-runtime-fixture'
-    for stage in ('static', 'shared', 'compatible', 'incomplete', 'complete'):
+    for stage in ('shared', 'compatible', 'incomplete', 'complete'):
         configure_repo(kind, '/spp/fixtures/' + stage)
         before = {name: installed(kind, name) for name in consumers}
-        if stage == 'static':
+        if stage == 'shared':
             install(kind, consumers)
-            if installed(kind, library):
-                raise RuntimeError('Static fixture unexpectedly installed shared dependency')
-        elif stage == 'shared':
-            install(kind, consumers, upgrade=True)
             if not installed(kind, library):
-                raise RuntimeError('Static-to-shared migration did not resolve its library')
+                raise RuntimeError('Shared consumer installation did not resolve its library')
         elif stage == 'compatible':
             install(kind, [library], upgrade=True)
             if '1.1.0' not in (installed(kind, library) or ''):
@@ -804,7 +794,7 @@ def fixture_checks(kind):
             expected = '2' if stage == 'complete' else '1'
             if run(['/usr/bin/' + name]).stdout.strip() != expected:
                 raise RuntimeError(f'{stage}: installed fixture consumer {name} cannot run')
-    return {'static_to_shared': True, 'compatible_library_only': True,
+    return {'shared_install': True, 'compatible_library_only': True,
             'incomplete_abi_rejected': True, 'complete_abi_cohort': True}
 
 
@@ -1031,10 +1021,8 @@ def main():
                              not args.skip_individual,
                              not args.skip_fixtures and php == PHP_VERSIONS[0])
         else:
-            compatibility_smoke = args.os not in FULL_BASES
             validate(args.os, args.php, args.artifacts, args.manifest,
-                     not args.skip_individual and not compatibility_smoke,
-                     not args.skip_fixtures and not compatibility_smoke)
+                     not args.skip_individual, not args.skip_fixtures)
     finally:
         if args.report:
             args.report.write_text(json.dumps({'cells': results}, indent=2) + '\n')

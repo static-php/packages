@@ -129,7 +129,7 @@ try {
             ob_start();
             try {
                 $create->invoke(null, new MigrationFixturePackage(preg_replace('/-debuginfo$/', '', $name)), $name,
-                    $version, 'x86_64', (string) $revision, $config, $debug);
+                    $version, 'x86_64', (string) $revision, $config, $debug, false);
             } finally {
                 file_put_contents($root . '/package.log', ob_get_clean(), FILE_APPEND);
             }
@@ -137,6 +137,7 @@ try {
             return $path;
         };
         $publish = static function (string $path) use ($root): void {
+            migrationCheck(is_file($path), 'Missing generated fixture archive: ' . $path);
             copy($path, $root . '/repo/x86_64/' . preg_replace('/\.x86_64(?=\.apk$)/', '', basename($path)));
         };
         $header = static fn (string $path): string => migrationCommand(['tar', '-xOf', '-', '.PKGINFO'], migrationCommand(['gzip', '-dc', $path]));
@@ -189,8 +190,9 @@ try {
                 ]);
                 $old[$name][] = $path;
                 $publish($path);
-                // APK rejects exact dependencies containing a malformed historical tilde.
-                if (!str_contains($historical, '~')) {
+                $valid = new Process(['apk', 'version', '--check', $historical]);
+                $valid->run();
+                if ($valid->isSuccessful()) {
                     $debug = $archive($logical . '-debuginfo', $parts[1], (int) $parts[2], [
                         'depends' => [$logical], 'files' => $configs[$name . '-debuginfo']['files'],
                     ], true);
@@ -217,7 +219,7 @@ try {
             $container = 'spp-apk-migration-' . bin2hex(random_bytes(6));
             try {
                 migrationCommand(['docker', 'run', '--rm', '--memory', '384m', '--cpus', '1', '--network', 'none', '--name', $container,
-                    '--volume', $root . ':/task:Z', 'alpine:3.21', 'sh', '-ec', $script]);
+                    '--volume', $root . ':/task:Z', 'alpine:3.24', 'sh', '-ec', $script]);
             } finally {
                 (new Process(['docker', 'rm', '-f', $container]))->run();
             }
@@ -248,9 +250,16 @@ SH;
                     $debugCheck .= "! apk info -e php-zts-{$name}-debuginfo\n";
                 }
             }
-            $files = implode(' ', array_map(static fn (string $path): string => escapeshellarg('/task/dist/apk/' . basename($path)), $initial));
+            $copies = '';
+            $files = [];
+            foreach ($initial as $position => $path) {
+                $destination = '/tmp/initial-' . $position . '.apk';
+                $copies .= 'cp ' . escapeshellarg('/task/dist/apk/' . basename($path)) . ' ' . $destination . "\n";
+                $files[] = $destination;
+            }
+            $files = implode(' ', $files);
             $before = implode("\n", array_map(static fn (string $path): string => 'apk info -v | grep -Fx ' . escapeshellarg(basename($path, '.x86_64.apk')), $initial));
-            $run($setup . "\napk add --repositories-file /dev/null --allow-untrusted {$files}\n{$before}\n"
+            $run($setup . "\n" . $copies . "apk add --repositories-file /dev/null --allow-untrusted {$files}\n{$before}\n"
                 . "sed -i 's/^\\(php-zts-[a-z-]*\\).*/\\1/' /etc/apk/world\ncp /etc/apk/world /tmp/world.before\n"
                 . "apk info | sort >/tmp/names.before\napk upgrade --allow-untrusted\n"
                 . $cliCheck . $moduleCheck . $debugCheck
@@ -281,9 +290,10 @@ SH;
         $run($setup . "\napk add --repositories-file /dev/null --allow-untrusted " . escapeshellarg('/task/dist/apk/' . basename($oldCli)) . ' '
             . escapeshellarg('/task/dist/apk/' . basename($held)) . "\n"
             . "sed -i -e 's/^php-zts-cli.*/php-zts-cli/' -e 's/^php-zts-amqp.*/php-zts-amqp={$heldVersion}/' /etc/apk/world\n"
-            . "grep -Fx 'php-zts-amqp={$heldVersion}' /etc/apk/world\napk upgrade --allow-untrusted >/tmp/held.log 2>&1 || :\n"
-            . 'apk info -v -e php-zts-cli | grep -Fx ' . escapeshellarg('php-zts-cli-' . $fullPhpVersion . '-r' . $oldCliRevision) . "\n"
-            . 'apk info -v -e php-zts-amqp | grep -Fx ' . escapeshellarg('php-zts-amqp-' . $heldVersion) . "\n");
+            . "grep -Fx 'php-zts-amqp={$heldVersion}' /etc/apk/world\n"
+            . "cp /lib/apk/db/installed /tmp/held.before\ncp /etc/apk/world /tmp/world.before\n"
+            . "if apk upgrade --allow-untrusted >/tmp/held.log 2>&1; then cat /tmp/held.log; exit 1; fi\n"
+            . "cmp /tmp/held.before /lib/apk/db/installed\ncmp /tmp/world.before /etc/apk/world\n");
         echo "Passed native Alpine {$stream} hypothetical higher-upstream upgrades with unchanged names, debug/fresh/absent/pinned packages, later revisions and repeat no-op upgrades. Metadata fixture only.\n";
     }
 } finally {

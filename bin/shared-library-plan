@@ -167,8 +167,12 @@ def source_changes(old, new):
             changes[identifier] = 'added'
         elif current is None:
             changes[identifier] = 'removed'
-        elif environment_changed or any(previous.get(key) != current.get(key) for key in ['version', 'source_hash', 'build_identity', 'elf', 'files', 'file_hashes', 'license', 'license_files', 'depends', 'runtime_assets', 'dlopen_dependencies']):
+        elif (environment_changed
+              or any(previous.get(key) != current.get(key) for key in ['version', 'source_hash', 'build_identity', 'elf', 'files', 'file_hashes', 'license', 'license_files', 'depends', 'dlopen_dependencies'])
+              or (previous.get('runtime_assets') or {}) != (current.get('runtime_assets') or {})):
             changes[identifier] = 'changed'
+    for libraries in old.get('stream_libraries', {}).values():
+        changes.update(source_changes(dict(old, libraries=libraries, stream_libraries={}), new))
     return changes
 
 
@@ -472,9 +476,9 @@ def needs_abi_check(previous, current):
     return not all(versions) or versions[0].groups()[:2] != versions[1].groups()[:2]
 
 
-def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=None):
-    if not old['libraries'] and old.get('metadata_scope') != [] and not bootstrap:
-        raise RuntimeError('No published ABI baseline; initial migration requires --bootstrap')
+def compare(old, new, old_root, new_root, rebuilt_libraries=None):
+    if not old['libraries'] and old.get('metadata_scope') != []:
+        raise RuntimeError('No published shared-library ABI baseline')
     for key in ['architecture', 'libc', 'runtime_libdir']:
         if old['libraries'] and old.get(key) and new.get(key) != old[key]:
             raise RuntimeError('ABI baseline {} differs from candidate'.format(key))
@@ -579,7 +583,7 @@ def compare(old, new, old_root, new_root, bootstrap=False, rebuilt_libraries=Non
     if rebuilt_libraries is not None:
         progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed; {} patch/same-version rebuilds skipped'.format(reused, len(annotated['libraries']) - reused - skipped, skipped))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
-                       'bootstrap': not bool(old['libraries']) and old.get('metadata_scope') != [], 'libraries': changes}
+                       'libraries': changes}
 
 
 def reverse_closure(value, initial):
@@ -647,14 +651,13 @@ def empty_manifest():
     return {'schema': 1, 'linkage': 'shared', 'libraries': {}}
 
 
-def merge_baselines(baselines, kind, destination, abi_libraries=None):
+def merge_baselines(baselines, kind, destination, abi_libraries=None, independent_streams=False):
     merged = empty_manifest()
     scopes = {tuple(value['metadata_scope']) if value.get('metadata_scope') is not None else None for value, _ in baselines}
     if len(scopes) > 1:
         raise RuntimeError('Cannot merge baselines with different library metadata scopes')
     if scopes and None not in scopes:
         merged['metadata_scope'] = list(next(iter(scopes)))
-    merged['unmigrated_php_streams'] = sorted(set().union(*(set(value.get('unmigrated_php_streams', [])) for value, _ in baselines)))
     divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
     drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
     for value, _ in baselines:
@@ -668,7 +671,10 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None):
         candidates = [(value['libraries'].get(identifier), root) for value, root in baselines]
         available = [(library, root) for library, root in candidates if library is not None]
         selected, source = available[0]
-        identities = {digest({key: library.get(key) for key in ['version', 'source_hash', 'abi_epoch', 'published_version', 'abi_dump_hashes']}) if library is not None else 'missing'
+        identity_fields = ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']
+        if not independent_streams:
+            identity_fields.append('published_version')
+        identities = {digest({key: library.get(key) for key in identity_fields}) if library is not None else 'missing'
                       for library, _ in candidates}
         if len(identities) > 1:
             drift.add(identifier)
@@ -714,6 +720,8 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None):
     merged['consumers'] = {stream: sorted(set().union(*(set(value.get('consumers', {}).get(stream, [])) for value, _ in baselines))) for stream in STREAMS}
     merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete', 'consumers' in value) for value, _ in baselines)
     merged['consumer_versions'] = {stream: {} for stream in STREAMS}
+    merged['stream_libraries'] = {stream: copy.deepcopy(libraries)
+                                for value, _ in baselines for stream, libraries in value.get('stream_libraries', {}).items()}
     merged['consumer_dependencies'] = {stream: {} for stream in STREAMS}
     for field in ['consumer_components', 'consumer_native_metadata']:
         merged[field] = {stream: {} for stream in STREAMS}
@@ -793,9 +801,8 @@ def prepare(args):
             target['full'] = bool(target.get('full') or entry.get('full'))
             target['packages'] = sorted(set(target.get('packages', [])) | set(entry.get('packages', [])))
     mode = 'incremental' if specified else args.mode
-    bootstrap = args.bootstrap and not specified
-    if bootstrap and mode != 'full' and not all(requested.get(stream, {}).get('full') for stream in STREAMS):
-        raise RuntimeError('Bootstrap requires full mode or a full migration request for every PHP stream')
+    forced_revision = bool(getattr(args, 'bump', False) or getattr(args, 'iteration', None)
+                           or os.environ.get('BUMP') == 'true' or os.environ.get('ITERATION'))
     with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
         candidates = current['libraries'].keys() if getattr(args, 'rebuilt_libraries', None) is None else rebuilt
         checked = {name for name in candidates if name in current['libraries']
@@ -806,10 +813,8 @@ def prepare(args):
         consumer_scope = bool(args.packages and old.get('metadata_scope') == [] and not rebuilt)
         if old.get('metadata_scope') is not None and not consumer_scope and (not specified or (set(specified) | rebuilt) - set(old['metadata_scope'])):
             raise RuntimeError('Scoped baselines must cover the selected and rebuilt libraries')
-        build_only = bool(getattr(args, 'build_only', False) and
-                          ((not old['libraries'] and not consumer_scope) or args.packages and old.get('unmigrated_php_streams')))
-        annotated, comparison = compare(old, current, temporary, args.root, bootstrap or build_only,
-                                       None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
+        annotated, comparison = compare(old, current, temporary, args.root,
+                                       rebuilt_libraries=None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
     for identifier, library in annotated['libraries'].items():
         published = old['libraries'].get(identifier, {}).get('published_version')
         versions = library.setdefault('package_versions', {})
@@ -817,29 +822,34 @@ def prepare(args):
             versions[args.type] = published
         elif old.get('metadata_scope') is None or identifier in old['metadata_scope']:
             versions.pop(args.type, None)
-    comparison['candidate_fingerprint'] = fingerprint(annotated)
-    sources = sorted(rebuilt) if build_only else source_changes(old, current)
+    sources = source_changes(old, current)
+    content_sources = source_changes(dict(old, stream_libraries={}), current)
+    publication_changes = set(sources) if getattr(args, 'rebuilt_libraries', None) is None else set(sources) & rebuilt
     abi_roots = set(divergent) | {identifier for identifier, change in comparison['libraries'].items() if change['status'] in ['breaking', 'removed']}
     unknown = (set(specified) | rebuilt) - current['libraries'].keys()
     if unknown:
         raise RuntimeError('Unknown selected libraries: ' + ', '.join(sorted(unknown)))
     if specified:
-        selected = set(specified) | rebuilt
-        allowed = selected | set(reverse_closure(current, selected.intersection(abi_roots)))
+        requested_libraries = set(specified) | rebuilt
+        selected = (requested_libraries if forced_revision
+                    else requested_libraries.intersection(set(sources) | metadata_libraries | abi_roots | set(old.get('publication_drift', []))))
+        allowed = requested_libraries | set(reverse_closure(current, requested_libraries.intersection(abi_roots)))
         unexpected = abi_roots - allowed
         if unexpected:
             raise RuntimeError('Buildroot or publication baseline has library changes outside the requested set: ' + ', '.join(sorted(unexpected)))
     else:
         if args.packages:
-            selected = set(sources) | rebuilt
+            selected = set(publication_changes)
         else:
-            selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
+            if getattr(args, 'rebuilt_libraries', None) is not None:
+                selected = set(publication_changes)
+            else:
+                selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
             selected.update(metadata_libraries)
             selected.update(old.get('publication_drift', []))
     selected.update(reverse_closure(current, abi_roots))
     selected = sorted(selected)
     breaking = bool(divergent) or any(item['status'] in ['breaking', 'removed'] for item in comparison['libraries'].values())
-    force_all = comparison['bootstrap'] and not build_only
     abi_requests = abi_consumers(old, abi_roots) if breaking else {}
     streams = set(name.strip() for name in (args.php_versions or ','.join(STREAMS)).split(',') if name.strip())
     if streams - set(STREAMS):
@@ -847,9 +857,7 @@ def prepare(args):
     package_filter = sorted(set(name.strip() for name in (args.packages or '').split(',') if name.strip()))
     php = {}
     for stream in STREAMS:
-        if force_all:
-            php[stream] = {'full': True, 'packages': [], 'compile': True, 'reuse_payload': False, 'compile_full': True, 'compile_packages': []}
-        elif stream not in streams and not (abi_requests.get(stream, {}).get('full') or abi_requests.get(stream, {}).get('packages')):
+        if stream not in streams and not (abi_requests.get(stream, {}).get('full') or abi_requests.get(stream, {}).get('packages')):
             php[stream] = {'full': False, 'packages': [], 'compile': False, 'reuse_payload': False, 'compile_full': False, 'compile_packages': []}
         elif mode == 'full':
             php[stream] = {'full': not bool(package_filter), 'packages': package_filter, 'compile': True, 'reuse_payload': False,
@@ -864,7 +872,7 @@ def prepare(args):
                            'reuse_payload': not compiling and bool(full or packages),
                            'compile_full': compiling and bool(entry.get('full')) and not bool(package_filter),
                            'compile_packages': package_filter if compiling and package_filter else sorted(set(entry.get('packages', [])))}
-        if breaking and not force_all:
+        if breaking:
             affected = abi_requests[stream]
             entry = php[stream]
             entry['full'] |= affected['full']
@@ -875,26 +883,41 @@ def prepare(args):
                 entry['compile_full'] |= affected['full'] or bool(set(affected['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'}))
                 entry['compile_packages'] = [] if entry['compile_full'] else sorted(set(entry['compile_packages']) | set(affected['packages']))
     selected = [identifier for identifier in selected if identifier in current['libraries']]
+    for identifier in set(annotated['libraries']) - set(selected):
+        versions = [libraries[identifier]['published_version'] for libraries in old.get('stream_libraries', {}).values()
+                    if libraries.get(identifier, {}).get('published_version')]
+        if versions:
+            minimum = min(versions, key=functools.cmp_to_key(lambda left, right: native_compare(args.type, left, right)))
+            annotated['libraries'][identifier].setdefault('package_versions', {})[args.type] = minimum
+    comparison['candidate_fingerprint'] = fingerprint(annotated)
+    retry_libraries = set(old.get('publication_drift', [])) | (set(sources) - set(content_sources))
+    if forced_revision:
+        retry_libraries.difference_update(specified)
     plan = {'schema': 1, 'type': args.type, 'libraries': selected, 'removed_libraries': sorted(set(old['libraries']) - set(current['libraries'])),
-            'abi_break': breaking, 'abi_rebuild_roots': sorted(abi_roots), 'bootstrap': comparison['bootstrap'], 'build_only': build_only, 'baseline_fingerprint': fingerprint(baselines[0][0]),
+            'abi_break': breaking, 'abi_rebuild_roots': sorted(abi_roots), 'baseline_fingerprint': fingerprint(baselines[0][0]),
             'baseline_fingerprints': sorted(set(fingerprint(value) for value, _ in baselines)),
             'baseline_states': [value for value, _ in baselines],
             'divergent_libraries': sorted(divergent),
             'candidate_fingerprint': comparison['candidate_fingerprint'], 'php_requests': php,
             'candidate_environment': {key: annotated.get(key) for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']},
             'expected_members': ['php-zts-lib-' + identifier for identifier in selected],
-            'expected_consumers': {stream: old.get('consumers', {}).get(stream, []) if force_all else abi_requests.get(stream, {}).get('consumers', []) for stream in STREAMS} if force_all or breaking else {},
+            'expected_consumers': {stream: abi_requests.get(stream, {}).get('consumers', []) for stream in STREAMS} if breaking else {},
             'abi_consumer_requests': abi_requests,
             'abi_core_rebuild_streams': sorted(stream for stream, entry in abi_requests.items()
                                              if entry['full'] or set(entry['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'})),
             'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes', 'abi_empty']} for identifier in selected},
             'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
             'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']}
-                                    for identifier in old.get('publication_drift', []) if identifier in selected and identifier not in sources and identifier not in abi_roots and identifier not in metadata_libraries},
+                                    for identifier in retry_libraries if identifier in selected and identifier not in content_sources and identifier not in rebuilt
+                                    and identifier not in metadata_libraries
+                                    and (identifier not in abi_roots or (not forced_revision
+                                         and all(annotated['libraries'][identifier].get(key) == old['libraries'][identifier].get(key)
+                                                 for key in ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes'])))
+                                    and old['libraries'].get(identifier, {}).get('published_archive')},
             'library_package_requests': sorted(metadata_libraries.intersection(selected)),
             'published_consumers': {stream: {name: version for name, version in versions.items()
-                                           if force_all or name in abi_requests.get(stream, {}).get('consumers', [])}
-                                    for stream, versions in old.get('consumer_versions', {}).items()} if force_all or breaking else {},
+                                           if name in abi_requests.get(stream, {}).get('consumers', [])}
+                                    for stream, versions in old.get('consumer_versions', {}).items()} if breaking else {},
             'comparison': comparison['libraries']}
     if plan['removed_libraries']:
         raise RuntimeError('Library removal requires an explicit package migration: ' + ', '.join(plan['removed_libraries']))
@@ -1283,7 +1306,10 @@ def baseline_single(args):
     native_metadata = {stream: {} for stream in STREAMS}
     migration = {}
     layout_metadata = None
-    consumer_stream = getattr(args, 'consumer_stream', '8.5')
+    consumer_stream = getattr(args, 'consumer_stream', None)
+    target_streams = set(filter(None, (getattr(args, 'php_versions', None) or ','.join(STREAMS)).split(',')))
+    if consumer_stream:
+        target_streams = {consumer_stream}
     scan_consumers = not getattr(args, 'skip_consumers', False)
     abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
     scope = getattr(args, 'libraries', None)
@@ -1304,7 +1330,7 @@ def baseline_single(args):
                 if (package['arch'] == architecture and not package['name'].startswith('php-zts-lib-')
                         and not package['name'].endswith('-debuginfo') and package['name'] != 'php-zts-runtime-layout'):
                     stream = rpm['php_stream'](package['version'])
-                    if scan_consumers and stream == consumer_stream:
+                    if scan_consumers and stream in target_streams:
                         consumers[stream].add(package['name'])
                         versions = consumer_versions[stream]
                         if package['name'] not in versions or native_compare('rpm', package['evr'], versions[package['name']]) > 0:
@@ -1389,9 +1415,9 @@ def baseline_single(args):
                 queries = sorted(names_requested) if names_requested is not None else ['php-zts-lib-', 'php-zts-runtime-layout']
                 packages = [item for query in queries
                             for item in helper['get_remote_packages'](args.host, args.owner, password, package_type, query)]
-            consumer_streams = [consumer_stream] if scan_consumers else []
+            consumer_streams = sorted(target_streams) if scan_consumers else []
             if args.owner in [value.replace('.', '') for value in STREAMS]:
-                consumer_streams = [consumer_stream] if scan_consumers and args.owner == consumer_stream.replace('.', '') else []
+                consumer_streams = [stream for stream in consumer_streams if args.owner == stream.replace('.', '')]
             for stream in consumer_streams:
                 owner = stream.replace('.', '')
                 versions = published_consumers(helper, args.host, owner, consumer_password, args.type, architecture, migration, dependencies, components, native_metadata,
@@ -1465,9 +1491,10 @@ def baseline_single(args):
     aggregate['consumer_dependencies'] = dependencies
     aggregate['consumer_components'] = components
     aggregate['consumer_native_metadata'] = native_metadata
-    aggregate['consumer_inventory_complete'] = scan_consumers and (args.type == 'rpm' or args.owner == consumer_stream.replace('.', ''))
+    captured_streams = sorted(target_streams) if args.type == 'rpm' else consumer_streams
+    aggregate['consumer_inventory_complete'] = scan_consumers and bool(captured_streams)
     if aggregate['consumer_inventory_complete']:
-        aggregate['consumer_inventory_stream'] = consumer_stream
+        aggregate['consumer_inventory_streams'] = captured_streams
     aggregate['migration_cutoffs'] = migration
     if layout_metadata:
         aggregate['runtime_layout'] = layout_metadata
@@ -1518,43 +1545,20 @@ def missing_forgejo_owner(args, error):
     return False
 
 
-def unmigrated_consumers(args):
-    native = runpy.run_path(str(ROOT / 'freeze-migration-baseline.py'))
-    architecture = normalized_arch(args.arch, args.type)
-    missing = []
-    for stream in filter(None, args.php_versions.split(',')):
-        if stream not in STREAMS:
-            raise RuntimeError('Unknown PHP baseline stream: ' + stream)
-        if args.type == 'rpm':
-            inventory, _, _ = native['rpm_index'](args.base_url.rstrip('/') + '/', architecture, stream)
-        else:
-            suffix = 'debian/' if args.type == 'deb' else 'alpine/main/php-zts/'
-            base = args.host.rstrip('/') + '/api/packages/' + stream.replace('.', '') + '/' + suffix
-            inventory, _, _ = native['deb_index' if args.type == 'deb' else 'apk_index'](base, architecture)
-        candidates = [package for package in inventory if package['name'] == 'php-zts-cli']
-        version = lambda package: (str(package.get('epoch', '0')) + ':' if args.type == 'rpm' else '') + package['version']
-        candidates.sort(key=functools.cmp_to_key(lambda a, b: native_compare(args.type, version(a), version(b))), reverse=True)
-        if not candidates or not any(name.startswith('php-zts-shared-runtime-') for name in candidates[0].get('provides', [])):
-            missing.append(stream)
-    return missing
-
-
 def baseline(args):
     destination = Path(args.output)
     if destination.exists() and any(destination.iterdir()):
         raise RuntimeError('Baseline output must be empty: ' + str(destination))
     sources = []
     if args.type == 'rpm':
-        for url in ([getattr(args, 'base_url', None)] + list(getattr(args, 'baseline_url', []) or [])):
-            if url:
-                sources.append(dict(base_url=url, remote_directory=None))
-        for directory in ([args.remote_directory] + list(getattr(args, 'baseline_directory', []) or [])):
-            if directory:
-                sources.append(dict(base_url=None, remote_directory=directory))
+        if args.base_url:
+            sources.append(dict(base_url=args.base_url, remote_directory=None))
+        if args.remote_directory:
+            sources.append(dict(base_url=None, remote_directory=args.remote_directory))
         if not sources:
             raise RuntimeError('RPM baseline requires --base-url or --remote-directory')
     else:
-        owners = getattr(args, 'owners', None) or '85'
+        owners = getattr(args, 'owners', None) or ','.join(stream.replace('.', '') for stream in STREAMS)
         owners = [owner.strip() for owner in owners.split(',') if owner.strip()]
         if getattr(args, 'owner', None):
             owners.append(args.owner)
@@ -1580,30 +1584,24 @@ def baseline(args):
                 progress('Skipped missing baseline owner: ' + location)
                 continue
             progress('Read {} baseline from {} in {:.1f}s'.format(args.type, location, time.monotonic() - started))
-            baselines.append((manifest(Path(source_args.output) / 'shared-libraries.json', False), source_args.output))
+            value = manifest(Path(source_args.output) / 'shared-libraries.json', False)
+            if args.type != 'rpm' and source['owner'] in [stream.replace('.', '') for stream in STREAMS]:
+                owner = source['owner']
+                value['stream_libraries'] = {owner[0] + '.' + owner[1:]: copy.deepcopy(value['libraries'])}
+            baselines.append((value, source_args.output))
             captured.append(source)
         abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
-        merged, divergent = merge_baselines(baselines, args.type, destination, abi_libraries)
+        merged, divergent = merge_baselines(baselines, args.type, destination, abi_libraries, independent_streams=args.type != 'rpm')
         merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
         merged['divergent_libraries'] = sorted(divergent)
         merged['baseline_origins'] = captured
-        if getattr(args, 'php_versions', None):
-            merged['unmigrated_php_streams'] = unmigrated_consumers(args)
         if not getattr(args, 'skip_consumers', False):
-            stream = getattr(args, 'consumer_stream', '8.5')
-            shared_consumer_inventory(merged, stream)
-            merged['consumer_inventory_complete'] = any(value.get('consumer_inventory_stream') == stream
-                                                        and value.get('consumer_inventory_complete') for value, _ in baselines)
+            merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete') for value, _ in baselines)
+            merged['consumer_inventory_streams'] = sorted({stream for value, _ in baselines
+                                                          for stream in value.get('consumer_inventory_streams', [])})
         if skipped:
             merged['skipped_origins'] = skipped
         write_json(destination / 'shared-libraries.json', merged)
-
-
-def shared_consumer_inventory(value, stream='8.5'):
-    for field in ['consumers', 'consumer_dependencies', 'consumer_components']:
-        canonical = value.get(field, {}).get(stream, [] if field == 'consumers' else {})
-        value[field] = {target: copy.deepcopy(canonical) for target in STREAMS}
-    value['consumer_inventory_stream'] = stream
 
 
 def cutoff_baseline(path, kind):
@@ -1616,6 +1614,9 @@ def cutoff_baseline(path, kind):
     result['architecture'] = value['architecture']
     result['consumer_versions'] = {stream: {} for stream in STREAMS}
     result['migration_cutoffs'] = value.get('migration_cutoffs', {})
+    result['shared_streams'] = [value['php_stream']] if any(
+        package['name'] == 'php-zts-cli' and any(name.startswith('php-zts-shared-runtime-') for name in package.get('provides', []))
+        for package in value['packages']) else []
     packages = value.get('published_packages', value['packages'])
     rpm = runpy.run_path(str(ROOT / 'check-rpm-upgrades'))
     for package in packages:
@@ -1662,6 +1663,8 @@ def migration_cutoffs(args):
                  and not name.endswith(('-debuginfo', '-dbgsym'))}
     required = {name for name, version in published.items()
                 if name not in inherited or native_compare(args.type, version, inherited[name]) < 0}
+    if any(args.php_version in baseline.get('shared_streams', []) for baseline in baselines):
+        required = set()
     candidates = {}
     architectures = set()
     helper = runpy.run_path(str(ROOT / 'forgejo-helper'))
@@ -1717,6 +1720,11 @@ def candidate_progress(current, previous, plan, versions, archives=None):
         if any(new.get(key) != value for key, value in expected.items()):
             return False
         if new.get('published_version') != versions[(None, package)]:
+            return False
+    for stream in previous.get('stream_libraries', {}).keys() | current.get('stream_libraries', {}).keys():
+        old = dict(previous, libraries=previous.get('stream_libraries', {}).get(stream, {}), stream_libraries={})
+        new = dict(current, libraries=current.get('stream_libraries', {}).get(stream, {}), stream_libraries={})
+        if not candidate_progress(new, old, plan, versions, archives):
             return False
     for stream in STREAMS:
         old = previous.get('consumer_versions', {}).get(stream, {})
@@ -1840,11 +1848,10 @@ def main():
     command.add_argument('--new', required=True)
     command.add_argument('--output')
     command = commands.add_parser('compare')
-    command.add_argument('--old')
+    command.add_argument('--old', required=True)
     command.add_argument('--new', required=True)
     command.add_argument('--old-root', required=True)
     command.add_argument('--new-root', required=True)
-    command.add_argument('--bootstrap', action='store_true')
     command.add_argument('--manifest-output', required=True)
     command.add_argument('--output')
     command = commands.add_parser('closure')
@@ -1857,17 +1864,15 @@ def main():
     command.add_argument('--host')
     command.add_argument('--remote-directory')
     command.add_argument('--base-url')
-    command.add_argument('--baseline-directory', action='append', default=[])
-    command.add_argument('--baseline-url', action='append', default=[])
     command.add_argument('--owner')
     command.add_argument('--owners')
     command.add_argument('--password-env')
     command.add_argument('--consumer-password-env', default='FORGEJO_PASSWORD')
-    command.add_argument('--consumer-stream', choices=STREAMS, default='8.5')
+    command.add_argument('--consumer-stream', choices=STREAMS)
+    command.add_argument('--php-versions')
     command.add_argument('--skip-consumers', action='store_true')
     command.add_argument('--abi-libraries')
     command.add_argument('--libraries', help='Download metadata only for these libraries and the runtime layout')
-    command.add_argument('--php-versions', help='Check native metadata for already-shared PHP runtime hosts')
     command.add_argument('--output', required=True)
     command = commands.add_parser('migration-cutoffs')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
@@ -1895,10 +1900,10 @@ def main():
     command.add_argument('--request')
     command.add_argument('--libraries')
     command.add_argument('--rebuilt-libraries')
+    command.add_argument('--bump', action='store_true')
+    command.add_argument('--iteration')
     command.add_argument('--php-versions')
     command.add_argument('--packages')
-    command.add_argument('--build-only', action='store_true', help='Test an unpublished subset; its plan cannot be published')
-    command.add_argument('--bootstrap', action='store_true')
     command.add_argument('--manifest-output', required=True)
     command.add_argument('--output', required=True)
     command = commands.add_parser('cohort')
@@ -1914,7 +1919,7 @@ def main():
     elif args.command == 'changes':
         write_json(args.output, {'schema': 1, 'libraries': source_changes(manifest(args.old), manifest(args.new))})
     elif args.command == 'compare':
-        updated, result = compare(manifest(args.old, False) if args.old else empty_manifest(), manifest(args.new), args.old_root, args.new_root, args.bootstrap)
+        updated, result = compare(manifest(args.old, False), manifest(args.new), args.old_root, args.new_root)
         write_json(args.manifest_output, updated)
         write_json(args.output, result)
     elif args.command == 'closure':

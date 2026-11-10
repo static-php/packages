@@ -50,7 +50,7 @@ PY, DIST_APK_PATH . '/php-zts-cli-8.4.27-r1.x86_64.apk']);
     $inspect->mustRun();
     if (in_array('--native', $argv, true)) {
         $install = new Process([getenv('CONTAINER_ENGINE') ?: 'docker', 'run', '--rm', '-i', '--network', 'none',
-            'alpine:3.21', 'sh', '-c', 'cat > /tmp/fixture.apk && apk add --no-network --allow-untrusted /tmp/fixture.apk']);
+            'alpine:3.24', 'sh', '-c', 'cat > /tmp/fixture.apk && apk add --no-network --allow-untrusted /tmp/fixture.apk']);
         $install->setInput(fopen(DIST_APK_PATH . '/php-zts-cli-8.4.27-r1.x86_64.apk', 'rb'));
         $install->mustRun();
         echo $install->getOutput();

@@ -21,8 +21,8 @@ class ApkPublicationVersions(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.name = 'php-zts-igbinary'
-        self.old = '3.2.17~rc1_82-r1'
-        self.new = '3.2.18p82-r0'
+        self.old = '3.2.17_rc1_p82-r1'
+        self.new = '3.2.18.0_p82-r0'
         self.artifacts = self.root / 'artifacts'
         self.artifacts.mkdir()
         self.module = self.artifacts / 'module.apk'
@@ -48,7 +48,7 @@ class ApkPublicationVersions(unittest.TestCase):
         self.assertNotIn('replacement_candidates', result)
 
     def test_lower_or_equal_versions_cannot_evade_migration_ordering(self):
-        for version in ['3.2.17_rc1_p82-r99', self.old, '3.2.17~rc1_82-r99']:
+        for version in ['3.2.16.0_p82-r99', self.old, '3.2.17_rc1_p82-r0']:
             self.module.write_bytes(fixtures['apk_fixture'](self.name, version))
             with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, 'must advance|Missing published'):
                 self.cutoffs()

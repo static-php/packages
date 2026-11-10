@@ -80,6 +80,7 @@ def compatibility(root, target, toolchain, build_environment):
 
 def consumer_target(target, plan, stream, request):
     return dict(target, **{"php-version": stream, "packages": "" if request.get("full") else ",".join(request["packages"]),
+                           "libraries": plan.get("libraries", []),
                            "compile": request.get("compile", True), "abi-break": bool(plan.get("abi_break")),
                            "compile-full": bool(request.get("compile", True) and request.get("compile_full", request.get("full"))),
                            "abi-rebuild-libraries": ",".join(plan.get("abi_rebuild_roots", [])),
@@ -91,14 +92,14 @@ def matrix(plans, php_versions, succeeded=None):
     includes, targets = [], []
     for path in sorted(plans.glob("*/shared-library-plan.json")):
         plan = json.loads(path.read_text())
-        target = json.loads((path.parent / "target.json").read_text())
+        target = dict(json.loads((path.parent / "target.json").read_text()), libraries=plan.get("libraries", []))
         if succeeded is not None and target["target"] not in succeeded:
             continue
         if "format_selection" in plan:
             target = dict(target, format_selection=plan["format_selection"])
         targets.append(target)
         for stream, request in sorted(plan.get("php_requests", {}).items()):
-            if stream not in php_versions and not plan.get("abi_break") and not plan.get("bootstrap"):
+            if stream not in php_versions and not plan.get("abi_break"):
                 continue
             # An empty package list means a complete PHP build only when explicitly full.
             if not request.get("full") and not request.get("packages"):
@@ -124,20 +125,18 @@ def assemble(source, destination, extension, streams=None):
         shutil.copy2(path, target)
 
 
-def runtime_checks(includes):
+def tls_checks(includes):
     groups = {}
     for entry in includes:
-        entry["runtime-checks"] = False
         entry["tls-checks"] = False
         groups.setdefault((entry["target"], entry.get("type")), []).append(entry)
     for entries in groups.values():
-        selected = max(entries, key=lambda value: tuple(map(int, value["php-version"].split("."))))
-        selected["tls-checks"] = True
-        services = [entry for entry in entries if not entry.get("library-only") and (
-            not entry.get("packages") or set(entry["packages"].split(",")) & {"cli", "cgi", "fpm", "embed", "frankenphp"})]
-        if services:
-            selected = max(services, key=lambda value: tuple(map(int, value["php-version"].split("."))))
-            selected["runtime-checks"] = True
+        affected = [entry for entry in entries if set(entry.get("libraries", [])) & {"openssl", "curl"}
+                    or not entry.get("library-only") and (not entry.get("packages")
+                        or set(entry["packages"].split(",")) & {"cli", "cgi", "fpm", "embed", "frankenphp", "curl"})]
+        if affected:
+            selected = max(affected, key=lambda value: tuple(map(int, value["php-version"].split("."))))
+            selected["tls-checks"] = True
 
 
 def build_receipt(plan, source_run_id, image, kind, php_stream=None):
@@ -216,13 +215,8 @@ def verify_upgrades(source, library_artifact, kind, streams=None):
         raise RuntimeError("Missing successful native ordinary-upgrade cells: " + ", ".join(sorted(missing)))
 
 
-def upgrade_mode(baseline, plan, stream):
-    if plan.get('php_requests', {}).get(stream, {}).get('full'):
-        return 'full'
-    cli = next((item for item in baseline.get('packages', []) if item.get('name') == 'php-zts-cli'), None)
-    if cli is None:
-        raise RuntimeError('Frozen baseline has no CLI identity')
-    return 'shared' if any(name.startswith('php-zts-lib-') for name in cli.get('requires', [])) else 'static'
+def upgrade_mode(plan, stream):
+    return 'full' if plan['php_requests'][stream].get('full') else 'shared'
 
 
 def main():
@@ -280,7 +274,6 @@ def main():
     native.add_argument("--library-only", dest="libraries_only", action="store_true")
     native.add_argument("--output", type=Path, required=True)
     mode = sub.add_parser("upgrade-mode")
-    mode.add_argument("--baseline", type=Path, required=True)
     mode.add_argument("--plan", type=Path, required=True)
     mode.add_argument("--php-stream", required=True)
     verify_native = sub.add_parser("verify-upgrades")
@@ -297,9 +290,9 @@ def main():
         archs = ["arm64" if arch == "aarch64" else "x86_64" if args.type == "glibc" and arch == "amd64" else arch for arch in archs]
         if any(arch not in (["amd64", "arm64"] if args.type == "deb" else ["x86_64", "arm64"]) for arch in archs):
             raise RuntimeError("Unsupported architecture")
-        alms = ["8"] if args.type == "glibc" else csv(args.alma_versions, ["8", "9", "10"]) if args.type == "rpm" else [""]
-        if args.type == "rpm" and any(alma not in ["8", "9", "10"] for alma in alms):
-            raise RuntimeError("Unsupported Alma version")
+        alms = csv(args.alma_versions, ["8"]) if args.type in ("glibc", "rpm") else [""]
+        if args.type in ("glibc", "rpm") and any(alma != "8" for alma in alms):
+            raise RuntimeError("Only the EL8 glibc producer is supported")
         values = [{"arch": arch, "alma": alma, "target": ("alma" + alma + "-" if alma else "") + arch} for alma in alms for arch in archs]
         images = {}
         for value in values:
@@ -344,7 +337,7 @@ def main():
         plan = json.loads(args.plan.read_text())
         requests = [consumer_target({'target': ''}, plan, stream, request) for stream, request in plan.get('php_requests', {}).items()
                     if request.get('full') or request.get('packages')]
-        runtime_checks(requests)
+        tls_checks(requests)
         selected = requests[0] if len(requests) == 1 else {}
         emit('inline-stream', selected.get('php-version', ''))
         emit('inline-request', selected)
@@ -356,7 +349,7 @@ def main():
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
             if json.loads(path.read_text()).get("libraries"):
                 includes.append(dict(target, **{"php-version": "8.5", "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
-        runtime_checks([entry for entry in includes if entry.get("type") == "apk"])
+        tls_checks([entry for entry in includes if entry.get("type") == "apk"])
         includes = [value for value in includes if value.get("payload_stream") != value["php-version"]]
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
@@ -380,7 +373,7 @@ def main():
                 if selection is not None and not (request and (request.get("full") or request.get("packages"))):
                     continue
                 packages = "" if request and request.get("full") else ",".join(request.get("packages", [])) if request else value["packages"]
-                includes.append(dict(value, type=kind, packages=packages, packaged=value.get('packaged_stream') == value['php-version'],
+                includes.append(dict(value, type=kind, packages=packages,
                                      **{"package-image": value["package_images"][kind], "library-only": False}))
         for target in target_values:
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
@@ -389,7 +382,7 @@ def main():
                 selection = plan.get("format_selection", {}).get(kind, plan)
                 if not any(request.get("full") or request.get("packages") for request in selection.get("php_requests", {}).values()) and selection.get("libraries"):
                     includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": "8.5", "packages": "", "library-only": True}))
-        runtime_checks(includes)
+        tls_checks(includes)
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
     elif args.command == "assemble":
@@ -400,7 +393,7 @@ def main():
         value = upgrade_receipt(args.report, args.plan, args.packages, args.type, args.source_run_id, args.image, args.php_stream, args.architecture, args.libraries_only)
         args.output.write_text(json.dumps(value, sort_keys=True) + "\n")
     elif args.command == "upgrade-mode":
-        print(upgrade_mode(json.loads(args.baseline.read_text()), json.loads(args.plan.read_text()), args.php_stream))
+        print(upgrade_mode(json.loads(args.plan.read_text()), args.php_stream))
     elif args.command == "verify-upgrades":
         verify_upgrades(args.source, args.library_artifact, args.type, args.php_streams.split(',') if args.php_streams else None)
     elif args.command == "prune-consumers":

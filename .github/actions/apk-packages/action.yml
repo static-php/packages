@@ -3,9 +3,6 @@ description: Reuse the current SDK, package selected PHP outputs and run native 
 runs:
     using: composite
     steps:
-        -   name: Select native validation baseline
-            shell: bash
-            run: echo "BUILD_ONLY=$(jq -r '.build_only // false' stage/shared-library-plan.json)" >> "$GITHUB_ENV"
         -   name: Compute sealed PHP cache identity
             if: env.LIBRARY_ONLY != 'true'
             id: payload-cache-key
@@ -29,7 +26,6 @@ runs:
                 seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
                 path: php-payload-cache.tar.zst
         -   name: Freeze actual published baseline
-            if: env.BUILD_ONLY != 'true'
             uses: ./.github/actions/native-baseline
         -   name: Build and test PHP packages
             if: env.LIBRARY_ONLY != 'true'
@@ -45,25 +41,15 @@ runs:
                 key: ${{ steps.payload-cache-key.outputs.cache-key }}
                 seed-key: ${{ steps.payload-cache-key.outputs.seed-key }}
                 path: php-payload-cache-ready.tar.zst
-        -   name: Prepare real library revision for service validation
-            if: env.RUNTIME_CHECKS == 'true' && env.BUILD_ONLY != 'true'
-            shell: bash
-            run: bash .github/actions/shared-libraries/run.sh prepare-runtime
-        -   name: Verify unpublished package installation
-            if: env.BUILD_ONLY == 'true'
-            shell: bash
-            run: python3 .github/actions/shared-libraries/glibc.py test-packages
         -   name: Verify ordinary APK upgrade
-            if: env.BUILD_ONLY != 'true'
             shell: bash
             run: |
                 args=()
-                if [[ "$RUNTIME_CHECKS" == true ]]; then args+=(--services --library-artifacts stage/runtime-libraries); fi
                 if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
                 profile=auto
                 if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                 else
-                    mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --baseline stage/published-baseline/baseline.json --plan "stage/shared-library-plan.json" --php-stream "$PHPV")
+                    mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/shared-library-plan.json" --php-stream "$PHPV")
                     if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
                 fi
                 python3 tests/migration-upgrade-containers.py --type apk --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/apk --baseline-dir stage/published-baseline --report dist/apk/native-upgrade-receipt.json --profile "$profile" "${args[@]}"
