@@ -621,7 +621,7 @@ jobs:
             -   name: Verify unpublished package installation
                 if: env.BUILD_ONLY == 'true'
                 run: python3 .github/actions/shared-libraries/glibc.py test-packages
-            -   name: Verify ordinary static to shared upgrade
+            -   name: Verify ordinary published upgrade
                 if: env.BUILD_ONLY != 'true'
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
