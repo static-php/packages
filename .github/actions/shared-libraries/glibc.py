@@ -87,8 +87,8 @@ def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None)
 
 
 def publication_baseline(kind, directory, plan):
-    captured = plan.get('baseline_states', [])
-    libraries = set().union(*(set(value.get('libraries', {})) for value in captured)) if captured else None
+    scopes = [value.get('metadata_scope') for value in plan.get('baseline_states', [])]
+    libraries = set().union(*(set(scope) for scope in scopes)) if scopes and all(scope is not None for scope in scopes) else None
     baseline(kind, directory, libraries=libraries)
 
 
