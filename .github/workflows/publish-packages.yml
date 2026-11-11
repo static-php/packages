@@ -40,6 +40,7 @@ permissions:
 jobs:
     prepare:
         runs-on: ubuntu-24.04
+        continue-on-error: ${{ inputs.mirror_run_id != '' }}
         outputs:
             matrix: ${{ steps.matrix.outputs.matrix }}
             any: ${{ steps.matrix.outputs.any }}

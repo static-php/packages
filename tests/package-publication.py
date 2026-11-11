@@ -173,15 +173,21 @@ class Publication(unittest.TestCase):
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
+                    output = io.StringIO()
                     with patch.object(publication, 'prune_consumers'), patch.object(publication, 'verify_upgrades', side_effect=verify), \
                             patch.object(publication, 'assemble'), patch.object(publication, 'run_logged', side_effect=run), \
-                            patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(io.StringIO()):
+                            patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(root / 'summary')}), contextlib.redirect_stdout(output):
                         self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
+                        self.assertIn('::error::', output.getvalue())
                         primary_summary = (root / 'summary').read_text()
                         self.assertIn('Cannot verify example: connection reset', primary_summary)
                         self.assertFalse(any(phase == 'upload-2' for _, phase in events))
                         if kind != 'rpm':
+                            output.seek(0)
+                            output.truncate()
                             self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
+                            self.assertIn('::warning::', output.getvalue())
+                            self.assertNotIn('::error::', output.getvalue())
                             mirrored = [stream for stream, phase in events if phase == 'upload-2']
                             self.assertEqual(mirrored, ['8.5', '8.6'])
                             self.assertLess(events.index(('8.6', 'upload-1')), events.index(('8.5', 'upload-2')))
@@ -423,6 +429,16 @@ class WorkflowContracts(unittest.TestCase):
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / '.github/workflows/publish-packages.yml').read_text())
         self.publisher = yaml.safe_load((ROOT / '.github/workflows/publish-package-cohort.yml').read_text())
+
+    def test_only_secondary_mirror_failures_are_non_blocking(self):
+        self.assertEqual(self.workflow['jobs']['prepare']['continue-on-error'], "${{ inputs.mirror_run_id != '' }}")
+        for name in ['publish-glibc', 'publish-apk']:
+            job = self.publisher['jobs'][name]
+            self.assertEqual(job['continue-on-error'], '${{ inputs.mirror }}')
+            publish = next(step for step in job['steps'] if step['name'] == 'Publish each validated PHP stream independently')
+            self.assertFalse(publish.get('continue-on-error', False))
+            diagnostics = next(step for step in job['steps'] if step['name'] == 'Upload publication diagnostics')
+            self.assertEqual(diagnostics['if'], '${{ !cancelled() }}')
 
     def test_format_dispatch_and_existing_builds_use_the_same_publisher(self):
         inputs = self.workflow[True]['workflow_dispatch']['inputs']
