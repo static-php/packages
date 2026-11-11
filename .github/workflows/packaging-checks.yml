@@ -46,6 +46,7 @@ jobs:
                         git config --global --add safe.directory /build
                         composer install --no-interaction --prefer-dist --no-progress
                         php tests/builder-tool-cache.php
+                        php tests/attr-install.php
                         php tests/build-payload.php
                         python3 tests/glibc-pipeline.py \
                             Pipeline.test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild \
