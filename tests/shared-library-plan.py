@@ -701,6 +701,35 @@ class NativeAbiComparison(unittest.TestCase):
         command.extend(extra_flags)
         subprocess.check_call(command + ['-o', str(root / 'lib/libfixture.so.1'), str(root / 'source.c')])
 
+    def test_liburing_statx_reserved_padding_changes_preserve_public_layout(self):
+        prefix = 'unsigned int stx_mask; unsigned int stx_blksize; unsigned char public_data[136];'
+        padding = 'unsigned long long __pad1[14];'
+        fields = ('unsigned long long stx_mnt_id; unsigned int stx_dio_mem_align, stx_dio_offset_align; '
+                  'unsigned long long stx_subvol; unsigned int stx_atomic_write_unit_min, stx_atomic_write_unit_max, '
+                  'stx_atomic_write_segments_max; unsigned int __pad1[1]; unsigned long long __pad2[9];')
+        source = lambda members: 'struct statx {' + members + '}; void fixture(struct statx *value) { value->stx_mask = 1; }'
+        cases = [
+            ('padding', prefix + fields, 'liburing-ffi.so.2', True),
+            ('moved-public-field', prefix.replace('stx_mask; unsigned int stx_blksize', 'stx_blksize; unsigned int stx_mask') + fields, 'liburing-ffi.so.2', False),
+            ('changed-public-type', prefix.replace('unsigned int stx_mask', 'unsigned long long stx_mask').replace('public_data[136]', 'public_data[132]') + fields, 'liburing-ffi.so.2', False),
+            ('changed-size', prefix + fields.replace('__pad2[9]', '__pad2[10]'), 'liburing-ffi.so.2', False),
+            ('other-library', prefix + fields, 'libfixture.so.1', False),
+        ]
+        for name, members, soname, compatible in cases:
+            with self.subTest(case=name), TemporaryDirectory(prefix='shared-library-statx-') as temporary:
+                old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
+                for directory, body in [(old_root, prefix + padding), (new_root, members)]:
+                    self.build(directory, source(body), extra_flags=['-Wl,-soname,' + soname])
+                    planner['dump_abi'](directory, 'fixture', library())
+                paths = [directory / 'usr/share/php-zts/libraries/abi/fixture/libfixture.so.1.xml' for directory in [old_root, new_root]]
+                original = [path.read_bytes() for path in paths]
+                if compatible:
+                    self.assertEqual(planner['abi_difference'](*paths), 'compatible')
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'Ambiguous ABI'):
+                        planner['abi_difference'](*paths)
+                self.assertEqual([path.read_bytes() for path in paths], original)
+
     def test_native_compatible_addition_preserves_generation(self):
         with TemporaryDirectory(prefix='shared-library-abi-') as temporary:
             old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'

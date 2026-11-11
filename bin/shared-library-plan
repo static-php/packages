@@ -432,6 +432,48 @@ def dump_abi(root, identifier, library, context=None):
     library['abi_dump_hashes'] = {name: file_sha256(rooted(root, path)) for name, path in dumps.items()}
 
 
+def statx_padding_comparison(previous, current):
+    trees, declarations = [], []
+    try:
+        soname = None
+        for path in [previous, current]:
+            with Path(path).open('rb') as source:
+                _, corpus = next(ET.iterparse(source, events=('start',)))
+                name = corpus.get('soname', '')
+                if not re.fullmatch(r'liburing(?:-ffi)?\.so\.\d+', name) or soname not in (None, name):
+                    return None
+                soname = name
+            tree = ET.parse(path)
+            matches = [entry for entry in tree.iter('class-decl') if entry.get('name') == 'statx'
+                       and entry.get('is-struct') == 'yes' and entry.get('size-in-bits') == '2048']
+            if len(matches) != 1:
+                return None
+            trees.append(tree)
+            declarations.append(matches[0])
+        members = declarations[0].findall('data-member')
+        padding = max(members, key=lambda entry: int(entry.attrib['layout-offset-in-bits']))
+        variable = padding.find('var-decl')
+        if variable is None or not re.fullmatch(r'__pad\d+', variable.get('name', '')):
+            return None
+        types = {entry.get('id'): entry for entry in trees[0].iter() if entry.get('id')}
+        array = types[variable.attrib['type-id']]
+        start = int(padding.attrib['layout-offset-in-bits'])
+        # Linux statx keeps a 256-byte buffer with reserved tail space after its original 144-byte fields.
+        if array.tag != 'array-type-def' or start < 1152 or start + int(array.attrib['size-in-bits']) != 2048:
+            return None
+        for declaration in declarations:
+            for member in declaration.findall('data-member'):
+                if int(member.attrib['layout-offset-in-bits']) >= start:
+                    declaration.remove(member)
+    except (OSError, ET.ParseError, KeyError, ValueError, StopIteration):
+        return None
+    with tempfile.TemporaryDirectory(prefix='spp-statx-abi-') as temporary:
+        paths = [Path(temporary) / name for name in ['previous.xml', 'current.xml']]
+        for tree, path in zip(trees, paths):
+            tree.write(path, encoding='utf-8')
+        return run(['abidiff', '--no-default-suppression', '--no-added-syms', *map(str, paths)])
+
+
 def abi_difference(previous, current):
     result = run(['abidiff', '--no-default-suppression', str(previous), str(current)])
     if result.returncode == 0:
@@ -444,6 +486,11 @@ def abi_difference(previous, current):
         additive = run(['abidiff', '--no-default-suppression', '--no-added-syms', str(previous), str(current)])
         if additive.returncode == 0:
             return 'compatible'
+        if additive.returncode == 4:
+            padding = statx_padding_comparison(previous, current)
+            if padding is not None and padding.returncode == 0:
+                progress('Compatible liburing statx additions within reserved tail padding')
+                return 'compatible'
         raise RuntimeError('Ambiguous ABI changes require review: ' + result.stdout.strip())
     raise RuntimeError('Unrecognized abidiff result: ' + str(result.returncode))
 
