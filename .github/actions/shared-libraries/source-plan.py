@@ -405,7 +405,7 @@ def stream_artifacts(artifacts, metadata, stream):
 
 def plan(previous, current, previous_meta, current_meta, force=False, configuration="", library_ids=None, build_inputs=None,
          package_configuration=None, components=None, library_package_configuration=None, variants=None, compiled_in=None, active=None,
-         format_package_configuration=None):
+         format_package_configuration=None, automatic=False):
     compiled_in = CORE_EXTENSIONS if compiled_in is None else compiled_in
     changed = sorted(key for key in previous.keys() | current.keys() if stable_artifact(previous.get(key)) != stable_artifact(current.get(key)))
     package_only = ["pie"] if any(previous_meta.get(key) != current_meta.get(key) for key in ['pie_version', 'pie_sha256']) else []
@@ -419,7 +419,7 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
         required = managed | set(build_inputs["library_tool_artifacts"])
         excluded = set(build_inputs["irrelevant_artifacts"]) - required
         library_build_inputs = [key for key in changed if key not in managed and key not in excluded]
-    full = force or previous_meta.get("shared_configuration") != configuration
+    full = force or (not automatic and previous_meta.get("shared_configuration") != configuration)
     requests, package_requests = {}, {}
     package_change = package_configuration is not None and previous_meta.get("shared_package_configuration") != package_configuration
     for stream in STREAMS:
@@ -489,7 +489,7 @@ def reconcile(original, sources, metadata, configuration, packaging, components,
                      library_ids=set(inventory['managed_library_artifacts']),
                      library_package_configuration=None if automatic else library_packaging, variants=None if automatic else variants,
                      compiled_in=compiled_in, active=active,
-                     format_package_configuration=None if automatic else format_package_configuration)
+                     format_package_configuration=None if automatic else format_package_configuration, automatic=automatic)
     for field in ('requests', 'package_requests'):
         for stream, request in original.get(field, {}).items():
             if automatic and field == 'package_requests':
@@ -548,7 +548,7 @@ def main():
             original = plan(read('.download-state/lock.prev.json'), read('downloads/.cache.json'),
                             read('.download-state/meta.prev.json'), metadata, force=original.get('force_full', False),
                             configuration=configuration, library_ids=library_ids, build_inputs=inventory,
-                            components=components, compiled_in=core_components(root), active=active_components(root))
+                            components=components, compiled_in=core_components(root), active=active_components(root), automatic=True)
         request = reconcile(original, read('downloads/.cache.json'), metadata,
                             configuration, packaging, components, inventory, library_packaging, variants, core_components(root), active_components(root),
                             format_package_identities(root), automatic=True)
@@ -558,7 +558,7 @@ def main():
         return
     request = plan(read(".download-state/lock.prev.json"), read("downloads/.cache.json"), read(".download-state/meta.prev.json"), metadata,
                    force=args.force_full, configuration=configuration, library_ids=library_ids, build_inputs=inventory,
-                   components=components, compiled_in=core_components(root), active=active_components(root))
+                   components=components, compiled_in=core_components(root), active=active_components(root), automatic=True)
     request["build_inputs"] = inventory
     metadata["shared_configuration"] = configuration
     metadata["shared_package_configuration"] = packaging

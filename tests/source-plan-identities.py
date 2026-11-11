@@ -2,11 +2,13 @@
 """Compile and packaging source identities must select independent work."""
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,85 @@ spec.loader.exec_module(source)
 
 
 class SourceIdentities(unittest.TestCase):
+    def test_automatic_php_release_update_ignores_builder_changes(self):
+        for builder in ['Dockerfile.rhel', 'Dockerfile.alpine']:
+            for release_changed, force in [(False, False), (True, False), (True, True)]:
+                with self.subTest(builder=builder, release_changed=release_changed, force=force), TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.actor_template(root, ['curl', 'zip'])
+                    path = root / builder
+                    path.write_text('old builder')
+                    previous = self.metadata(root)
+                    previous['php_versions']['8.6'] = '8.6.0RC5'
+                    downloads = root / 'downloads'
+                    downloads.mkdir()
+                    (downloads / 'php-8.6.0RC5.tar.gz').write_bytes(b'RC5 source')
+                    previous['php_source_hashes'] = source.php_archive_inputs(root, previous)
+                    current = json.loads(json.dumps(previous))
+                    if release_changed:
+                        current['php_versions']['8.6'] = '8.6.0RC6'
+                        (downloads / 'php-8.6.0RC6.tar.gz').write_bytes(b'RC6 source')
+                    state = root / '.download-state'
+                    state.mkdir()
+                    for destination, value in [(downloads / '.spc-meta.json', current), (state / 'meta.prev.json', previous),
+                                               (downloads / '.cache.json', {}), (state / 'lock.prev.json', {})]:
+                        destination.write_text(json.dumps(value))
+                    path.write_text('new builder')
+                    inventory = {'libraries': {}, 'managed_library_artifacts': [], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
+                    arguments = ['source-plan.py', '--root', str(root)] + (['--force-full'] if force else [])
+                    output = io.StringIO()
+                    with mock.patch('sys.argv', arguments), mock.patch('sys.stdout', output), \
+                            mock.patch.object(source.subprocess, 'check_output', return_value=json.dumps(inventory)):
+                        source.main()
+                    request = json.loads((downloads / 'build-plan.json').read_text())
+                    expected = source.STREAMS if force else ['8.6'] if release_changed else []
+                    self.assertEqual(request['requests'], {stream: {'full': True, 'packages': []} for stream in expected})
+                    self.assertEqual(request['package_requests'], {})
+                    self.assertEqual(request['libraries'], [])
+                    self.assertEqual(request['library_build_inputs'], [])
+                    self.assertIn('any_change=' + str(bool(expected)).lower(), output.getvalue())
+                    self.assertNotEqual(request['configuration'], previous['shared_configuration'])
+
+    def test_automatic_reconciliation_keeps_php_release_selection_after_builder_change(self):
+        for comparison_available in [True, False]:
+            with self.subTest(comparison_available=comparison_available), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.actor_template(root, ['curl', 'zip'])
+                builder = root / 'Dockerfile.alpine'
+                builder.write_text('old builder')
+                previous = self.metadata(root)
+                previous['php_versions']['8.6'] = '8.6.0RC5'
+                current = json.loads(json.dumps(previous))
+                current['php_versions']['8.6'] = '8.6.0RC6'
+                original = source.plan({}, {}, previous, current, configuration=source.identity(root), automatic=True)
+                original['source_comparison_available'] = comparison_available
+                if not comparison_available:
+                    original['requests'] = {stream: {'full': True, 'packages': []} for stream in source.STREAMS}
+                downloads = root / 'downloads'
+                downloads.mkdir()
+                state = root / '.download-state'
+                state.mkdir()
+                for destination, value in [(downloads / '.spc-meta.json', current), (state / 'meta.prev.json', previous),
+                                           (downloads / '.cache.json', {}), (state / 'lock.prev.json', {}),
+                                           (downloads / 'build-plan.json', original),
+                                           (downloads / '.source-snapshot.json', {'repository': 'org/repo', 'run_id': '123'})]:
+                    destination.write_text(json.dumps(value))
+                snapshot = {path.name: path.read_bytes() for path in downloads.iterdir()}
+                builder.write_text('new builder')
+                inventory = {'libraries': {}, 'managed_library_artifacts': [], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
+                output = root / 'stage/effective-source-plan.json'
+                restore = mock.Mock()
+                arguments = ['source-plan.py', '--root', str(root), '--reconcile', '--output', str(output)]
+                with mock.patch('sys.argv', arguments), mock.patch('sys.stdout', io.StringIO()), \
+                        mock.patch.object(source.subprocess, 'check_output', return_value=json.dumps(inventory)), \
+                        mock.patch.object(source.runpy, 'run_path', return_value={'restore': restore}):
+                    source.main()
+                effective = json.loads(output.read_text())
+                self.assertEqual(effective['requests'], {'8.6': {'full': True, 'packages': []}})
+                self.assertEqual(effective['package_requests'], {})
+                self.assertEqual(restore.call_count, int(not comparison_available))
+                self.assertEqual({path.name: path.read_bytes() for path in downloads.iterdir()}, snapshot)
+
     def test_two_changed_libraries_do_not_select_frankenphp_or_php_streams(self):
         previous = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
                     'shared_configuration': 'build', 'shared_components': {},
