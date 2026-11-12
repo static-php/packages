@@ -232,6 +232,29 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual([record['owner'] for record in records], list(publisher['STREAM_OWNERS']))
         self.assertEqual(listing.call_count, 5)
 
+    def test_mirror_dependency_versions_remain_scoped_to_the_selected_owner(self):
+        cohort = self.root / 'cohort'
+        baseline = cohort / 'shared-libs-apk-x86_64/baseline'
+        libraries = {}
+        for stream, revision in [('8.3', 1), ('8.6', 8)]:
+            owner = baseline / 'owners' / stream
+            owner.mkdir(parents=True)
+            archive = self.archive(name='php-zts-lib-zlib', version='1.3.1-r' + str(revision))
+            shutil.copy2(archive, owner / archive.name)
+            libraries[stream] = {'zlib': {'published_archive': archive.name, 'published_version': '1.3.1-r' + str(revision),
+                                        'published_archive_sha256': helper['archive_sha256'](archive)}}
+            (owner / 'shared-libraries.json').write_text(json.dumps({'architecture': 'x86_64', 'libraries': libraries[stream]}))
+        (baseline / 'shared-libraries.json').write_text(json.dumps({'architecture': 'x86_64',
+            'libraries': libraries['8.6'], 'stream_libraries': libraries}))
+        destination = self.root / 'mirror'
+        destination.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper, ['83'])
+        self.assertEqual({helper['package_metadata'](p, 'alpine')[:2] for p in destination.glob('*.apk')},
+                         {('php-zts-lib-zlib', '1.3.1-r1')})
+        with self.assertRaisesRegex(RuntimeError, 'Missing retained library owner baseline'):
+            publisher['stage_mirror_dependencies'](cohort, destination, 'apk', helper, ['84'])
+
     def test_mirror_includes_retained_primary_libraries_without_replacing_candidates(self):
         cohort = self.root / 'cohort'
         baseline = cohort / 'shared-libs-apk-x86_64/baseline'

@@ -529,6 +529,29 @@ class SharedLibraryPlan(unittest.TestCase):
                 archive('1.0-r1')
                 with self.assertRaisesRegex(RuntimeError, 'package-version floor'):
                     planner['cohort'](args)
+                archive('1.0-r2')
+                plan.update(type='apk', library_streams=['8.2', '8.5'], published_versions={'fixture': '1.0-r8'},
+                            baseline_states=[{'stream_libraries': {
+                                '8.2': {'fixture': dict(entry, published_version='1.0-r1')},
+                                '8.5': {'fixture': dict(entry, published_version='1.0-r8')}}}])
+                (temporary / 'plan.json').write_text(json.dumps(plan))
+                args.php_streams = '8.2'
+                planner['cohort'](args)
+                args.php_streams = '8.5'
+                with self.assertRaisesRegex(RuntimeError, 'new package revision'):
+                    planner['cohort'](args)
+                args.php_streams = '8.2'
+                plan['baseline_states'][0]['stream_libraries']['8.2']['fixture'].update(
+                    published_version='1.0-r2', published_archive_sha256=planner['file_sha256'](artifacts / 'fixture.apk'))
+                (temporary / 'plan.json').write_text(json.dumps(plan))
+                with self.assertRaisesRegex(RuntimeError, 'new package revision'):
+                    planner['cohort'](args)
+                plan['publication_retries'] = {'fixture': {'published_version': '1.0-r8'}}
+                (temporary / 'plan.json').write_text(json.dumps(plan))
+                planner['cohort'](args)
+                args.php_streams = ''
+                with self.assertRaisesRegex(RuntimeError, 'exactly one PHP repository owner'):
+                    planner['cohort'](args)
 
 
     def test_unchanged_manual_library_without_bump_does_not_repackage(self):
@@ -568,7 +591,7 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertEqual(plan['libraries'], ['fixture'])
 
 
-    def test_common_library_dependencies_accept_unchanged_stream_revisions(self):
+    def test_common_library_manifest_does_not_choose_a_repository_revision(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             previous, current = manifest(), manifest()
@@ -588,7 +611,73 @@ class SharedLibraryPlan(unittest.TestCase):
                 planner['prepare'](args)
             self.assertEqual(json.loads(Path(args.output).read_text())['libraries'], [])
             annotated = json.loads(Path(args.manifest_output).read_text())
-            self.assertEqual(annotated['libraries']['fixture']['package_versions']['apk'], '1.0-r1')
+            self.assertNotIn('apk', annotated['libraries']['fixture']['package_versions'])
+            args.libraries, args.php_versions, args.bump = 'fixture', '8.5', True
+            with patch.dict(namespace, {'native_compare': lambda kind, left, right: (left > right) - (left < right)}):
+                planner['prepare'](args)
+            plan = json.loads(Path(args.output).read_text())
+            self.assertEqual(plan['library_streams'], ['8.5'])
+            self.assertEqual(plan['published_versions'], {})
+            self.assertEqual(planner['published_libraries'](plan, '8.5')['fixture']['published_version'], '1.0-r1')
+            self.assertFalse(any(request['full'] or request['packages'] for request in plan['php_requests'].values()))
+
+    def test_only_consumers_with_changed_owner_sonames_rebuild(self):
+        previous = manifest({'fixture': library(soname='libfixture.so.2')})
+        previous['stream_libraries'] = {'8.2': {'fixture': library()}, '8.5': copy.deepcopy(previous['libraries'])}
+        previous['consumers'] = {stream: ['php-zts-cli'] for stream in ('8.2', '8.5')}
+        previous['consumer_dependencies'] = {stream: {'php-zts-cli': ['fixture']} for stream in ('8.2', '8.5')}
+        previous['consumer_inventory_complete'] = True
+        requests = planner['abi_consumers'](previous, ['fixture'], manifest({'fixture': library(soname='libfixture.so.2')}))
+        self.assertEqual(requests['8.2']['packages'], ['cli'])
+        self.assertEqual(requests['8.5']['packages'], [])
+        self.assertFalse(requests['8.5']['full'])
+
+    def test_owner_retry_uses_only_its_archive_and_dependency_floor(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            current = manifest()
+            current['libraries']['fixture']['package_versions'] = {'apk': '1.0-r8'}
+            baseline = directory / 'baseline'
+            states = {}
+            for stream, revision in [('8.2', 1), ('8.5', 8)]:
+                owner = baseline / 'owners' / stream
+                owner.mkdir(parents=True)
+                archive = owner / ('fixture-' + str(revision) + '.apk')
+                archive.write_bytes(('owner-' + stream).encode())
+                entry = dict(library(), published_version='1.0-r' + str(revision),
+                             published_archive=archive.name, published_archive_sha256=planner['file_sha256'](archive))
+                state = dict(manifest({'fixture': entry}), stream_libraries={stream: {'fixture': entry}})
+                (owner / 'shared-libraries.json').write_text(json.dumps(state))
+                states[stream] = entry
+            merged = dict(manifest({'fixture': states['8.5']}), stream_libraries={stream: {'fixture': entry} for stream, entry in states.items()})
+            (baseline / 'shared-libraries.json').write_text(json.dumps(merged))
+            plan = {'schema': 1, 'type': 'apk', 'libraries': ['fixture'], 'library_streams': ['8.2', '8.5'],
+                    'baseline_states': [merged], 'expected_libraries': {'fixture': library()},
+                    'publication_retries': {'fixture': states['8.5']}}
+            (directory / 'plan.json').write_text(json.dumps(plan))
+            (directory / 'current.json').write_text(json.dumps(current))
+            args = argparse.Namespace(plan=str(directory / 'plan.json'), manifest=str(directory / 'current.json'),
+                                      baseline_manifest=[str(baseline / 'shared-libraries.json')], php_stream='8.2',
+                                      destination=str(directory / 'staged'), manifest_output=str(directory / 'manifest.json'),
+                                      output=str(directory / 'retry.json'), layout_source_hash='fixture')
+            with patch.dict(namespace, {'archive_identity': lambda path, kind: ('php-zts-lib-fixture', '1.0-r1', 'x86_64'),
+                                        'native_compare': lambda kind, left, right: (left > right) - (left < right)}):
+                planner['stage_publication_retries'](args)
+                self.assertEqual((directory / 'staged/fixture-1.apk').read_bytes(), b'owner-8.2')
+                self.assertFalse((directory / 'staged/fixture-8.apk').exists())
+                self.assertEqual(json.loads((directory / 'manifest.json').read_text())['libraries']['fixture']['package_versions']['apk'], '1.0-r1')
+                plan.update(libraries=[], publication_retries={}, php_requests={'8.2': {'full': True}})
+                plan.pop('library_streams')
+                (directory / 'plan.json').write_text(json.dumps(plan))
+                args.destination = str(directory / 'php-only')
+                planner['stage_publication_retries'](args)
+                self.assertEqual(json.loads((directory / 'manifest.json').read_text())['libraries']['fixture']['package_versions']['apk'], '1.0-r1')
+                self.assertTrue(json.loads((directory / 'retry.json').read_text())['layout_required'])
+                state = json.loads((baseline / 'owners/8.2/shared-libraries.json').read_text())
+                state['architecture'] = 'aarch64'
+                (baseline / 'owners/8.2/shared-libraries.json').write_text(json.dumps(state))
+                with self.assertRaisesRegex(RuntimeError, 'different architecture'):
+                    planner['stage_publication_retries'](args)
 
     def test_retained_unpublished_subset_cannot_be_promoted(self):
         with TemporaryDirectory() as temporary:

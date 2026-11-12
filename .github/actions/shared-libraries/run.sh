@@ -127,7 +127,6 @@ case "$command" in
         composer install --no-interaction --prefer-dist --no-progress
         cp stage/shared-libraries.json buildroot/shared-libraries.json
         mkdir -p dist/"$TYPE"
-        if [[ -d stage/libraries ]]; then find stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;; fi
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi
         flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE" --debuginfo)
         [[ -n "$PACKAGES" ]] && flags+=(--packages="$PACKAGES")
@@ -139,8 +138,10 @@ case "$command" in
             mv php-payload-cache-export.tar.zst php-payload-cache-ready.tar.zst
         fi
         export SPP_BASELINE_MANIFESTS
-        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,pathlib; print(json.dumps([str(p.resolve()) for pattern in ["baseline/shared-libraries.json", "published-baseline/baseline.json"] for p in pathlib.Path("stage").glob(pattern)]))')
+        SPP_BASELINE_MANIFESTS=$(python3 -c 'import json,os,pathlib; root=pathlib.Path("stage"); owner=root/"baseline/owners"/os.environ["PHPV"]; baseline=owner if owner.is_dir() else root/"baseline"; print(json.dumps([str(p.resolve()) for p in [baseline/"shared-libraries.json", root/"published-baseline/baseline.json"] if p.is_file()]))')
         export SPP_SHARED_LIBRARY_PLAN=stage/shared-library-plan.json
+        export SPP_NATIVE_INVENTORY="stage/native-inventories/$PHPV.json"
+        export SPP_FORGEJO_OWNER="${PHPV//./}"
         php bin/spp package "${flags[@]}"
         python3 .github/actions/shared-libraries/workflow.py receipt --kind consumer --php-stream "$PHPV" \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \

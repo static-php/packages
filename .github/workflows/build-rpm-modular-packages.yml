@@ -249,7 +249,6 @@ jobs:
                 id: classification
                 run: |
                     bash .github/actions/shared-libraries/run.sh glibc-classify
-                    bash .github/actions/shared-libraries/run.sh native-inventories
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
             -   name: Build single PHP stream in the restored SDK workspace
@@ -600,8 +599,8 @@ jobs:
                     path: library-stage
             -   name: Copy matching library archives
                 run: |
-                    mkdir -p "dist/$TYPE" library-stage/libraries
-                    find library-stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;
+                    python3 .github/actions/shared-libraries/workflow.py stage-libraries --source library-stage \
+                        --destination "dist/$TYPE" --type "$TYPE" --php-stream "$PHPV" --manifest-output "stage/$TYPE/shared-libraries.json"
             -   name: Prepare native baseline comparison tools
                 run: |
                     sudo apt-get update

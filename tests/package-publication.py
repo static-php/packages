@@ -280,6 +280,23 @@ class Publication(unittest.TestCase):
         names = {a['name'] for a in self.artifacts if str(a['id']) in ids}
         self.assertEqual(names, {'shared-libs-deb-alma8-arm64', 'shared-consumers-deb-alma8-arm64-php8.6'})
 
+    def test_owner_library_only_publication_requires_each_owners_validation_artifact(self):
+        self.plan(selection={'libraries': ['zlib'], 'library_streams': ['8.3', '8.6'],
+                             'php_requests': {'8.6': {'packages': ['curl']}}})
+        self.artifact('shared-validation-deb-alma8-x86_64-php8.3')
+        selected, = publication.publication_matrix(self.state('deb'), self.plans)
+        ids = set(selected['artifact-ids'].split(','))
+        self.assertEqual({a['name'] for a in self.artifacts if str(a['id']) in ids}, {
+            'shared-libs-deb-alma8-x86_64', 'shared-validation-deb-alma8-x86_64-php8.3',
+            'shared-consumers-deb-alma8-x86_64-php8.6'})
+        selected, = publication.publication_matrix(self.state('deb'), self.plans, selected_php='8.3')
+        ids = set(selected['artifact-ids'].split(','))
+        self.assertEqual({a['name'] for a in self.artifacts if str(a['id']) in ids}, {
+            'shared-libs-deb-alma8-x86_64', 'shared-validation-deb-alma8-x86_64-php8.3'})
+        self.artifacts = [a for a in self.artifacts if 'shared-validation-deb-' not in a['name']]
+        with self.assertRaisesRegex(RuntimeError, 'No complete retained'):
+            publication.publication_matrix(self.state('deb'), self.plans, selected_php='8.3')
+
     def test_selected_stream_retry_never_publishes_other_streams(self):
         source = self.plans / 'cohort'
         library = source / 'shared-libs-apk-arm64'

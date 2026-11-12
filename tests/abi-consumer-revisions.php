@@ -110,10 +110,12 @@ try {
     if ($type === 'rpm') {
         $pages = ['https://fixture.invalid/x86_64/el8/' => [200, "php-zts-imagick-{$moduleVersion}-29.x86_64.rpm"]];
     } else {
-        $kind = $type === 'deb' ? 'debian' : 'alpine';
-        $url = "https://fixture.invalid/api/v1/packages/86?type={$kind}&q=php-zts-imagick&limit=1000&page=";
-        $pages = [$url . '1' => [200, json_encode([['name' => 'php-zts-imagick', 'version' => $release($moduleVersion, 29)]])],
-                  $url . '2' => [200, '[]']];
+        $inventory = $directory . '/inventory.json';
+        file_put_contents($inventory, json_encode(['schema' => 1, 'type' => $type, 'php_stream' => '8.6',
+            'architecture' => 'x86_64', 'inventory' => [['name' => 'php-zts-imagick',
+                'version' => $release($moduleVersion, 29), 'architecture' => 'x86_64']]], JSON_THROW_ON_ERROR));
+        putenv('SPP_NATIVE_INVENTORY=' . $inventory);
+        $pages = [];
     }
     (new ReflectionProperty(CreatePackages::class, 'httpCache'))->setValue(null, $pages);
     $bump->setValue(null, true);
@@ -125,6 +127,7 @@ try {
     }
     echo 'Passed ' . $type . " revision preservation for ABI consumers, local outputs and FrankenPHP, plus explicit bumps/overrides.\n";
 } finally {
+    putenv('SPP_NATIVE_INVENTORY');
     $previousBaseline === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previousBaseline);
     $previousPlan === false ? putenv('SPP_SHARED_LIBRARY_PLAN') : putenv('SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     $runtime->setValue(null, $previousRuntime);

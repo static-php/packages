@@ -153,11 +153,11 @@ class Pipeline(unittest.TestCase):
             stage = Path(directory)
             plan = {'php_requests': {stream: {'full': True} for stream in ('8.4', '8.5', '8.6')}}
             glibc.write(stage / 'rpm/shared-library-plan.json', plan)
-            glibc.write(stage / 'deb/shared-library-plan.json', plan)
+            glibc.write(stage / 'deb/shared-library-plan.json', dict(plan, library_streams=['8.2', '8.3']))
             with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path', return_value=freezer), \
                     patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='x86_64', PHP_VERSIONS='8.5,8.6'):
                 glibc.capture_native_inventories()
-            self.assertEqual(captured, [('rpm', '8.5'), ('rpm', '8.6'), ('deb', '8.5'), ('deb', '8.6')])
+            self.assertEqual(captured, [('rpm', '8.5'), ('rpm', '8.6'), ('deb', '8.2'), ('deb', '8.3'), ('deb', '8.5'), ('deb', '8.6')])
             snapshots = stage / 'common/rpm/native-inventories'
             self.assertNotIn('error', glibc.read(snapshots / '8.5.json'))
             self.assertIn('HTTP 522', glibc.read(snapshots / '8.6.json')['error'])
@@ -225,6 +225,22 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(plan['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
         self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd'])
         self.assertEqual(plan['published_consumers']['8.4']['php-zts-mysqlnd'], '8.4.27-r2')
+
+    def test_native_bindings_do_not_restore_other_owners_soname_changes(self):
+        library = lambda soname: {'elf': {'lib/' + soname: {'soname': soname}}, 'dependencies': []}
+        plan = {'type': 'apk', 'libraries': ['first', 'second'], 'abi_rebuild_roots': ['first', 'second'],
+                'expected_libraries': {'first': library('libfirst.so.2'), 'second': library('libsecond.so.2')},
+                'baseline_states': [{'stream_libraries': {'8.3': {
+                    'first': library('libfirst.so.1'), 'second': library('libsecond.so.2')}}}],
+                'php_requests': {'8.3': {'packages': ['cli']}},
+                'abi_consumer_requests': {'8.3': {'consumers': ['php-zts-cli'], 'packages': ['cli']}}}
+        snapshot = {'type': 'apk', 'php_stream': '8.3', 'architecture': 'x86_64', 'inventory': [
+            {'name': 'php-zts-cli', 'version': '8.3.36-r1', 'requires': ['php-zts-lib-first']},
+            {'name': 'php-zts-curl', 'version': '8.3.36-r1', 'requires': ['php-zts-lib-second']}]}
+        glibc.scope_abi_consumers(plan, snapshot, '8.3')
+        self.assertEqual(plan['php_requests']['8.3']['packages'], ['cli'])
+        self.assertEqual(plan['abi_consumer_requests']['8.3']['consumers'], ['php-zts-cli'])
+
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
         data = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
@@ -315,7 +331,7 @@ class Pipeline(unittest.TestCase):
                         subprocess.run(args, check=True)
                     elif 'prepare' in args:
                         glibc.write(option('--manifest-output'), value)
-                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {}, 'abi_break': rebuilt == 'breaking', 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
+                        glibc.write(option('--output'), {'libraries': [], 'php_requests': {'8.5': {'packages': ['cli']}}, 'abi_break': rebuilt == 'breaking', 'abi_rebuild_roots': ['fixture'] if rebuilt else []})
                     elif 'expand' in args:
                         glibc.write(option('--output'), {'selected': ['consumer'] if value.get('pending_rebuilds') else []})
                     elif 'run' in args and '.github/actions/shared-libraries/incremental-build.py' in args:
@@ -327,19 +343,23 @@ class Pipeline(unittest.TestCase):
                     elif 'stage-publication-retries' in args:
                         glibc.write(option('--output'), {'remaining_libraries': ['fixture']})
                     elif args[:2] == ['php', 'bin/spp']:
+                        self.assertTrue(capture.called)
                         kind = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--type='))
                         selected = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--buildroot='))
                         self.assertEqual(Path(selected), sdk if kind == 'apk' or manual else stage / ('sdk-' + kind))
                         self.assertEqual(glibc.read(sdk / 'shared-libraries.json'), value)
-                        archives = root / 'dist' / kind
+                        archives = Path(kwargs['env']['SPP_DIST_PATH']) / kind
                         archives.mkdir(parents=True, exist_ok=True)
                         (archives / ('fixture.' + kind)).write_bytes(b'package')
                         packaging.wait(timeout=5)
                     elif 'manifest' in args:
                         shutil.copy2(option('--root') / 'shared-libraries.json', option('--output'))
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else '', PUBLISH='true'):
+                        patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), \
+                        patch.object(glibc, 'capture_native_inventories') as capture, \
+                        patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else '', PUBLISH='true'):
                     glibc.classify()
+                    capture.assert_called_once_with()
                 expected = {'fixture'} if rebuilt else set()
                 expected_scans = [(format, False) for format in formats]
                 if rebuilt == 'breaking':
@@ -463,6 +483,27 @@ class Pipeline(unittest.TestCase):
             self.assertEqual(len(values), 2)
             self.assertTrue(all(item['library-only'] for item in values))
             self.assertTrue(all(not item['tls-checks'] and not item.get('runtime-checks') for item in values))
+
+    def test_owner_library_validation_covers_every_owner_alongside_consumer_jobs(self):
+        for kind in ['apk', 'deb']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                selection = {'libraries': ['zlib'], 'library_streams': ['8.2', '8.3', '8.6'],
+                             'php_requests': {'8.6': {'packages': ['curl']}}}
+                target = {'type': kind, 'target': 'x86_64' if kind == 'apk' else 'alma8-x86_64', 'arch': 'x86_64'}
+                if kind == 'deb':
+                    target['package_images'] = {'deb': 'packager'}
+                    plan = glibc.combine_plans({'deb': selection})
+                    command = ['packages', '--formats', 'deb', '--succeeded', 'alma8-x86_64 8.6']
+                else:
+                    plan = selection
+                    command = ['matrix']
+                glibc.write(root / 'plan/target.json', target)
+                glibc.write(root / 'plan/shared-library-plan.json', plan)
+                result = subprocess.check_output([sys.executable, HELPERS / 'workflow.py', *command, '--plans', root], text=True)
+                values = json.loads(next(line.split('=', 1)[1] for line in result.splitlines() if line.startswith('matrix=')))['include']
+                self.assertEqual({value['php-version'] for value in values}, {'8.2', '8.3', '8.6'})
+                self.assertEqual({value['php-version'] for value in values if value.get('library-only')}, {'8.2', '8.3'})
 
     def test_format_only_library_update_never_creates_an_empty_other_format_lane(self):
         with tempfile.TemporaryDirectory(prefix='spp-glibc-format-') as temporary:
@@ -622,6 +663,32 @@ class Pipeline(unittest.TestCase):
             archive.write_bytes(b'changed after native validation')
             with self.assertRaisesRegex(RuntimeError, 'does not match'):
                 workflow.verify_upgrades(root / 'cohort', library, 'rpm')
+
+    def test_each_owner_library_payload_requires_its_own_native_validation(self):
+        for kind in ['deb', 'apk']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                library = root / ('shared-libs-' + kind + '-x86_64')
+                library.mkdir()
+                plan = library / 'shared-library-plan.json'
+                plan.write_text(json.dumps({'libraries': ['zlib'], 'library_streams': ['8.3', '8.6'], 'php_requests': {}}))
+                image = 'ghcr.io/example/producer@sha256:' + 'a' * 64
+                (library / 'target.json').write_text(json.dumps({'arch': 'x86_64', 'source_run_id': '42', 'image': image}))
+                for stream in ['8.3', '8.6']:
+                    with self.assertRaisesRegex(RuntimeError, 'Missing successful'):
+                        workflow.verify_upgrades(root, library, kind)
+                    validation = root / ('shared-validation-' + kind + '-x86_64-php' + stream)
+                    validation.mkdir()
+                    report = validation / 'native-upgrade-receipt.json'
+                    report.write_text(json.dumps({'ok': True, 'type': kind, 'php_stream': stream, 'architecture': 'x86_64'}))
+                    (validation / ('library.' + kind)).write_text(stream)
+                    receipt = workflow.upgrade_receipt(report, plan, validation, kind, '42', image, stream, 'x86_64', True)
+                    (validation / 'shared-library-upgrade-receipt.json').write_text(json.dumps(receipt))
+                    workflow.verify_upgrades(root, library, kind, [stream])
+                workflow.verify_upgrades(root, library, kind)
+                (validation / ('library.' + kind)).write_text('different owner payload')
+                with self.assertRaisesRegex(RuntimeError, 'does not match'):
+                    workflow.verify_upgrades(root, library, kind)
 
     def test_extracted_elf_must_match_prepared_producer_bytes_and_modes(self):
         with tempfile.TemporaryDirectory(prefix='spp-archive-identity-') as temporary:

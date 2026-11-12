@@ -163,6 +163,19 @@ try {
             expect(in_array('php-zts-lib-base>=' . $expected, $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Generated dependency floor ignored the stream baseline');
         }
     }
+    $inventoryPath = $temporary . '/native-inventory.json';
+    file_put_contents($inventoryPath, json_encode(['schema' => 1, 'type' => 'apk', 'php_stream' => '8.5',
+        'architecture' => $architecture, 'inventory' => [
+            ['name' => 'php-zts-lib-base', 'version' => '1.0-r1', 'architecture' => $architecture],
+            ['name' => 'php-zts-lib-base', 'version' => '1.0-r99', 'architecture' => 'foreign'],
+        ]]));
+    putenv('SPP_NATIVE_INVENTORY=' . $inventoryPath);
+    file_put_contents($planPath, json_encode(['libraries' => ['top']]));
+    $unresolved->setPackageVersion('base', 'apk', '1.0-r99');
+    $resolve->invoke(null);
+    expect($unresolved->getPackageVersion('base', 'apk') === '1.0-r1', 'Native inventory retained a foreign dependency floor');
+    expect(in_array('php-zts-lib-base>=1.0-r1', $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Native dependency floor ignored the selected owner inventory');
+    putenv('SPP_NATIVE_INVENTORY');
     $versionProperty->setValue(null, $previousVersion);
     putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
     putenv($previousBaselines === false ? 'SPP_BASELINE_MANIFESTS' : 'SPP_BASELINE_MANIFESTS=' . $previousBaselines);

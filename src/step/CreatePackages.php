@@ -27,11 +27,11 @@ class CreatePackages
     private static string $packageType = 'rpm';
     private static ?string $iterationOverride = null;
     private static bool $bump = false;
-    private static bool $bulkLibraryRevisions = false;
-    private static bool $bulkPackageRevisions = false;
+    private static bool $libsOnly = false;
+    private static array $nativeInventories = [];
     /** @var array<string, array{0:int,1:?string}> memoised HTTP GET responses (per run) */
     private static array $httpCache = [];
-    /** @var array<string,string> resolved iteration per base package (name|version|arch|type) */
+    /** @var array<string,string> resolved iteration per base package and repository */
     private static array $resolvedIterations = [];
     private static array $migrationBaselines = [];
     private static string $prefix = '-zts';
@@ -45,9 +45,9 @@ class CreatePackages
         self::$packageType = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
         self::$iterationOverride = $iteration !== null && $iteration !== '' ? $iteration : null;
         self::$bump = $bump ?? self::$bump;
+        self::$libsOnly = $libsOnly;
         self::$debuginfo = $debuginfo ?? self::$debuginfo;
         self::$resolvedIterations = [];
-        self::$bulkPackageRevisions = !$libsOnly && ($packageNames === null || count(array_unique((array) $packageNames)) > 1);
         self::$versionArch = [];
         self::$consumerManifest = [];
         if ($buildroot !== null && !is_file($buildroot . '/shared-libraries.json')) {
@@ -203,13 +203,18 @@ class CreatePackages
     {
         $package = new runtime_layout();
         $baselines = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
-        $unchanged = $baselines !== [];
+        $unchanged = true;
+        $matched = false;
         $reusable = [];
         foreach ($baselines as $path) {
             if (!is_string($path) || !is_file($path)) {
                 throw new RuntimeException('Missing captured runtime layout baseline');
             }
             $baseline = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+            if (!self::baselineMatches($baseline, self::$packageType, $architecture)) {
+                continue;
+            }
+            $matched = true;
             $layout = $baseline['runtime_layout'] ?? [];
             $matching = ($layout['version'] ?? null) === $package->getVersion()
                 && ($layout['source_hash'] ?? null) === $package->sourceHash(self::$packageType);
@@ -218,7 +223,7 @@ class CreatePackages
                 $reusable[] = [$path, $layout];
             }
         }
-        if ($unchanged) {
+        if ($matched && $unchanged) {
             return;
         }
         if ($reusable !== []) {
@@ -282,21 +287,33 @@ class CreatePackages
         }
     }
 
+    private static function baselineMatches(array $baseline, string $type, string $architecture): bool
+    {
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        if (in_array($architecture, ['all', 'noarch'], true)) {
+            $architecture = self::$sharedLibraries?->architecture() ?? self::getPhpVersionAndArchitecture()[1];
+        }
+        return (!isset($baseline['type']) || $baseline['type'] === $type)
+            && (!isset($baseline['architecture']) || $normalizeArch($baseline['architecture']) === $normalizeArch($architecture))
+            && ($type === 'rpm' || !isset($baseline['php_stream']) || str_replace('.', '', $baseline['php_stream']) === self::getForgejoOwner());
+    }
+
     private static function migrationRevisionFloor(string $name, string $version, string $architecture, string $type): int
     {
         if (str_starts_with($name, 'php-zts-lib-') || str_starts_with($name, 'php-zts-runtime-layout')) {
             return 0;
         }
         $name = preg_replace('/-debuginfo$/', '', $type === 'deb' ? str_replace('_', '-', $name) : $name);
-        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         $minimum = 0;
         foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
             $data = self::migrationBaseline($path);
-            if (isset($data['type']) && $data['type'] !== $type
-                || isset($data['architecture']) && $normalizeArch($data['architecture']) !== $normalizeArch($architecture)) {
+            if (!self::baselineMatches($data, $type, $architecture)) {
                 continue;
             }
-            foreach ($data['migration_cutoffs'] ?? [] as $cutoffs) {
+            foreach ($data['migration_cutoffs'] ?? [] as $stream => $cutoffs) {
+                if ($type !== 'rpm' && str_replace('.', '', $stream) !== self::getForgejoOwner()) {
+                    continue;
+                }
                 $cutoff = preg_replace('/^\d+:/', '', $cutoffs[$name] ?? '');
                 if ($type === 'apk') {
                     $cutoff = self::validApkPackageVersion($cutoff);
@@ -312,14 +329,16 @@ class CreatePackages
 
     private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
     {
+        if (getenv('SPP_NATIVE_INVENTORY')) {
+            return max($type === 'apk' ? 0 : 1, self::publishedIteration($name, $version, $architecture, $type));
+        }
         $version = $type === 'apk' ? self::validApkPackageVersion($version) : $version;
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         if ($name === 'php-zts-runtime-layout') {
             $revision = $type === 'apk' ? 0 : 1;
             foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
                 $baseline = self::migrationBaseline($path);
-                if (isset($baseline['type']) && $baseline['type'] !== $type
-                    || $type === 'apk' && isset($baseline['architecture']) && $normalizeArch($baseline['architecture']) !== $normalizeArch($architecture)) {
+                if (!self::baselineMatches($baseline, $type, $architecture)) {
                     continue;
                 }
                 $published = preg_replace('/^\d+:/', '', $baseline['runtime_layout']['package_version'] ?? '');
@@ -330,7 +349,7 @@ class CreatePackages
             }
             return $revision;
         }
-        if (str_starts_with($name, 'php-zts-lib-')) {
+        if (str_starts_with($name, 'php-zts-lib-') && $type === 'rpm') {
             $minimum = $type === 'apk' ? 0 : 1;
             $planPath = getenv('SPP_SHARED_LIBRARY_PLAN');
             if (!$planPath) {
@@ -351,12 +370,12 @@ class CreatePackages
         preg_match('/^(\d+\.\d+)/', $phpVersion, $targetStream);
         foreach ($paths as $path) {
             $data = self::migrationBaseline($path);
-            if (isset($data['type']) && $data['type'] !== $type) {
+            if (!self::baselineMatches($data, $type, $architecture)) {
                 continue;
             }
             $packages = array_merge($data['packages'] ?? [], $data['published_packages'] ?? []);
             foreach ($data['consumer_versions'] ?? [] as $stream => $consumers) {
-                if ($stream !== $targetStream[1]) {
+                if ($type === 'rpm' ? $stream !== $targetStream[1] : str_replace('.', '', $stream) !== self::getForgejoOwner()) {
                     continue;
                 }
                 if (isset($consumers[$matchName])) {
@@ -396,7 +415,7 @@ class CreatePackages
                 throw new RuntimeException('Missing captured package baseline');
             }
             $data = self::migrationBaseline($path);
-            if (isset($data['type']) && $data['type'] !== $type) {
+            if (!self::baselineMatches($data, $type, $architecture)) {
                 continue;
             }
             foreach (array_merge($data['packages'] ?? [], $data['published_packages'] ?? []) as $package) {
@@ -405,7 +424,10 @@ class CreatePackages
                     $versions[] = $package['version'];
                 }
             }
-            foreach ($data['consumer_versions'] ?? [] as $consumers) {
+            foreach ($data['consumer_versions'] ?? [] as $stream => $consumers) {
+                if ($type !== 'rpm' && str_replace('.', '', $stream) !== self::getForgejoOwner()) {
+                    continue;
+                }
                 foreach ([$matchName, $baseName] as $candidateName) {
                     if (isset($consumers[$candidateName])) {
                         $versions[] = $consumers[$candidateName];
@@ -593,16 +615,10 @@ class CreatePackages
         if ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) {
             $selected = self::migrationBaseline($planPath)['libraries'] ?? [];
         }
-        $packages = [];
-        foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
+        $packages = getenv('SPP_NATIVE_INVENTORY') ? self::nativeInventory($type, self::$sharedLibraries->architecture()) : [];
+        foreach (getenv('SPP_NATIVE_INVENTORY') ? [] : json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
             $baseline = self::migrationBaseline($path);
-            if (($baseline['type'] ?? null) === $type) {
-                if (isset($baseline['php_stream'])) {
-                    [$phpVersion] = self::getPhpVersionAndArchitecture();
-                    if (!str_starts_with($phpVersion, $baseline['php_stream'] . '.')) {
-                        continue;
-                    }
-                }
+            if (self::baselineMatches($baseline, $type, self::$sharedLibraries->architecture())) {
                 array_push($packages, ...($baseline['packages'] ?? []), ...($baseline['published_packages'] ?? []));
             }
         }
@@ -727,18 +743,12 @@ class CreatePackages
             'aarch64' => 'arm64',
             default => $architecture,
         } : $architecture;
-        self::$bulkLibraryRevisions = count(array_unique($ids)) > 1;
-        try {
-            foreach ($ids as $id) {
-                $package = new library($manifest, $id);
-                $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
-                $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
-                $release = $iteration;
-                $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $release);
-                $packages[] = $package;
-            }
-        } finally {
-            self::$bulkLibraryRevisions = false;
+        foreach ($ids as $id) {
+            $package = new library($manifest, $id);
+            $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
+            $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
+            $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $iteration);
+            $packages[] = $package;
         }
         foreach ($packages as $package) {
             self::createPackageWithFpm($package, $package->getVersion(), $architecture);
@@ -2081,7 +2091,7 @@ class CreatePackages
         if (str_ends_with($name, '-debuginfo') && $revision !== $iteration) {
             throw new RuntimeException('Published APK runtime/debug revisions must remain paired: ' . $name);
         }
-        self::$resolvedIterations["{$base}|{$version}|{$architecture}|apk"] = $revision;
+        self::$resolvedIterations[self::iterationKey($base, $version, $architecture, 'apk')] = $revision;
         if (isset($decision['reuse'])) {
             $destination = DIST_APK_PATH . "/{$name}-{$version}-r{$revision}.{$architecture}.apk";
             if (!copy($decision['reuse'], $destination)) {
@@ -2438,7 +2448,7 @@ class CreatePackages
         // so the pair must resolve to ONE iteration. Resolve per base package and memoise:
         // the debuginfo call hits the cache instead of re-querying remote registries.
         $base = preg_replace('/-debuginfo$/', '', $name);
-        $key = "{$base}|{$version}|{$architecture}|{$packageType}";
+        $key = self::iterationKey($base, $version, $architecture, $packageType);
         if (!isset(self::$resolvedIterations[$key])) {
             if (self::$bump) {
                 $next = self::getRemoteNextIteration($base, $version, $architecture, $packageType);
@@ -2455,24 +2465,16 @@ class CreatePackages
         return self::$resolvedIterations[$key];
     }
 
-    /**
-     * Query the hosted repositories for the highest iteration currently published for
-     * {name}-{version} (for RPM: on the given arch/dist) and return it + 1.
-     *
-     * Sources:
-     *   - rpm  -> autoindex at {SPP_RPM_REPO_URL}/{arch}/el8/  (createrepo dir listing)
-     *   - deb  -> Forgejo   {SPP_FORGEJO_HOST}/api/v1/packages/{owner}?type=debian
-     *   - apk  -> Forgejo   {SPP_FORGEJO_HOST}/api/v1/packages/{owner}?type=alpine
-     *
-     * A version that is not published yet yields the first release (1 for rpm/deb, 0 for
-     * apk). A transport failure throws, so a --bump build fails loudly instead of silently
-     * emitting a colliding low iteration.
-     */
+    private static function iterationKey(string $name, string $version, string $architecture, string $type): string
+    {
+        $owner = $type === 'rpm' ? '' : self::getForgejoOwner();
+        return "{$name}|{$version}|{$architecture}|{$type}|{$owner}";
+    }
+
     public static function getRemoteNextIteration(string $name, string $version, string $architecture, string $packageType): int
     {
-        $maxIteration = ($packageType === 'apk') ? -1 : 0;
-
         if ($packageType === 'rpm') {
+            $maxIteration = 0;
             $baseUrl = getenv('SPP_RPM_REPO_URL') ?: 'https://rpm.henderkes.com';
             $pattern = '#' . preg_quote($name, '#') . '-' . preg_quote($version, '#')
                 . '-(\d+)(?:\.[^."/]+){0,2}\.' . preg_quote($architecture, '#') . '\.rpm#';
@@ -2488,78 +2490,71 @@ class CreatePackages
                     }
                 }
             }
-            return max($maxIteration + 1, self::migrationRevisionFloor($name, $version, $architecture, $packageType));
+        } else {
+            $maxIteration = self::publishedIteration($name, $version, $architecture, $packageType);
         }
-
-        $host = getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com';
-        return max(self::getForgejoNextIteration($name, $version, $packageType, $host),
-            self::migrationRevisionFloor($name, $version, $architecture, $packageType));
+        return max($maxIteration + 1, self::migrationRevisionFloor($name, $version, $architecture, $packageType));
     }
 
-    private static function getForgejoNextIteration(string $name, string $version, string $packageType, string $host, ?string $owner = null): int
+    private static function publishedIteration(string $name, string $version, string $architecture, string $type): int
     {
-        $version = $packageType === 'apk' ? self::validApkPackageVersion($version) : $version;
-        $maxIteration = $packageType === 'apk' ? -1 : 0;
-        if ($owner === null && (str_starts_with($name, 'php-zts-lib-') || preg_replace('/-debuginfo$/', '', $name) === 'php-zts-runtime-layout')) {
-            foreach (['82', '83', '84', '85', '86'] as $streamOwner) {
-                $maxIteration = max($maxIteration, self::getForgejoNextIteration($name, $version, $packageType, $host, $streamOwner) - 1);
-            }
-            return $maxIteration + 1;
-        }
-        $forgeType = $packageType === 'deb' ? 'debian' : 'alpine';
-        $owner ??= self::getForgejoOwner();
-        $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
-        $queryName = self::$bulkLibraryRevisions && str_starts_with($matchName, 'php-zts-lib-')
-            ? 'php-zts-lib-' : preg_replace('/-debuginfo$/', '', $matchName);
-        $independent = str_starts_with($matchName, 'php-zts-lib-') || $queryName === 'php-zts-runtime-layout';
-        $query = self::$bulkPackageRevisions && !$independent ? '' : '&q=' . rawurlencode($queryName);
-        $packages = [];
-        $previous = null;
-        for ($page = 1; ; $page++) {
-            $url = rtrim($host, '/') . "/api/v1/packages/{$owner}?type={$forgeType}{$query}&limit=1000&page={$page}";
-            [$code, $body] = self::httpGet($url);
-            if ($code !== 200 || $body === null) {
-                throw new RuntimeException("--bump: failed to query Forgejo {$url} (HTTP {$code})");
-            }
-            $batch = json_decode($body, true);
-            if (!is_array($batch) || !array_is_list($batch) || $batch === $previous) {
-                throw new RuntimeException("--bump: invalid Forgejo pagination for {$url}");
-            }
-            if ($batch === []) {
-                break;
-            }
-            $packages = array_merge($packages, $batch);
-            $previous = $batch;
-        }
-
-        // Debian package names cannot contain underscores, so the registry stores them
-        // dash-normalised (php-zts-pdo_mysql -> php-zts-pdo-mysql), matching the convention
-        // used by bin/forgejo-helper. Alpine keeps underscores as-is.
-        $matchName = $packageType === 'deb' ? str_replace('_', '-', $name) : $name;
-
-        foreach ($packages as $pkg) {
-            if (!is_array($pkg) || ($pkg['name'] ?? null) !== $matchName) {
+        $version = $type === 'apk' ? self::validApkPackageVersion($version) : $version;
+        $name = $type === 'deb' ? str_replace('_', '-', $name) : $name;
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)' . ($type === 'rpm' ? '(?:\.[A-Za-z0-9.+_~]+)?' : '') . '$/D';
+        $maximum = $type === 'apk' ? -1 : 0;
+        foreach (self::nativeInventory($type, $architecture) as $package) {
+            if (($package['name'] ?? '') !== $name
+                || !in_array($normalizeArch($package['architecture'] ?? ''), [$normalizeArch($architecture), 'all', 'noarch'], true)) {
                 continue;
             }
-            $remoteVersion = (string)($pkg['version'] ?? '');
-            if ($packageType === 'deb') {
-                // registry version: {version}-{revision}
-                if (str_starts_with($remoteVersion, $version . '-')) {
-                    $revision = substr($remoteVersion, strlen($version) + 1);
-                    if ($revision !== '' && ctype_digit($revision)) {
-                        $maxIteration = max($maxIteration, (int)$revision);
-                    }
-                }
-            }
-            else {
-                // apk registry version: {version}-r{iteration}
-                if (preg_match('/^' . preg_quote($version, '/') . '-r(\d+)$/', self::validApkPackageVersion($remoteVersion), $m)) {
-                    $maxIteration = max($maxIteration, (int)$m[1]);
-                }
+            $published = preg_replace('/^\d+:/', '', $package['version']);
+            $published = $type === 'apk' ? self::validApkPackageVersion($published) : $published;
+            if (preg_match($pattern, $published, $release)) {
+                $maximum = max($maximum, (int) $release[1]);
             }
         }
+        return $maximum;
+    }
 
-        return $maxIteration + 1;
+    private static function nativeInventory(string $type, string $architecture): array
+    {
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
+        if (in_array($architecture, ['all', 'noarch'], true)) {
+            $architecture = self::$sharedLibraries?->architecture() ?? self::getPhpVersionAndArchitecture()[1];
+        }
+        $owner = self::getForgejoOwner();
+        if ($path = getenv('SPP_NATIVE_INVENTORY')) {
+            $captured = self::migrationBaseline($path);
+            if (($captured['schema'] ?? null) !== 1 || ($captured['type'] ?? null) !== $type
+                || ($type !== 'rpm' && str_replace('.', '', $captured['php_stream'] ?? '') !== $owner)
+                || $normalizeArch($captured['architecture'] ?? '') !== $normalizeArch($architecture)
+                || isset($captured['error']) || !is_array($captured['inventory'] ?? null)) {
+                throw new RuntimeException('Published inventory snapshot does not match this package repository or is unavailable');
+            }
+            return $captured['inventory'];
+        }
+        $host = rtrim(getenv('SPP_FORGEJO_HOST') ?: 'https://git.henderkes.com', '/');
+        $key = "{$host}|{$type}|{$owner}|" . $normalizeArch($architecture);
+        if (!isset(self::$nativeInventories[$key])) {
+            $stream = substr($owner, 0, 1) . '.' . substr($owner, 1);
+            $base = $host . '/api/packages/' . rawurlencode($owner) . ($type === 'deb' ? '/debian/' : '/alpine/main/php-zts/');
+            $code = <<<'PYTHON'
+import contextlib,json,runpy,sys
+from types import SimpleNamespace
+reader=runpy.run_path(sys.argv[1])
+args=SimpleNamespace(type=sys.argv[2],php=sys.argv[3],arch=sys.argv[4],base_url=sys.argv[5],el='el8')
+with contextlib.redirect_stdout(sys.stderr):
+    _,inventory,_,_=reader['published_inventory'](args)
+print(json.dumps(inventory))
+PYTHON;
+            $process = new Process(['python3', '-c', $code, BASE_PATH . '/bin/freeze-migration-baseline.py',
+                $type, $stream, $normalizeArch($architecture) === 'aarch64' ? 'arm64' : 'x86_64', $base]);
+            $process->setTimeout(null);
+            $process->mustRun();
+            self::$nativeInventories[$key] = json_decode(trim($process->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+        }
+        return self::$nativeInventories[$key];
     }
 
     /**
@@ -2572,7 +2567,7 @@ class CreatePackages
         if ($override !== false && $override !== '') {
             return $override;
         }
-        [$fullPhpVersion] = self::getPhpVersionAndArchitecture();
+        $fullPhpVersion = self::$libsOnly && defined('SPP_PHP_VERSION') ? SPP_PHP_VERSION : self::getPhpVersionAndArchitecture()[0];
         if (preg_match('/^(\d+)\.(\d+)/', $fullPhpVersion, $m)) {
             return $m[1] . $m[2];
         }
@@ -2584,24 +2579,14 @@ class CreatePackages
      */
     private static function httpGet(string $url): array
     {
-        // The RPM index and the Forgejo listing are the same URL for every package in a
-        // job, so memoise to avoid refetching a multi-MB directory index per package.
         if (isset(self::$httpCache[$url])) {
             return self::$httpCache[$url];
         }
 
         // Request JSON: the RPM repo is served by Caddy's file_server, whose JSON directory
-        // listing is far smaller/faster than the HTML autoindex (e.g. 0.8MB/2s vs 4MB/120s);
-        // the Forgejo API returns JSON regardless. The .rpm filenames appear verbatim in
-        // both payloads, so the same regex extracts iterations either way.
+        // listing is far smaller/faster than the HTML autoindex. RPM filenames appear
+        // verbatim in both formats.
         $arguments = ['curl', '-sSL', '--user-agent', 'APT-HTTP/1.3 (2.6.1)', '--connect-timeout', '10', '--max-time', '90', '-H', 'Accept: application/json', '-w', "\n%{http_code}"];
-        if (preg_match('#^/api/v1/packages/([^/?]+)#', parse_url($url, PHP_URL_PATH) ?: '', $m)) {
-            $owner = rawurldecode($m[1]);
-            $password = getenv('FORGEJO_PASSWORD') ?: '';
-            if ($password !== '') {
-                $arguments = [...$arguments, '--user', $owner . ':' . $password];
-            }
-        }
         for ($attempt = 1; $attempt <= 3; $attempt++) {
             $process = new Process([...$arguments, $url]);
             $process->setTimeout(100);

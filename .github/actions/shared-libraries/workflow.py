@@ -118,11 +118,31 @@ def assemble(source, destination, extension, streams=None):
         paths.extend(artifact.glob('*.' + extension))
         if artifact.name.startswith('shared-libs-'):
             paths.extend((artifact / 'libraries').glob('*.' + extension))
+            for owner in (artifact / 'owner-libraries').glob('*'):
+                if streams is None or owner.name in streams:
+                    paths.extend((owner / extension).glob('*.' + extension))
     for path in sorted(paths):
         target = destination / path.name
         if target.exists() and target.read_bytes() != path.read_bytes():
             raise RuntimeError("Conflicting cohort package: " + path.name)
         shutil.copy2(path, target)
+
+
+def stage_libraries(source, destination, kind, stream, manifest_output):
+    owner = source / 'owner-libraries' / stream
+    plan = json.loads((source / 'shared-library-plan.json').read_text())
+    if (stream in plan.get('library_streams', []) or owner.parent.is_dir()) and not owner.is_dir():
+        raise RuntimeError('Missing library packages for PHP ' + stream)
+    metadata = owner / 'shared-libraries.json' if owner.is_dir() else source / 'shared-libraries.json'
+    manifest = json.loads(metadata.read_text())
+    if kind != 'rpm' and not owner.is_dir():
+        for entry in manifest['libraries'].values():
+            entry.setdefault('package_versions', {}).pop(kind, None)
+    manifest_output.parent.mkdir(parents=True, exist_ok=True)
+    manifest_output.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+    destination.mkdir(parents=True, exist_ok=True)
+    for archive in (owner / kind if owner.is_dir() else source / 'libraries').glob('*.' + kind):
+        shutil.copy2(archive, destination / archive.name)
 
 
 def tls_checks(includes):
@@ -189,7 +209,10 @@ def verify_upgrades(source, library_artifact, kind, streams=None):
     target = json.loads((library_artifact / "target.json").read_text())
     plan_path = library_artifact / "shared-library-plan.json"
     plan = json.loads(plan_path.read_text())
-    wanted = {stream for stream, request in plan.get("php_requests", {}).items() if request.get("full") or request.get("packages")}
+    consumers = {stream for stream, request in plan.get("php_requests", {}).items() if request.get("full") or request.get("packages")}
+    wanted = set(consumers)
+    owner_streams = set(plan.get('library_streams', []))
+    wanted |= owner_streams
     if streams is not None:
         if not streams or not set(streams) <= wanted:
             raise RuntimeError('Publication streams are not in the original build plan')
@@ -208,8 +231,11 @@ def verify_upgrades(source, library_artifact, kind, streams=None):
             raise RuntimeError("Native upgrade receipt does not match its payload/plan: " + str(path))
         if scope == "consumer" and stream in wanted:
             validated.add(stream)
-        elif scope == "libraries" and libraries_only:
-            validated.add("libraries")
+        elif scope == "libraries":
+            if stream in owner_streams and stream not in consumers:
+                validated.add(stream)
+            elif libraries_only:
+                validated.add("libraries")
     missing = ({"libraries"} if libraries_only else wanted) - validated
     if missing:
         raise RuntimeError("Missing successful native ordinary-upgrade cells: " + ", ".join(sorted(missing)))
@@ -256,6 +282,12 @@ def main():
     merge.add_argument("--destination", type=Path, required=True)
     merge.add_argument("--type", required=True)
     merge.add_argument('--php-streams')
+    stage = sub.add_parser('stage-libraries')
+    stage.add_argument('--source', type=Path, required=True)
+    stage.add_argument('--destination', type=Path, required=True)
+    stage.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
+    stage.add_argument('--php-stream', required=True)
+    stage.add_argument('--manifest-output', type=Path, required=True)
     receipt = sub.add_parser("receipt")
     receipt.add_argument("--plan", type=Path, required=True)
     receipt.add_argument("--source-run-id", required=True)
@@ -350,11 +382,14 @@ def main():
     elif args.command == "matrix":
         includes, targets = matrix(args.plans, csv(args.php_versions, STREAMS), None if args.succeeded is None else args.succeeded.splitlines())
         for target in targets:
-            if target.get("type") != "apk" or any(value["target"] == target["target"] for value in includes):
+            if target.get("type") != "apk":
                 continue
             path = next(path for path in args.plans.glob("*/shared-library-plan.json") if json.loads((path.parent / "target.json").read_text())["target"] == target["target"])
-            if json.loads(path.read_text()).get("libraries"):
-                includes.append(dict(target, **{"php-version": "8.5", "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
+            plan = json.loads(path.read_text())
+            active = {value['php-version'] for value in includes if value['target'] == target['target']}
+            streams = plan.get('library_streams') or (['8.5'] if not active and plan.get('libraries') else [])
+            for stream in set(streams) - active:
+                includes.append(dict(target, **{"php-version": stream, "packages": "", "compile": False, "compile-packages": "", "library-only": True}))
         tls_checks([entry for entry in includes if entry.get("type") == "apk"])
         includes = [value for value in includes if value.get("payload_stream") != value["php-version"]]
         emit("matrix", {"include": includes})
@@ -386,13 +421,17 @@ def main():
             plan = json.loads(path.read_text())
             for kind in args.formats.split(','):
                 selection = plan.get("format_selection", {}).get(kind, plan)
-                if not any(request.get("full") or request.get("packages") for request in selection.get("php_requests", {}).values()) and selection.get("libraries"):
-                    includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": "8.5", "packages": "", "library-only": True}))
+                active = {stream for stream, request in selection.get('php_requests', {}).items() if request.get('full') or request.get('packages')}
+                streams = selection.get('library_streams') or (['8.5'] if not active and selection.get('libraries') else [])
+                for stream in set(streams) - active:
+                    includes.append(dict(target, type=kind, **{"package-image": target["package_images"][kind], "php-version": stream, "packages": "", "library-only": True}))
         tls_checks(includes)
         emit("matrix", {"include": includes})
         emit("any", str(bool(includes)).lower())
     elif args.command == "assemble":
         assemble(args.source, args.destination, args.type, args.php_streams.split(',') if args.php_streams else None)
+    elif args.command == 'stage-libraries':
+        stage_libraries(args.source, args.destination, args.type, args.php_stream, args.manifest_output)
     elif args.command == "receipt":
         args.output.write_text(json.dumps(build_receipt(args.plan, args.source_run_id, args.image, args.kind, args.php_stream), sort_keys=True) + "\n")
     elif args.command == "upgrade-receipt":

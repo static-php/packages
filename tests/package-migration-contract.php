@@ -77,6 +77,8 @@ function migrationVersionContracts(string $root): void
     $directory = $root . '/version-contracts';
     mkdir($directory, 0755, true);
     $previous = getenv('SPP_BASELINE_MANIFESTS');
+    $previousOwner = getenv('SPP_FORGEJO_OWNER');
+    putenv('SPP_FORGEJO_OWNER=86');
     try {
         $cases = [
             ['rpm', '3.8.1_86.0~rc4', '3.8.1_86.0~rc4+ext', '0:3.8.1_86.0~rc4+ext-1.el8', 'x86_64'],
@@ -136,6 +138,7 @@ function migrationVersionContracts(string $root): void
         }
         echo "Passed RPM/DEB/APK captured-baseline migration spellings, runtime/debug pairing, prereleases and unmasked upstream updates/rollbacks.\n";
     } finally {
+        $previousOwner === false ? putenv('SPP_FORGEJO_OWNER') : putenv('SPP_FORGEJO_OWNER=' . $previousOwner);
         $previous === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previous);
     }
 }
@@ -394,21 +397,17 @@ try {
     }
 
     if ($type === 'deb') {
-        $hosts = ['https://forgejo-migration-one.invalid', 'https://forgejo-migration-two.invalid'];
-        putenv('SPP_FORGEJO_HOST=' . $hosts[0]);
-        putenv('SPP_FORGEJO_HOSTS=' . implode(',', $hosts));
+        putenv('SPP_FORGEJO_OWNER=86');
+        $inventory = $stage . '/revision-inventory.json';
+        file_put_contents($inventory, json_encode(['schema' => 1, 'type' => 'deb', 'php_stream' => '8.6',
+            'architecture' => 'x86_64', 'inventory' => [
+                ['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-10', 'architecture' => 'amd64'],
+                ['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-12', 'architecture' => 'arm64'],
+            ]], JSON_THROW_ON_ERROR));
+        putenv('SPP_NATIVE_INVENTORY=' . $inventory);
+        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-lib-migration-contract', '1.2.3', 'amd64', 'deb') === 11, 'Library revision discovery must use the selected native repository and architecture');
+        putenv('SPP_NATIVE_INVENTORY');
         putenv('SPP_FORGEJO_OWNER');
-        $indexes = [];
-        foreach ($hosts as $host) {
-            foreach (['82', '83', '84', '85', '86'] as $owner) {
-                $revision = $host === $hosts[1] && $owner === '85' ? 12 : ($host === $hosts[0] && $owner === '86' ? 10 : 1);
-                $url = $host . '/api/v1/packages/' . $owner . '?type=debian&q=php-zts-lib-migration-contract&limit=1000&page=';
-                $indexes[$url . '1'] = [200, json_encode([['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-' . $revision]])];
-                $indexes[$url . '2'] = [200, '[]'];
-            }
-        }
-        (new ReflectionProperty(CreatePackages::class, 'httpCache'))->setValue(null, $indexes);
-        migrationCheck(CreatePackages::getRemoteNextIteration('php-zts-lib-migration-contract', '1.2.3', 'amd64', 'deb') === 11, 'Library revision discovery must use primary stream owners and ignore mirror revisions');
     }
 
     migrationLayoutContracts($stage, $type);
@@ -431,6 +430,53 @@ try {
         ]],
     ];
     file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
+    if ($type === 'deb') {
+        $sdk = $stage . '/shared-sdk';
+        mkdir($sdk . '/lib', 0755, true);
+        mkdir($sdk . '/licenses');
+        copy($source, $sdk . '/lib/libmigration-contract.so.1');
+        copy(BUILD_ROOT_PATH . '/licenses/contract', $sdk . '/licenses/contract');
+        $sdkManifest = $manifest;
+        unset($sdkManifest['libraries']['openssl']);
+        file_put_contents($sdk . '/shared-libraries.json', json_encode($sdkManifest, JSON_THROW_ON_ERROR));
+        BuildPayload::record($sdk, ['extensions' => [], 'shared-extensions' => [], 'sapi' => [],
+            'build-options' => ['with-shared-libs' => true, 'with-shared-libdir' => '/usr/lib/php-zts/lib'],
+            'extra-env' => ['SPC_LIBC' => 'glibc']], '8.4.0', 'x86_64', null, ['kind' => 'libraries-only']);
+        BuildPayload::seal($sdk);
+        $sdkSeal = hash_file('sha256', $sdk . '/build-payload.json');
+        $sdkMetadata = hash_file('sha256', $sdk . '/shared-libraries.json');
+        foreach (['8.3' => 1, '8.6' => 8] as $stream => $publishedRevision) {
+            $ownerRoot = $stage . '/owner-' . $stream;
+            mkdir($ownerRoot);
+            $ownerManifest = $ownerRoot . '/shared-libraries.json';
+            file_put_contents($ownerManifest, json_encode($sdkManifest, JSON_THROW_ON_ERROR));
+            $inventory = $ownerRoot . '/inventory.json';
+            file_put_contents($inventory, json_encode(['schema' => 1, 'type' => 'deb', 'php_stream' => $stream,
+                'architecture' => 'x86_64', 'inventory' => [
+                    ['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-' . $publishedRevision, 'architecture' => 'amd64'],
+                    ['name' => 'php-zts-lib-migration-contract', 'version' => '1.2.3-50', 'architecture' => 'arm64'],
+                ]], JSON_THROW_ON_ERROR));
+            $environment = ['SPP_DIST_PATH' => $ownerRoot, 'SPP_NATIVE_INVENTORY' => $inventory,
+                'SPP_FORGEJO_OWNER' => false, 'SPP_BASELINE_MANIFESTS' => false, 'SPP_SHARED_LIBRARY_PLAN' => false];
+            $command = new Process([PHP_BINARY, BASE_PATH . '/bin/spp', 'package', '--type=deb', '--phpv=' . $stream,
+                '--libs-only', '--libraries=migration-contract', '--buildroot=' . $sdk,
+                '--library-manifest=' . $ownerManifest, '--bump'], env: $environment);
+            $command->setTimeout(120);
+            $command->mustRun();
+            $archives = glob($ownerRoot . '/deb/php-zts-lib-migration-contract_*.deb');
+            migrationCheck(count($archives) === 1, 'Owner library archive missing or duplicated');
+            $release = '1.2.3-' . ($publishedRevision + 1);
+            migrationCheck(str_contains(migrationHeader($archives[0], 'deb'), 'Version: ' . $release . "\n"), 'CLI library revision followed the canonical SDK or another architecture');
+            (new Process([PHP_BINARY, BASE_PATH . '/bin/build-payload', 'manifest', '--root', $sdk, '--type', 'deb',
+                '--library-manifest=' . $ownerManifest, '--output', $ownerManifest], env: $environment))->mustRun();
+            $resolved = json_decode(file_get_contents($ownerManifest), true, flags: JSON_THROW_ON_ERROR);
+            migrationCheck($resolved['libraries']['migration-contract']['package_versions']['deb'] === $release, 'Owner manifest lost its archive revision');
+        }
+        migrationCheck(hash_file('sha256', $sdk . '/build-payload.json') === $sdkSeal
+            && hash_file('sha256', $sdk . '/shared-libraries.json') === $sdkMetadata, 'Owner packaging mutated the shared SDK');
+        BuildPayload::load($sdk, true)->verify();
+        echo "Passed owner-scoped CLI library archives from one sealed canonical PHP 8.4 SDK.\n";
+    }
     $libraries = new SharedLibraries(BUILD_ROOT_PATH, '/usr/lib/php-zts/lib');
     $libraries->setPackageVersion('migration-contract', $type, '1.2.3-8');
     (new ReflectionProperty(CreatePackages::class, 'sharedLibraries'))->setValue(null, $libraries);

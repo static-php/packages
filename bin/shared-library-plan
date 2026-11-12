@@ -246,15 +246,21 @@ def consumer_dependencies(value, name, stream, architecture):
     return sorted(dependencies)
 
 
-def abi_consumers(value, roots):
-    affected_libraries = set(reverse_closure(value, roots))
+def abi_consumers(value, roots, candidate=None):
     result = {}
     for stream in STREAMS:
+        previous = value.get('stream_libraries', {}).get(stream)
+        changed = set(roots)
+        if previous is not None and candidate is not None:
+            changed = {identifier for identifier in roots if identifier in previous
+                       and (identifier not in candidate['libraries']
+                            or library_names(previous[identifier]) != library_names(candidate['libraries'][identifier]))}
+        affected_libraries = set(reverse_closure(dict(value, libraries=previous) if previous is not None else value, changed))
         names = set(value.get('consumers', {}).get(stream, []))
         known = value.get('consumer_dependencies', {}).get(stream, {})
-        missing = names - known.keys()
+        missing = names - known.keys() if changed else set()
         affected = sorted(name for name in names if affected_libraries.intersection(known.get(name, [])))
-        inventory_missing = not value.get('consumer_inventory_complete', 'consumers' in value)
+        inventory_missing = bool(changed) and not value.get('consumer_inventory_complete', 'consumers' in value)
         result[stream] = {'full': bool(missing) or inventory_missing, 'packages': [],
                           'consumers': sorted(names) if missing else affected,
                           'missing_metadata': sorted(missing)}
@@ -327,9 +333,9 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
                     raise RuntimeError('Cannot reconcile hosts without native package versions: ' + identifier)
             else:
                 ordering = native_compare(kind, left, right)
-                if ordering == 0 and (candidate.get('source_hash'), library_names(candidate)) != (selected.get('source_hash'), library_names(selected)):
+                if not independent_streams and ordering == 0 and (candidate.get('source_hash'), library_names(candidate)) != (selected.get('source_hash'), library_names(selected)):
                     raise RuntimeError('Published hosts have conflicting library metadata for the same package version: ' + identifier)
-                if ordering == 0 and candidate.get('published_archive_sha256') and selected.get('published_archive_sha256') and candidate['published_archive_sha256'] != selected['published_archive_sha256']:
+                if not independent_streams and ordering == 0 and candidate.get('published_archive_sha256') and selected.get('published_archive_sha256') and candidate['published_archive_sha256'] != selected['published_archive_sha256']:
                     raise RuntimeError('Published hosts have conflicting archive bytes for the same package version: ' + identifier)
                 if ordering > 0 or ordering == 0 and candidate.get('published_debug_archive') and not selected.get('published_debug_archive'):
                     selected, source = candidate, candidate_root
@@ -388,7 +394,7 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
         selected, source = layouts_present[0]
         for layout, root in layouts_present[1:]:
             ordering = native_compare(kind, layout['package_version'], selected['package_version'])
-            if ordering == 0 and layout['archive_sha256'] != selected['archive_sha256']:
+            if not independent_streams and ordering == 0 and layout['archive_sha256'] != selected['archive_sha256']:
                 raise RuntimeError('Conflicting published runtime layout archives')
             if ordering > 0:
                 selected, source = layout, root
@@ -435,7 +441,9 @@ def prepare(args):
     for identifier, library in annotated['libraries'].items():
         published = old['libraries'].get(identifier, {}).get('published_version')
         versions = library.setdefault('package_versions', {})
-        if published:
+        if args.type != 'rpm' and old.get('stream_libraries'):
+            versions.pop(args.type, None)
+        elif published:
             versions[args.type] = published
         elif old.get('metadata_scope') is None or identifier in old['metadata_scope']:
             versions.pop(args.type, None)
@@ -469,7 +477,7 @@ def prepare(args):
     selected.update(reverse_closure(current, abi_roots))
     selected = sorted(selected)
     breaking = bool(divergent) or any(item['status'] in ['breaking', 'removed'] for item in comparison['libraries'].values())
-    abi_requests = abi_consumers(old, abi_roots) if breaking else {}
+    abi_requests = abi_consumers(old, abi_roots, current if args.type != 'rpm' else None) if breaking else {}
     streams = set(name.strip() for name in (args.php_versions or ','.join(STREAMS)).split(',') if name.strip())
     if streams - set(STREAMS):
         raise RuntimeError('Unknown PHP streams: ' + ', '.join(sorted(streams - set(STREAMS))))
@@ -502,12 +510,6 @@ def prepare(args):
                 entry['compile_full'] |= affected['full'] or bool(set(affected['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'}))
                 entry['compile_packages'] = [] if entry['compile_full'] else sorted(set(entry['compile_packages']) | set(affected['packages']))
     selected = [identifier for identifier in selected if identifier in current['libraries']]
-    for identifier in set(annotated['libraries']) - set(selected):
-        versions = [libraries[identifier]['published_version'] for libraries in old.get('stream_libraries', {}).values()
-                    if libraries.get(identifier, {}).get('published_version')]
-        if versions:
-            minimum = min(versions, key=functools.cmp_to_key(lambda left, right: native_compare(args.type, left, right)))
-            annotated['libraries'][identifier].setdefault('package_versions', {})[args.type] = minimum
     comparison['candidate_fingerprint'] = fingerprint(annotated)
     retry_libraries = set(old.get('publication_drift', [])) | (set(sources) - set(content_sources))
     if forced_revision:
@@ -525,7 +527,9 @@ def prepare(args):
             'abi_core_rebuild_streams': sorted(stream for stream, entry in abi_requests.items()
                                              if entry['full'] or set(entry['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'})),
             'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'elf']} for identifier in selected},
-            'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
+            'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected
+                                   if (args.type == 'rpm' or not old.get('stream_libraries'))
+                                   and identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
             'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'elf']}
                                     for identifier in retry_libraries if identifier in selected and identifier not in content_sources and identifier not in rebuilt
                                     and identifier not in metadata_libraries
@@ -538,6 +542,8 @@ def prepare(args):
                                            if name in abi_requests.get(stream, {}).get('consumers', [])}
                                     for stream, versions in old.get('consumer_versions', {}).items()} if breaking else {},
             'comparison': comparison['libraries']}
+    if args.type != 'rpm' and selected:
+        plan['library_streams'] = sorted(streams | {stream for stream, entry in php.items() if entry['full'] or entry['packages']})
     if plan['removed_libraries']:
         raise RuntimeError('Library removal requires an explicit package migration: ' + ', '.join(plan['removed_libraries']))
     write_json(args.manifest_output, annotated)
@@ -713,6 +719,20 @@ def stage_debug_archive(record, destination, archives=None, helper=None):
         return {'path': str(output), 'sha256': digest}
 
 
+def published_libraries(plan, stream=None):
+    if stream is None:
+        return {identifier: dict(plan.get('publication_retries', {}).get(identifier, {}), published_version=version)
+                for identifier, version in plan.get('published_versions', {}).items()}
+    libraries = {}
+    for baseline in plan.get('baseline_states', []):
+        for identifier, library in baseline.get('stream_libraries', {}).get(stream, {}).items():
+            previous = libraries.get(identifier, {}).get('published_version')
+            version = library.get('published_version')
+            if identifier not in libraries or version and (not previous or native_compare(plan['type'], version, previous) > 0):
+                libraries[identifier] = library
+    return libraries
+
+
 def stage_publication_retries(args):
     plan = read_json(args.plan)
     kind = plan['type']
@@ -720,9 +740,43 @@ def stage_publication_retries(args):
     destination = Path(args.destination)
     destination.mkdir(parents=True, exist_ok=True)
     baselines = [(manifest(path, False), Path(path).parent) for path in args.baseline_manifest]
+    stream = getattr(args, 'php_stream', None)
+    if stream:
+        owners_requested = set(plan.get('library_streams', [])) | {
+            stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages')}
+        if kind == 'rpm' or stream not in owners_requested:
+            raise RuntimeError('Library publication owner is not in the build plan')
+        owners = []
+        for baseline, root in baselines:
+            owner = root / 'owners' / stream
+            if (owner / 'shared-libraries.json').is_file():
+                owners.append((manifest(owner / 'shared-libraries.json', False), owner))
+            elif set(baseline.get('stream_libraries', {})) == {stream}:
+                owners.append((dict(baseline, libraries=baseline['stream_libraries'][stream]), root))
+            elif stream in baseline.get('stream_libraries', {}):
+                raise RuntimeError('Missing retained library owner baseline: ' + stream)
+        baselines = owners
+        published = published_libraries(plan, stream)
+        for identifier, library in value['libraries'].items():
+            versions = library.setdefault('package_versions', {})
+            version = published.get(identifier, {}).get('published_version')
+            if version:
+                versions[kind] = version
+            else:
+                versions.pop(kind, None)
+    elif kind != 'rpm' and plan.get('library_streams'):
+        raise RuntimeError('Library publication requires a PHP repository owner')
+    if any(baseline.get('architecture') and normalized_arch(baseline['architecture'], kind) != normalized_arch(value['architecture'], kind)
+           for baseline, _ in baselines):
+        raise RuntimeError('Library publication baseline has a different architecture')
     copied = []
     identifiers = []
     for identifier, retry in sorted(plan.get('publication_retries', {}).items()):
+        if stream:
+            retry = published.get(identifier, {})
+            expected = plan.get('expected_libraries', {}).get(identifier, {})
+            if not retry.get('published_archive') or any(retry.get(key) != expected.get(key) for key in ['version', 'source_hash', 'elf']):
+                continue
         library = value['libraries'].get(identifier)
         if not library or any(library.get(key) != retry.get(key) for key in ['version', 'source_hash', 'elf']):
             raise RuntimeError('Publication retry no longer matches the SDK: ' + identifier)
@@ -1182,7 +1236,11 @@ def baseline(args):
             value = manifest(Path(source_args.output) / 'shared-libraries.json', False)
             if args.type != 'rpm' and source['owner'] in [stream.replace('.', '') for stream in STREAMS]:
                 owner = source['owner']
-                value['stream_libraries'] = {owner[0] + '.' + owner[1:]: copy.deepcopy(value['libraries'])}
+                stream = owner[0] + '.' + owner[1:]
+                value['stream_libraries'] = {stream: copy.deepcopy(value['libraries'])}
+                owner_root = destination / 'owners' / stream
+                shutil.copytree(source_args.output, owner_root)
+                write_json(owner_root / 'shared-libraries.json', value)
             baselines.append((value, source_args.output))
             captured.append(source)
         merged, divergent = merge_baselines(baselines, args.type, destination, independent_streams=args.type != 'rpm')
@@ -1353,8 +1411,14 @@ def cohort(args):
     if plan.get('build_only'):
         raise RuntimeError('An unpublished subset is build/test-only; publication requires a complete migration cohort')
     selected_streams = set(filter(None, getattr(args, 'php_streams', '').split(',')))
-    if selected_streams and not selected_streams <= {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages')}:
+    if selected_streams and not selected_streams <= (set(plan.get('library_streams', [])) | {stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages')}):
         raise RuntimeError('Publication streams are not in the original build plan')
+    owner_stream = None
+    if plan.get('library_streams') and args.type != 'rpm':
+        if len(selected_streams) != 1:
+            raise RuntimeError('Library publication requires exactly one PHP repository owner')
+        owner_stream = next(iter(selected_streams))
+    published = published_libraries(plan, owner_stream)
     known_baselines = plan.get('baseline_fingerprints', [plan['baseline_fingerprint']])
     current_baseline = manifest(args.baseline_manifest, False) if args.baseline_manifest else None
     baseline_changed = current_baseline is not None and fingerprint(current_baseline) not in known_baselines
@@ -1390,11 +1454,13 @@ def cohort(args):
             identifier = name[len('php-zts-lib-'):]
             expected = plan.get('expected_libraries', {}).get(identifier)
             if expected:
-                previous_version = plan.get('published_versions', {}).get(identifier)
+                previous_version = published.get(identifier, {}).get('published_version')
                 candidate_version = package['evr'] if args.type == 'rpm' else version
                 if previous_version:
                     ordering = native_compare(args.type, candidate_version, previous_version)
                     retry = plan.get('publication_retries', {}).get(identifier, {})
+                    if owner_stream and retry:
+                        retry = published.get(identifier, {})
                     if ordering < 0 or (ordering == 0 and file_sha256(path) != retry.get('published_archive_sha256')):
                         raise RuntimeError('Selected library must have a new package revision: ' + name)
                 with tempfile.TemporaryDirectory(prefix='shared-library-cohort-') as temporary:
@@ -1471,6 +1537,7 @@ def main():
     command.add_argument('--manifest-output', required=True)
     command.add_argument('--output', required=True)
     command.add_argument('--layout-source-hash')
+    command.add_argument('--php-stream', choices=STREAMS)
     command = commands.add_parser('layout-fingerprint')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command = commands.add_parser('prepare')

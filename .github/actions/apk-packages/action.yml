@@ -3,6 +3,11 @@ description: Reuse the current SDK, package selected PHP outputs and run native 
 runs:
     using: composite
     steps:
+        -   name: Select PHP stream library archives
+            shell: bash
+            run: |
+                python3 .github/actions/shared-libraries/workflow.py stage-libraries --source stage \
+                    --destination dist/apk --type apk --php-stream "$PHPV" --manifest-output stage/shared-libraries.json
         -   name: Compute sealed PHP cache identity
             if: env.LIBRARY_ONLY != 'true'
             id: payload-cache-key

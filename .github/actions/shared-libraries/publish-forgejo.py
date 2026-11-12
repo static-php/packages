@@ -114,7 +114,13 @@ def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=No
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
     present = {helper['package_metadata'](path, kind)[0] for path in directory.glob('*.' + package_type)}
     deferred = []
+    baselines = []
     for manifest in sorted(cohort.glob('shared-libs-*/baseline/shared-libraries.json')):
+        scoped = [manifest.parent / 'owners' / (owner[0] + '.' + owner[1:]) / 'shared-libraries.json' for owner in owners or []]
+        if scoped and json.loads(manifest.read_text()).get('stream_libraries') and not all(path.is_file() for path in scoped):
+            raise RuntimeError('Missing retained library owner baseline for mirror')
+        baselines.extend(scoped if scoped and all(path.is_file() for path in scoped) else [manifest])
+    for manifest in baselines:
         baseline = json.loads(manifest.read_text())
         records = [('php-zts-lib-' + identifier, value, 'published_archive', 'published_archive_sha256')
                    for identifier, value in baseline.get('libraries', {}).items()]

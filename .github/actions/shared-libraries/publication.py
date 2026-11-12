@@ -78,7 +78,8 @@ def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
         packaging = image if kind == 'apk' else pinned_image(target.get('package_images', {}).get(kind),
             'packages-builder-rhel-8' if kind == 'rpm' else 'packages-packager-debian')
         selection = plan.get('format_selection', {}).get(kind, plan)
-        streams = sorted(stream for stream, request in selection.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
+        consumers = {stream for stream, request in selection.get('php_requests', {}).items() if request.get('full') or request.get('packages')}
+        streams = sorted(consumers | set(selection.get('library_streams', [])))
         if not set(streams) <= set(STREAMS):
             raise RuntimeError('Unsupported PHP stream in build plan')
         if selected_php != 'all':
@@ -87,9 +88,9 @@ def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
             streams = [selected_php]
         required = ['shared-libs-' + kind + '-' + identity]
         if streams:
-            consumers = ['shared-consumers-' + kind + '-' + identity + '-php' + stream for stream in streams]
-            available = [name for name in consumers if name in state['artifacts']]
-            for missing in sorted(set(consumers) - set(available)):
+            artifacts = ['shared-' + ('consumers' if stream in consumers else 'validation') + '-' + kind + '-' + identity + '-php' + stream for stream in streams]
+            available = [name for name in artifacts if name in state['artifacts']]
+            for missing in sorted(set(artifacts) - set(available)):
                 print('::warning::Skipping unavailable stream: ' + missing, file=sys.stderr)
             if not available:
                 continue
@@ -167,7 +168,8 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
     prune_consumers(source, library)
-    streams = sorted(stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages'))
+    streams = sorted({stream for stream, request in plan.get('php_requests', {}).items() if request.get('full') or request.get('packages')}
+                     | set(plan.get('library_streams', [])))
     if selected_php != 'all':
         if selected_php not in streams:
             raise RuntimeError('Selected PHP stream is not in the retained build plan: ' + selected_php)

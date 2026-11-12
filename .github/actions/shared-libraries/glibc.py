@@ -157,7 +157,7 @@ def combine_plans(plans):
             'libraries': sorted(set().union(*(set(plan.get('libraries', [])) for plan in plans.values()))),
             'abi_rebuild_roots': sorted(set().union(*(set(plan.get('abi_rebuild_roots', [])) for plan in plans.values()))),
             'abi_core_rebuild_streams': sorted(set().union(*(set(plan.get('abi_core_rebuild_streams', [])) for plan in plans.values()))),
-            'format_selection': {kind: {name: plan.get(name, {} if name == 'php_requests' else []) for name in ['libraries', 'php_requests']} for kind, plan in plans.items()},
+            'format_selection': {kind: {name: plan.get(name, {} if name == 'php_requests' else []) for name in ['libraries', 'library_streams', 'php_requests']} for kind, plan in plans.items()},
             'format_plans': {kind: hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest() for kind, plan in plans.items()}}
 
 
@@ -214,32 +214,71 @@ def package_libraries(kind):
             classified['libraries'] = {name: entry for name, entry in classified['libraries'].items() if name in projected}
         write(manifest, classified)
         run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
-    manifest_option = ['--library-manifest=' + str(manifest)] if shared else []
+    if kind != 'rpm':
+        streams = set(plan.get('library_streams', [])) | {stream for stream, request in plan['php_requests'].items()
+                                                        if request.get('full') or request.get('packages')}
+        failed = []
+        for stream in sorted(streams):
+            owner = directory / 'owner-libraries' / stream
+            metadata = read(manifest)
+            for entry in metadata['libraries'].values():
+                entry.setdefault('package_versions', {}).pop(kind, None)
+            owner_manifest = owner / 'shared-libraries.json'
+            write(owner_manifest, metadata)
+            try:
+                package_library_archives(kind, directory, selected_sdk, owner_manifest, stream)
+            except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+                shutil.rmtree(owner)
+                failed.append(stream)
+                print(f'::warning::{kind} PHP {stream} library packaging failed: {error}; continuing with other streams', flush=True)
+        if streams and len(failed) == len(streams):
+            raise RuntimeError('Library packaging failed for every selected ' + kind + ' owner')
+    else:
+        package_library_archives(kind, directory, selected_sdk, manifest)
+
+
+def package_library_archives(kind, directory, sdk, manifest, stream=None):
+    owner = directory / 'owner-libraries' / stream if stream else directory
+    dist = owner if stream else ROOT / 'dist'
+    packages = dist / kind
+    plan_path = directory / 'shared-library-plan.json'
+    manifest_option = ['--library-manifest=' + str(manifest)]
+    environment = dict(os.environ, SPP_DIST_PATH=str(dist), SPP_SHARED_LIBRARY_PLAN=str(plan_path))
+    baseline = directory / 'baseline'
+    if stream:
+        baseline = baseline / 'owners' / stream
+        snapshot = (STAGE if kind == 'apk' else STAGE / 'common' / kind) / 'native-inventories' / (stream + '.json')
+        environment.update(SPP_NATIVE_INVENTORY=str(snapshot), SPP_FORGEJO_OWNER=stream.replace('.', ''))
+    environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in baseline.glob('shared-libraries.json')])
     retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
-                  '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
+                  '--plan', plan_path, '--destination', packages,
                   '--manifest', manifest, '--manifest-output', manifest,
-                  '--output', directory / 'publication-retries.json']
-    for baseline_path in directory.glob('baseline/shared-libraries.json'):
+                  '--output', owner / 'publication-retries.json']
+    for baseline_path in (directory / 'baseline').glob('shared-libraries.json'):
         retry_args += ['--baseline-manifest', baseline_path]
+    if stream:
+        retry_args += ['--php-stream', stream]
     run(retry_args)
-    selected = read(directory / 'publication-retries.json')['remaining_libraries']
-    if selected or read(directory / 'publication-retries.json').get('layout_required'):
-        environment = dict(os.environ, SPP_BASELINE_MANIFESTS=json.dumps([str(path.resolve()) for path in directory.glob('baseline/shared-libraries.json')]), SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
+    retry = read(owner / 'publication-retries.json')
+    selected = retry['remaining_libraries']
+    if selected or retry.get('layout_required'):
         selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
-        run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(selected_sdk),
-             *manifest_option, *selection, '--debuginfo', *revision_flags()], env=environment)
-    if kind in FORMATS and list((ROOT / 'dist' / kind).glob('*.' + kind)):
-        run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', selected_sdk,
-             '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', directory / 'payload-archive-receipt.json'])
-    run(['php', 'bin/build-payload', 'manifest', '--root', selected_sdk, '--type', kind,
-         *manifest_option, '--output', directory / 'shared-libraries.json'])
-    packages = directory / 'libraries'
-    packages.mkdir(exist_ok=True)
-    for archive in (ROOT / 'dist' / kind).glob('*.' + kind):
-        shutil.copy2(archive, packages / archive.name)
-    consumer_manifest = ROOT / 'dist' / kind / 'shared-library-consumers.json'
-    if consumer_manifest.exists():
-        shutil.copy2(consumer_manifest, packages / consumer_manifest.name)
+        run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(sdk),
+             *manifest_option, *selection, '--debuginfo', *(['--phpv=' + stream] if stream else []),
+             *revision_flags()], env=environment)
+    if kind in FORMATS and list(packages.glob('*.' + kind)):
+        run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', sdk,
+             '--packages', packages, '--type', kind, '--output', owner / 'payload-archive-receipt.json'])
+    run(['php', 'bin/build-payload', 'manifest', '--root', sdk, '--type', kind,
+         *manifest_option, '--output', owner / 'shared-libraries.json'], env=environment)
+    if not stream:
+        destination = directory / 'libraries'
+        destination.mkdir(exist_ok=True)
+        for archive in packages.glob('*.' + kind):
+            shutil.copy2(archive, destination / archive.name)
+        consumer_manifest = packages / 'shared-library-consumers.json'
+        if consumer_manifest.exists():
+            shutil.copy2(consumer_manifest, destination / consumer_manifest.name)
 
 
 def rebuild_library_consumers(roots, rebuilt, kind):
@@ -333,6 +372,8 @@ def classify():
     if glibc and not shared and (os.environ.get('PUBLISH') != 'false' or not os.environ.get('LIBRARIES')
             or any(request.get('full') or request.get('packages') for plan in plans.values() for request in plan['php_requests'].values())):
         run(['php', 'bin/build-payload', 'seal', '--root', sdk])
+    capture_native_inventories()
+    plans = {kind: read(format_stage(kind) / 'shared-library-plan.json') for kind in formats}
     with ThreadPoolExecutor(max_workers=len(formats)) as executor:
         list(executor.map(package_libraries, formats))
     if not glibc:
@@ -384,9 +425,13 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
     dependencies = {name: sorted({owners[item] for item in package.get('requires', []) if item in owners})
                     for name, package in latest.items()
                     if not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout'}
+    previous = next((baseline['stream_libraries'][stream] for baseline in plan.get('baseline_states', [])
+                     if stream in baseline.get('stream_libraries', {})), None)
     native = planner['abi_consumers']({'libraries': {name: {'elf': {}} for name in libraries},
+        'stream_libraries': {stream: previous} if previous is not None else {},
         'consumers': {stream: list(dependencies)}, 'consumer_dependencies': {stream: dependencies},
-        'consumer_inventory_complete': True}, libraries)[stream]
+        'consumer_inventory_complete': True}, set(plan.get('abi_rebuild_roots', libraries)) if previous is not None else libraries,
+        {'libraries': plan.get('expected_libraries', {})} if previous is not None else None)[stream]
     if native['full']:
         raise RuntimeError('Cannot map native ABI consumers for PHP ' + stream)
     pairs = {name: component for name, component in zip(consumers, components) if name in latest}
@@ -428,6 +473,7 @@ def capture_native_inventories():
         streams = [stream for stream, request in plan.get('php_requests', {}).items()
                    if (request.get('full') or request.get('packages'))
                    and (stream in wanted or plan.get('abi_break'))]
+        streams = sorted(set(streams) | set(plan.get('library_streams', [])))
         if not streams and plan.get('libraries'):
             streams = ['8.5']
         for stream in streams:
@@ -621,8 +667,14 @@ def package():
         flags += ['--packages=' + os.environ['PACKAGES']]
     environment = dict(os.environ)
     environment['SPP_SHARED_LIBRARY_PLAN'] = str(STAGE / kind / 'shared-library-plan.json')
+    if kind == 'deb':
+        environment.update(SPP_NATIVE_INVENTORY=str(STAGE / kind / 'native-inventories' / (stream + '.json')),
+                           SPP_FORGEJO_OWNER=stream.replace('.', ''))
+    baseline = STAGE / kind / 'baseline'
+    if kind == 'deb' and (baseline / 'owners' / stream).is_dir():
+        baseline = baseline / 'owners' / stream
     environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in [
-        STAGE / kind / 'baseline/shared-libraries.json', STAGE / 'published-baseline/baseline.json'] if path.is_file()])
+        baseline / 'shared-libraries.json', STAGE / 'published-baseline/baseline.json'] if path.is_file()])
     run(['php', 'bin/spp', 'package', *flags], env=environment)
     run(['php', 'bin/build-payload', 'verify', '--root', root])
     run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', root,

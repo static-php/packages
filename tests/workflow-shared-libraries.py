@@ -369,31 +369,60 @@ class CacheAndCohortTests(unittest.TestCase):
                                               env=env, text=True).splitlines()
             self.assertEqual(trusted, [str(root / 'downloads/libargon2'), str(root / 'downloads/source with spaces')])
 
-    def test_classification_hands_off_resolved_library_package_revisions(self):
+    def test_classification_hands_off_independent_owner_revisions_from_one_sdk(self):
         pipeline = module('native_pipeline', 'glibc.py')
         for kind in ['apk', 'rpm', 'deb']:
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                stage = root / 'stage'
-                with mock.patch.object(pipeline, 'ROOT', root), mock.patch.object(pipeline, 'STAGE', stage):
-                    sdk, directory = pipeline.format_sdk(kind), pipeline.format_stage(kind)
-                    sdk.mkdir(parents=True)
-                    directory.mkdir(parents=True, exist_ok=True)
-                    planned = {'libraries': {'zlib': {'package_versions': {kind: '1.3.1-1'}}}}
-                    pipeline.write(directory / 'shared-libraries.json', planned)
-                    pipeline.write(directory / 'shared-library-plan.json', {})
-                    def execute(args, **kwargs):
-                        if 'stage-publication-retries' in args:
-                            pipeline.write(directory / 'publication-retries.json', {'remaining_libraries': ['zlib']})
-                        elif args[:3] == ['php', 'bin/spp', 'package']:
-                            planned['libraries']['zlib']['package_versions'][kind] = '1.3.1-2'
-                            pipeline.write(sdk / 'shared-libraries.json', planned)
-                        elif 'manifest' in args:
-                            pipeline.write(directory / 'shared-libraries.json', pipeline.read(sdk / 'shared-libraries.json'))
-                    with mock.patch.object(pipeline, 'run', execute):
-                        pipeline.package_libraries(kind)
-                    result = pipeline.read(directory / 'shared-libraries.json')
-                    self.assertEqual(result['libraries']['zlib']['package_versions'][kind], '1.3.1-2')
+            for bump in ['false', 'true']:
+                with self.subTest(kind=kind, bump=bump), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    stage = root / 'stage'
+                    with mock.patch.object(pipeline, 'ROOT', root), mock.patch.object(pipeline, 'STAGE', stage), \
+                            mock.patch.dict(os.environ, BUMP=bump, PUBLISH='true', LIBRARIES='', PACKAGES='', ITERATION=''):
+                        sdk, directory = pipeline.format_sdk(kind), pipeline.format_stage(kind)
+                        sdk.mkdir(parents=True)
+                        directory.mkdir(parents=True, exist_ok=True)
+                        planned = {'libraries': {'zlib': {'package_versions': {kind: '1.3.1-8'}}}}
+                        pipeline.write(directory / 'shared-libraries.json', planned)
+                        pipeline.write(directory / 'shared-library-plan.json', {'libraries': ['zlib'],
+                            'library_streams': ['8.3', '8.6'] if kind != 'rpm' else [], 'php_requests': {}})
+                        packaged, seals = {}, []
+                        def execute(arguments, **kwargs):
+                            args = [str(arg) for arg in arguments]
+                            option = lambda name: Path(args[args.index(name) + 1])
+                            if 'seal' in args:
+                                seals.append(option('--root'))
+                            elif 'stage-publication-retries' in args:
+                                metadata = pipeline.read(option('--manifest'))
+                                if kind != 'rpm':
+                                    self.assertNotIn(kind, metadata['libraries']['zlib']['package_versions'])
+                                pipeline.write(option('--output'), {'remaining_libraries': ['zlib']})
+                            elif args[:3] == ['php', 'bin/spp', 'package']:
+                                env = kwargs['env']
+                                owner = env.get('SPP_FORGEJO_OWNER', 'rpm')
+                                manifest = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--library-manifest=')))
+                                self.assertIn('--buildroot=' + str(sdk), args)
+                                self.assertEqual('--bump' in args, bump == 'true')
+                                if kind != 'rpm':
+                                    stream = owner[0] + '.' + owner[1:]
+                                    self.assertIn('--phpv=' + stream, args)
+                                    self.assertEqual(Path(env['SPP_NATIVE_INVENTORY']).name, stream + '.json')
+                                    self.assertEqual(Path(env['SPP_DIST_PATH']), directory / 'owner-libraries' / stream)
+                                revision = (1 if owner == '83' else 8) + (bump == 'true')
+                                metadata = pipeline.read(manifest)
+                                metadata['libraries']['zlib']['package_versions'][kind] = '1.3.1-' + str(revision)
+                                packaged[owner] = (manifest, metadata)
+                            elif 'manifest' in args:
+                                owner = kwargs['env'].get('SPP_FORGEJO_OWNER', 'rpm')
+                                pipeline.write(option('--output'), packaged[owner][1])
+                        with mock.patch.object(pipeline, 'run', execute):
+                            pipeline.package_libraries(kind)
+                        self.assertEqual(seals, [sdk])
+                        self.assertEqual(pipeline.read(sdk / 'shared-libraries.json'), planned)
+                        self.assertEqual(set(packaged), {'rpm'} if kind == 'rpm' else {'83', '86'})
+                        for owner, (manifest, metadata) in packaged.items():
+                            expected = (1 if owner == '83' else 8) + (bump == 'true')
+                            result = pipeline.read(directory / 'shared-libraries.json' if kind == 'rpm' else manifest)
+                            self.assertEqual(result['libraries']['zlib']['package_versions'][kind], '1.3.1-' + str(expected))
 
     def test_classified_library_metadata_is_restored_before_php_build(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
@@ -423,6 +452,35 @@ assert Path('buildroot/shared-libraries.json').read_bytes() == Path('stage/share
             self.assertEqual(receipt['source_run_id'], '101')
             self.assertEqual(receipt['php_stream'], '8.4')
 
+    def test_owner_packaging_failure_keeps_other_owners_and_no_partial_archives(self):
+        pipeline = module('native_pipeline_isolation', 'glibc.py')
+        for failures in [{'8.3'}, {'8.3', '8.6'}]:
+            with self.subTest(failures=failures), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                stage = root / 'stage'
+                pipeline.write(stage / 'shared-libraries.json', {'libraries': {'zlib': {'package_versions': {}}}})
+                pipeline.write(stage / 'shared-library-plan.json', {'libraries': [],
+                    'php_requests': {'8.3': {'packages': ['cli']}, '8.6': {'full': True}}})
+                attempted = []
+                def package(kind, directory, sdk, manifest, stream):
+                    attempted.append(stream)
+                    (manifest.parent / 'partial.apk').write_text('partial')
+                    if stream in failures:
+                        raise RuntimeError('owner inventory unavailable')
+                with mock.patch.object(pipeline, 'ROOT', root), mock.patch.object(pipeline, 'STAGE', stage), \
+                        mock.patch.object(pipeline, 'run'), mock.patch.object(pipeline, 'package_library_archives', side_effect=package), \
+                        mock.patch.dict(os.environ, PUBLISH='true'):
+                    if len(failures) == 2:
+                        with self.assertRaisesRegex(RuntimeError, 'every selected apk owner'):
+                            pipeline.package_libraries('apk')
+                    else:
+                        pipeline.package_libraries('apk')
+                self.assertEqual(attempted, ['8.3', '8.6'])
+                for stream in attempted:
+                    self.assertEqual((stage / 'owner-libraries' / stream).exists(), stream not in failures)
+                with self.assertRaisesRegex(RuntimeError, 'Missing library packages for PHP 8.3'):
+                    workflow.stage_libraries(stage, root / 'dist', 'apk', '8.3', root / 'selected.json')
+
     def test_cache_changes_with_sources_configuration_and_toolchain(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
             root = Path(temporary)
@@ -448,6 +506,36 @@ assert Path('buildroot/shared-libraries.json').read_bytes() == Path('stage/share
             (root / 'artifacts/php/lib.deb').write_bytes(b'conflict')
             with self.assertRaisesRegex(RuntimeError, 'Conflicting cohort package'):
                 workflow.assemble(root / 'artifacts', root / 'dist', 'deb')
+
+    def test_owner_staging_and_publication_select_only_the_matching_archives_and_floors(self):
+        for kind in ['deb', 'apk']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                library = root / 'artifacts' / ('shared-libs-' + kind + '-x86_64')
+                library.mkdir(parents=True)
+                (library / 'shared-library-plan.json').write_text(json.dumps({'library_streams': ['8.3', '8.6', '8.4']}))
+                for stream, revision in [('8.3', 2), ('8.6', 9)]:
+                    owner = library / 'owner-libraries' / stream
+                    (owner / kind).mkdir(parents=True)
+                    (owner / kind / ('library.' + kind)).write_text(stream)
+                    (owner / 'shared-libraries.json').write_text(json.dumps({'libraries': {'zlib': {
+                        'package_versions': {kind: '1.3.1-' + str(revision)}}}}))
+                    destination = root / ('staged-' + stream)
+                    manifest = destination / 'shared-libraries.json'
+                    workflow.stage_libraries(library, destination, kind, stream, manifest)
+                    self.assertEqual((destination / ('library.' + kind)).read_text(), stream)
+                    self.assertEqual(json.loads(manifest.read_text())['libraries']['zlib']['package_versions'][kind], '1.3.1-' + str(revision))
+                    published = root / ('published-' + stream)
+                    workflow.assemble(root / 'artifacts', published, kind, [stream])
+                    self.assertEqual((published / ('library.' + kind)).read_text(), stream)
+                with self.assertRaisesRegex(RuntimeError, 'Missing library packages for PHP 8.4'):
+                    workflow.stage_libraries(library, root / 'missing', kind, '8.4', root / 'missing.json')
+                php_only = root / 'php-only-source'
+                php_only.mkdir()
+                (php_only / 'shared-library-plan.json').write_text('{}')
+                (php_only / 'shared-libraries.json').write_text(json.dumps({'libraries': {'zlib': {'package_versions': {kind: '1.3.1-9'}}}}))
+                workflow.stage_libraries(php_only, root / 'php-only', kind, '8.5', root / 'php-only.json')
+                self.assertEqual(json.loads((root / 'php-only.json').read_text())['libraries']['zlib']['package_versions'], {})
 
 
 class LibraryCacheInputTests(unittest.TestCase):

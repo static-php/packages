@@ -411,13 +411,18 @@ class PublicationBaselines(unittest.TestCase):
         self.assertEqual(result['consumer_inventory_streams'], list(planner['STREAMS']))
 
 
-    def test_apk_library_baseline_retains_the_highest_target_stream_revision(self):
+    def test_apk_library_baseline_retains_each_owner_revision_and_archive(self):
         def capture(args):
             version = '2.5.2-r5' if args.owner == '82' else '2.5.2-r1'
             value = planner['empty_manifest']()
             value['libraries']['attr'] = {'version': '2.5.2', 'source_hash': 'same-source',
                                           'elf': {}, 'published_version': version,
                                           'package_versions': {'apk': version}}
+            archive = Path(args.output) / ('attr-' + version + '.apk')
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(args.owner.encode())
+            value['libraries']['attr'].update(published_archive=archive.name,
+                                              published_archive_sha256=planner['file_sha256'](archive))
             planner['write_json'](Path(args.output) / 'shared-libraries.json', value)
         def compare(kind, left, right):
             left, right = int(left.rsplit('-r', 1)[1]), int(right.rsplit('-r', 1)[1])
@@ -429,6 +434,11 @@ class PublicationBaselines(unittest.TestCase):
         self.assertEqual(result['libraries']['attr']['package_versions']['apk'], '2.5.2-r5')
         self.assertEqual(result['stream_libraries']['8.2']['attr']['published_version'], '2.5.2-r5')
         self.assertEqual(result['stream_libraries']['8.5']['attr']['published_version'], '2.5.2-r1')
+        for stream, revision in [('8.2', '2.5.2-r5'), ('8.5', '2.5.2-r1')]:
+            owner = self.root / 'baseline/owners' / stream
+            stored = json.loads((owner / 'shared-libraries.json').read_text())
+            self.assertEqual(stored['libraries']['attr']['published_version'], revision)
+            self.assertEqual((owner / stored['libraries']['attr']['published_archive']).read_bytes(), stream.replace('.', '').encode())
         self.assertEqual(result['publication_drift'], [])
         self.assertEqual(planner['source_changes'](result, result), {})
         result['stream_libraries']['8.2']['attr']['source_hash'] = 'older-source'
@@ -450,6 +460,22 @@ class PublicationBaselines(unittest.TestCase):
                     result = json.loads((Path(args.output) / 'shared-libraries.json').read_text())
                     self.assertEqual(result['consumer_versions'][stream], {'php-zts-cli': stream + '.1-r2'})
                     self.assertTrue(all(not versions for target, versions in result['consumer_versions'].items() if target != stream))
+
+    def test_distinct_owner_archives_are_independent_but_same_repository_conflicts_fail(self):
+        baselines = []
+        for owner in ('82', '85'):
+            directory = self.root / owner
+            directory.mkdir()
+            archive = directory / 'attr.apk'
+            archive.write_bytes(owner.encode())
+            entry = {'version': '2.5.2', 'source_hash': 'same-source', 'elf': {},
+                     'published_version': '2.5.2-r1', 'published_archive': archive.name,
+                     'published_archive_sha256': planner['file_sha256'](archive)}
+            baselines.append((dict(planner['empty_manifest'](), libraries={'attr': entry}), directory))
+        with patch.dict(plan_globals, {'native_compare': lambda kind, left, right: 0}):
+            planner['merge_baselines'](baselines, 'apk', self.root / 'independent', independent_streams=True)
+            with self.assertRaisesRegex(RuntimeError, 'conflicting archive bytes'):
+                planner['merge_baselines'](baselines, 'apk', self.root / 'same-repository')
 
 
     def test_publication_progress_checks_each_streams_library_baseline(self):
