@@ -19,6 +19,9 @@ on:
             downloads_run_id:
                 description: "Optional: pin the spc-download source snapshot"
                 default: ""
+            builder_digest:
+                description: "Optional: pin the EL8 builder image (sha256:...)"
+                default: ""
             iteration:
                 description: "Optional: override package iteration"
                 default: ""
@@ -58,6 +61,10 @@ on:
                 required: false
                 default: ""
             downloads_run_id:
+                type: string
+                required: false
+                default: ""
+            builder_digest:
                 type: string
                 required: false
                 default: ""
@@ -149,10 +156,11 @@ jobs:
                     ARCHITECTURES: ${{ inputs.architectures }}
                     ALMA_VERSIONS: "8"
                     PHP_VERSIONS: ${{ inputs.php_versions }}
+                    BUILDER_DIGEST: ${{ inputs.builder_digest }}
                 run: |
                     python3 .github/actions/shared-libraries/workflow.py setup --type=glibc \
                         --architectures "$ARCHITECTURES" --alma-versions "$ALMA_VERSIONS" \
-                        --php-versions "$PHP_VERSIONS" --resolve-images >> "$GITHUB_OUTPUT"
+                        --php-versions "$PHP_VERSIONS" --builder-digest "$BUILDER_DIGEST" --resolve-images >> "$GITHUB_OUTPUT"
 
     build-libs:
         name: Build libs shared (${{ matrix.target }})

@@ -228,6 +228,7 @@ def main():
     setup.add_argument("--architectures", default="")
     setup.add_argument("--alma-versions", default="")
     setup.add_argument("--php-versions", default="")
+    setup.add_argument("--builder-digest", default="")
     setup.add_argument("--resolve-images", action="store_true")
     fp = sub.add_parser("fingerprint")
     fp.add_argument("--target", required=True)
@@ -286,6 +287,8 @@ def main():
     prune.add_argument("--library-artifact", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "setup":
+        if args.builder_digest and (args.type != "glibc" or not re.fullmatch("sha256:[a-f0-9]{64}", args.builder_digest)):
+            raise RuntimeError("Builder digest requires a shared glibc build and a sha256: digest")
         archs = csv(args.architectures, ["amd64", "arm64"] if args.type == "deb" else ["x86_64", "arm64"])
         archs = ["arm64" if arch == "aarch64" else "x86_64" if args.type == "glibc" and arch == "amd64" else arch for arch in archs]
         if any(arch not in (["amd64", "arm64"] if args.type == "deb" else ["x86_64", "arm64"]) for arch in archs):
@@ -296,19 +299,22 @@ def main():
         values = [{"arch": arch, "alma": alma, "target": ("alma" + alma + "-" if alma else "") + arch} for alma in alms for arch in archs]
         images = {}
         for value in values:
-            image = "ghcr.io/static-php/" + {
+            repository = "ghcr.io/static-php/" + {
                 "rpm": "packages-builder-rhel-" + value["alma"],
                 "glibc": "packages-builder-rhel-8",
                 "deb": "packages-packager-debian",
                 "apk": "packages-builder-alpine",
-            }[args.type] + ":latest"
+            }[args.type]
+            image = repository + ("@" + args.builder_digest if args.builder_digest else ":latest")
             if args.resolve_images:
                 if image not in images:
                     result = subprocess.check_output(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{json .Manifest}}"], universal_newlines=True)
                     digest = json.loads(result)["digest"]
                     if not re.fullmatch("sha256:[a-f0-9]{64}", digest):
                         raise RuntimeError("Invalid builder image digest")
-                    images[image] = image.rsplit(":", 1)[0] + "@" + digest
+                    if args.builder_digest and digest != args.builder_digest:
+                        raise RuntimeError("Resolved builder image differs from the requested digest")
+                    images[image] = repository + "@" + digest
                 image = images[image]
             value["image"] = image
             if args.type == "glibc":

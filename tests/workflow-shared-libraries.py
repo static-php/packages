@@ -259,6 +259,31 @@ class MatrixTests(unittest.TestCase):
                 if kind == 'glibc':
                     self.assertTrue(all(image.endswith('@' + digest) for value in matrix for image in value['package_images'].values()))
 
+    def test_glibc_builder_digest_pins_only_the_producer(self):
+        digest = 'sha256:' + 'a' * 64
+        builder = 'ghcr.io/static-php/packages-builder-rhel-8@' + digest
+        packager = 'ghcr.io/static-php/packages-packager-debian'
+        output = io.StringIO()
+        argv = ['workflow.py', 'setup', '--type=glibc', '--builder-digest=' + digest, '--resolve-images']
+        with mock.patch('sys.argv', argv), mock.patch('sys.stdout', output), \
+                mock.patch.object(workflow.subprocess, 'check_output', side_effect=[json.dumps({'digest': digest}), json.dumps({'digest': 'sha256:' + 'b' * 64})]) as inspect:
+            workflow.main()
+        matrix = json.loads(dict(line.split('=', 1) for line in output.getvalue().splitlines())['matrix'])['include']
+        self.assertEqual([call.args[0][4] for call in inspect.call_args_list], [builder, packager + ':latest'])
+        self.assertEqual({value['arch'] for value in matrix}, {'x86_64', 'arm64'})
+        for value in matrix:
+            self.assertEqual(value['image'], builder)
+            self.assertEqual(value['package_images'], {'rpm': builder, 'deb': packager + '@sha256:' + 'b' * 64})
+
+    def test_builder_digest_rejects_invalid_input_before_registry_reads(self):
+        for kind, digest in [('glibc', 'latest'), ('glibc', 'sha256:' + 'A' * 64), ('glibc', 'sha256:1234'), ('apk', 'sha256:' + 'a' * 64)]:
+            argv = ['workflow.py', 'setup', '--type=' + kind, '--builder-digest=' + digest, '--resolve-images']
+            with self.subTest(kind=kind, digest=digest), mock.patch('sys.argv', argv), \
+                    mock.patch.object(workflow.subprocess, 'check_output') as inspect:
+                with self.assertRaisesRegex(RuntimeError, 'Builder digest requires'):
+                    workflow.main()
+                inspect.assert_not_called()
+
 
 class ProgramStackTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('php') and (ROOT / 'vendor/autoload.php').exists(), 'PHP and Composer dependencies required')
