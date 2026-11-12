@@ -19,6 +19,10 @@ on:
             downloads_run_id:
                 description: "Optional: pin the spc-download source snapshot"
                 default: ""
+            repackage_run_id:
+                description: "Optional: repackage complete sealed binaries from this build run without compilation"
+                type: string
+                default: ""
             builder_digest:
                 description: "Optional: pin the EL8 builder image (sha256:...)"
                 default: ""
@@ -61,6 +65,10 @@ on:
                 required: false
                 default: ""
             downloads_run_id:
+                type: string
+                required: false
+                default: ""
+            repackage_run_id:
                 type: string
                 required: false
                 default: ""
@@ -115,8 +123,8 @@ jobs:
             packages: read
         outputs:
             downloads-run-id: ${{ steps.source.outputs.run-id }}
-            matrix: ${{ steps.matrix.outputs.matrix }}
-            php-versions: ${{ steps.matrix.outputs.php-versions }}
+            matrix: ${{ steps.source.outputs.matrix || steps.matrix.outputs.matrix }}
+            php-versions: ${{ steps.source.outputs.php-versions || steps.matrix.outputs.php-versions }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -127,8 +135,24 @@ jobs:
                 env:
                     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                     REQUESTED_RUN_ID: ${{ inputs.downloads_run_id }}
+                    REPACKAGE_RUN_ID: ${{ inputs.repackage_run_id }}
+                    ARCHITECTURES: ${{ inputs.architectures }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                    LIBRARIES: ${{ inputs.libraries }}
+                    PACKAGES: ${{ inputs.packages }}
+                    BUILDER_DIGEST: ${{ inputs.builder_digest }}
+                    DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
                 run: |
                     set -euo pipefail
+                    if [[ -n "$REPACKAGE_RUN_ID" ]]; then
+                        if [[ -n "$REQUESTED_RUN_ID$LIBRARIES$PACKAGES$BUILDER_DIGEST" ]]; then
+                            echo '::error::Retained binaries select their recorded sources and images; package and library filters are not supported'
+                            exit 1
+                        fi
+                        python3 .github/actions/shared-libraries/repackage.py inspect --run-id "$REPACKAGE_RUN_ID" \
+                            --architectures "$ARCHITECTURES" --php-versions "$PHP_VERSIONS" >> "$GITHUB_OUTPUT"
+                        exit 0
+                    fi
                     source_run="$REQUESTED_RUN_ID"
                     if [[ -z "$source_run" ]]; then
                         runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/spc-download.yml/runs?status=success&per_page=100" --paginate --jq '.workflow_runs[].id')
@@ -146,11 +170,13 @@ jobs:
                     fi
                     echo "run-id=$source_run" >> "$GITHUB_OUTPUT"
             -   name: Log in to builder registry
+                if: inputs.repackage_run_id == ''
                 env:
                     REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                     ACTOR: ${{ github.actor }}
                 run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
             -   name: Set target matrix and pin shared images
+                if: inputs.repackage_run_id == ''
                 id: matrix
                 env:
                     ARCHITECTURES: ${{ inputs.architectures }}
@@ -163,7 +189,7 @@ jobs:
                         --php-versions "$PHP_VERSIONS" --builder-digest "$BUILDER_DIGEST" --resolve-images >> "$GITHUB_OUTPUT"
 
     build-libs:
-        name: Build libs shared (${{ matrix.target }})
+        name: ${{ inputs.repackage_run_id != '' && 'Repackage libraries' || 'Build libs shared' }} (${{ matrix.target }})
         needs: setup-matrix
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
         container:
@@ -210,6 +236,7 @@ jobs:
                         echo "$RUNNER_TEMP/spp-python" >> "$GITHUB_PATH"
                     fi
             -   name: Download pinned source snapshot
+                if: inputs.repackage_run_id == ''
                 run: |
                     python3 .github/actions/shared-libraries/source-snapshot.py fetch
                     python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
@@ -223,9 +250,11 @@ jobs:
                     key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Compute source and toolchain fingerprint
+                if: inputs.repackage_run_id == ''
                 id: fingerprint
                 run: bash .github/actions/shared-libraries/run.sh fingerprint >> "$GITHUB_OUTPUT"
             -   name: Compute buildroot cache key
+                if: inputs.repackage_run_id == ''
                 id: cache-key
                 env:
                     FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
@@ -234,6 +263,7 @@ jobs:
                     echo "key=buildroot-shared-glibc-$TARGET-$FINGERPRINT" >> "$GITHUB_OUTPUT"
                     echo "seed-key=buildroot-shared-seed-glibc-$TARGET-$COMPATIBILITY" >> "$GITHUB_OUTPUT"
             -   name: Restore buildroot cache
+                if: inputs.repackage_run_id == ''
                 id: cache
                 uses: ./.github/actions/buildroot-cache
                 with:
@@ -244,13 +274,47 @@ jobs:
                 if: steps.cache.outputs.cache-hit == 'true' || steps.cache.outputs.seed-hit == 'true'
                 run: zstd -dc buildroot.tar.zst | tar -xf -
             -   name: Build changed shared libraries
+                if: inputs.repackage_run_id == ''
                 run: bash .github/actions/shared-libraries/run.sh libs
+            -   name: Download retained library SDK
+                if: inputs.repackage_run_id != ''
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.repackage_run_id }}
+                    artifact-ids: ${{ matrix.repackage_sdk_artifact }}
+                    merge-multiple: true
+            -   name: Download retained SDK metadata
+                if: inputs.repackage_run_id != ''
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.repackage_run_id }}
+                    artifact-ids: ${{ matrix.repackage_metadata_artifact }}
+                    merge-multiple: true
+                    path: stage/common
+            -   name: Repackage retained library binaries
+                if: inputs.repackage_run_id != ''
+                env:
+                    REPACKAGE_RUN_ID: ${{ inputs.repackage_run_id }}
+                    REPACKAGE_PAYLOAD_ARTIFACTS: ${{ toJson(matrix.repackage_payload_artifacts) }}
+                    CACHE_KEY: repackage-${{ inputs.repackage_run_id }}-${{ matrix.target }}
+                run: |
+                    zstd -dc buildroot.tar.zst | tar -xf -
+                    composer install --no-interaction --prefer-dist --no-progress
+                    python3 .github/actions/shared-libraries/repackage.py libraries
             -   name: Classify ABI and package shared libraries
                 id: classification
                 run: |
-                    bash .github/actions/shared-libraries/run.sh glibc-classify
+                    if [[ -z "$REPACKAGE_RUN_ID" ]]; then
+                        bash .github/actions/shared-libraries/run.sh glibc-classify
+                    fi
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
-                    python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
+                    if [[ -z "$REPACKAGE_RUN_ID" ]]; then
+                        python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
+                    fi
+                env:
+                    REPACKAGE_RUN_ID: ${{ inputs.repackage_run_id }}
             -   name: Build single PHP stream in the restored SDK workspace
                 if: steps.classification.outputs.inline-stream != ''
                 uses: ./.github/actions/php-payload
@@ -263,16 +327,17 @@ jobs:
                     ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-break }}
                     ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-core-rebuild }}
             -   name: Pack buildroot
-                if: inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
+                if: inputs.repackage_run_id == '' && (inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''))
                 run: tar -cf - buildroot | zstd -f -o buildroot.tar.zst
             -   name: Save buildroot cache
-                if: inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
+                if: inputs.repackage_run_id == '' && inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
                 uses: ./.github/actions/buildroot-cache
                 with:
                     mode: save
                     key: ${{ steps.cache-key.outputs.key }}
                     seed-key: ${{ steps.cache-key.outputs.seed-key }}
             -   name: Record target and buildroot
+                if: inputs.repackage_run_id == ''
                 env:
                     CACHE_KEY: ${{ steps.cache-key.outputs.key }}
                     ALMA: ${{ matrix.alma }}
@@ -294,7 +359,7 @@ jobs:
                     path: stage/common
                     retention-days: 1
             -   name: Stage common SDK buildroot
-                if: steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''
+                if: inputs.repackage_run_id == '' && steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
@@ -378,8 +443,8 @@ jobs:
                 run: |
                     set -euo pipefail
                     succeeded=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last | select(test("^Build libs shared \\("))' \
-                        | sed -E 's/^Build libs shared \(([^)]+)\)$/\1/' | sort -u)
+                        --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last | select(test("^(Build libs shared|Repackage libraries) \\("))' \
+                        | sed -E 's/^(Build libs shared|Repackage libraries) \(([^)]+)\)$/\2/' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
                         --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
                     python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
@@ -387,7 +452,7 @@ jobs:
                         | sed -E 's/^(matrix|any)=/package-\1=/' >> "$GITHUB_OUTPUT"
 
     build-payload:
-        name: Build payload (${{ matrix.target }} php${{ matrix.php-version }})
+        name: ${{ inputs.repackage_run_id != '' && 'Reuse payload' || 'Build payload' }} (${{ matrix.target }} php${{ matrix.php-version }})
         needs: [setup-matrix, compute-build-matrix]
         if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
         runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
@@ -439,6 +504,7 @@ jobs:
                         echo "$RUNNER_TEMP/spp-python" >> "$GITHUB_PATH"
                     fi
             -   name: Download pinned source snapshot
+                if: inputs.repackage_run_id == ''
                 run: |
                     python3 .github/actions/shared-libraries/source-snapshot.py fetch
                     python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
@@ -448,10 +514,12 @@ jobs:
                     name: shared-sdk-glibc-${{ matrix.target }}
                     path: stage
             -   name: Download exact common SDK
+                if: inputs.repackage_run_id == ''
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     name: shared-sdk-buildroot-glibc-${{ matrix.target }}
             -   name: Extract buildroot
+                if: inputs.repackage_run_id == ''
                 run: zstd -dc buildroot.tar.zst | tar -xf -
             -   name: Prepare Composer cache
                 run: mkdir -p ~/.cache/composer
@@ -463,7 +531,32 @@ jobs:
                     key: composer-${{ hashFiles('composer.lock') }}
                     restore-keys: composer-
             -   name: Build and stage common PHP payload
+                if: inputs.repackage_run_id == ''
                 uses: ./.github/actions/php-payload
+            -   name: Download retained sealed PHP payload
+                if: inputs.repackage_run_id != ''
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.repackage_run_id }}
+                    artifact-ids: ${{ matrix.repackage_payload_artifacts[matrix.php-version] }}
+                    merge-multiple: true
+            -   name: Verify and stage retained PHP bytes
+                if: inputs.repackage_run_id != ''
+                run: |
+                    zstd -dc php-payload.tar.zst | tar -xpf -
+                    composer install --no-interaction --prefer-dist --no-progress
+                    python3 .github/actions/shared-libraries/repackage.py payload
+                    python3 .github/actions/shared-libraries/payload-cache.py package-archive --payload "build/$PHPV" --output php-payload-repackaged.tar.zst
+                    mv php-payload-repackaged.tar.zst php-payload.tar.zst
+            -   name: Stage reused common PHP payload
+                if: inputs.repackage_run_id != ''
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: shared-payload-glibc-${{ env.TARGET }}-php${{ env.PHPV }}
+                    path: php-payload.tar.zst
+                    compression-level: 0
+                    retention-days: 1
             -   name: Report skipped shared extensions
                 if: ${{ !cancelled() }}
                 env:
@@ -535,8 +628,8 @@ jobs:
                     set -euo pipefail
                     jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
                         --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last')
-                    succeeded=$(printf '%s\n' "$jobs" | sed -nE 's/^Build payload \(([^ ]+) php([^)]+)\)$/\1 \2/p' | sort -u)
-                    sdks=$(printf '%s\n' "$jobs" | sed -nE 's/^Build libs shared \(([^)]+)\)$/\1/p' | sort -u)
+                    succeeded=$(printf '%s\n' "$jobs" | sed -nE 's/^(Build|Reuse) payload \(([^ ]+) php([^)]+)\)$/\2 \3/p' | sort -u)
+                    sdks=$(printf '%s\n' "$jobs" | sed -nE 's/^(Build libs shared|Repackage libraries) \(([^)]+)\)$/\2/p' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
                         --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" --sdk-succeeded "$sdks" >> "$GITHUB_OUTPUT"
 

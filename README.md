@@ -62,6 +62,18 @@ Debian images provide packaging and runtime-test tools; production glibc
 compilation runs in the EL8 builder. Use the shared glibc workflow with
 `publish=false` to build and validate without updating repositories.
 
+For packaging changes, reuse a completed glibc run's sealed SDK and complete PHP
+payloads with `repackage_run_id`. This skips source downloads and compilation,
+bumps package revisions when requested, and runs the normal native upgrade checks:
+
+```sh
+gh workflow run build-rpm-modular-packages.yml --ref master \
+    -f repackage_run_id="$GLIBC_RUN_ID" -f bump=true -f publish=false
+```
+
+The run's SDK and PHP payload artifacts must still be retained (one day). Partial
+payloads are rejected; missing artifacts never trigger a rebuild.
+
 Publish an existing validated build with `publish-packages.yml`, selecting one
 format at a time. RPM and DEB use the same shared EL8 build run ID; APK uses its
 Alpine build run ID:

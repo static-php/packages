@@ -14,6 +14,10 @@ on:
             downloads_run_id:
                 description: "Optional: pin the spc-download source snapshot"
                 default: ""
+            repackage_run_id:
+                description: "Optional: repackage complete sealed binaries from this build run without compilation"
+                type: string
+                default: ""
             iteration:
                 description: "Optional: override package iteration"
                 default: ""
@@ -49,6 +53,10 @@ on:
                 required: false
                 default: ""
             downloads_run_id:
+                type: string
+                required: false
+                default: ""
+            repackage_run_id:
                 type: string
                 required: false
                 default: ""
@@ -98,6 +106,7 @@ jobs:
             mode: ${{ inputs.mode }}
             libraries: ${{ inputs.libraries }}
             downloads_run_id: ${{ inputs.downloads_run_id }}
+            repackage_run_id: ${{ inputs.repackage_run_id }}
             iteration: ${{ inputs.iteration }}
             bump: ${{ inputs.bump }}
             publish: ${{ inputs.publish }}

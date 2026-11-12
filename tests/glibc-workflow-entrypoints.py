@@ -74,12 +74,14 @@ class SharedGlibcEntrypoints(unittest.TestCase):
 
     def test_job_filters_accept_reusable_workflow_names_and_exclude_failures(self):
         data, _ = workflow('build-rpm-modular-packages.yml')
-        cases = {
-            'compute-build-matrix': ('Build libs shared', False),
-            'compute-package-matrix': ('Build payload', True),
-        }
-        for job, (label, payload) in cases.items():
-            with self.subTest(job=job):
+        cases = [
+            ('compute-build-matrix', 'Build libs shared', False),
+            ('compute-build-matrix', 'Repackage libraries', False),
+            ('compute-package-matrix', 'Build payload', True),
+            ('compute-package-matrix', 'Reuse payload', True),
+        ]
+        for job, label, payload in cases:
+            with self.subTest(job=job, label=label):
                 script = next(step['run'] for step in data['jobs'][job]['steps']
                               if '.jobs[]' in step.get('run', ''))
                 expression = re.search(r"--jq '([^']+)'", script).group(1)
