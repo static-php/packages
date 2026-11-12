@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix='spp-sdk-export-') as directory:
         (source / name).write_text(content)
     (source / 'lib/libvalue.so').symlink_to('libvalue.so.1')
     entry = {'files': ['lib/libvalue.so.1', 'lib/libvalue.so', 'license'], 'license_files': ['license'],
+             'abi_dump': {'libvalue.so.1': 'abi/missing-legacy.xml'},
              'file_hashes': {name: helper['file_hash'](source / name) for name in ['lib/libvalue.so.1', 'lib/libvalue.so', 'license']}}
     manifest = {'schema': 1, 'linkage': 'shared', 'libraries': {'value': entry}}
     (source / 'shared-libraries.json').write_text(json.dumps(manifest))
@@ -31,6 +32,7 @@ with tempfile.TemporaryDirectory(prefix='spp-sdk-export-') as directory:
     assert not (destination / 'bin/frankenphp').exists()
     assert not (destination / 'include/php').exists()
     assert not (destination / 'modules').exists()
+    assert not (destination / 'abi').exists()
     assert list(json.loads((destination / '.build.json').read_text())) == ['value']
     assert result['library_ownership_intersection'] == []
     assert (source / 'bin/php').read_text() == 'old PHP'

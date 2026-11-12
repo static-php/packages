@@ -19,18 +19,6 @@ RUN apk add --no-cache bash build-base linux-headers coreutils curl tar zstd xz 
         python3 py3-requests bison re2c flex autoconf automake gettext-dev libtool pkgconf \
         nasm gperf cmake patch perl unzip zlib-dev patchelf
 
-# Build a pinned ABI toolset for both architectures.
-ARG LIBABIGAIL_VERSION=2.10
-RUN apk add --no-cache elfutils-dev libxml2-dev xxhash-dev musl-fts-dev boost-dev && \
-    abi_build=$(mktemp -d) && trap 'rm -rf "$abi_build"' EXIT && \
-    curl -fsSL --retry 5 "https://sourceware.org/pub/libabigail/libabigail-${LIBABIGAIL_VERSION}.tar.xz" | \
-        tar -xJ -C "$abi_build" && \
-    cd "$abi_build/libabigail-${LIBABIGAIL_VERSION}" && \
-    PATH=/usr/bin:/bin ./configure --prefix=/usr/local \
-        --disable-apidoc --disable-manual --disable-deb --disable-rpm && \
-    PATH=/usr/bin:/bin make -j2 && PATH=/usr/bin:/bin make install && \
-    abidw --version && abidiff --version
-
 RUN RPM_ARCH=$(cat /tmp/rpm_arch) && \
     NFPM_ARCH=$(case "$RPM_ARCH" in aarch64) echo arm64 ;; *) echo x86_64 ;; esac) && \
     curl -L -o nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/v2.44.0/nfpm_2.44.0_Linux_${NFPM_ARCH}.tar.gz" && \

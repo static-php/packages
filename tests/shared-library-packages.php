@@ -107,7 +107,7 @@ try {
         $manifest['libraries']['fixture-' . $id] = [
             'version' => $id === 'base' ? '1.19' : '1.2.3', 'source_hash' => str_repeat('a', 64), 'license' => 'MIT',
             'license_files' => ['licenses/' . $id], 'files' => [$relative],
-            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [], 'abi_epoch' => 7,
+            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [],
             'elf' => [$relative => ['soname' => 'libfixture-' . $id . '.so.1', 'needed' => $needed[1], 'runpath' => [$libdir]]],
         ];
     }
@@ -154,13 +154,12 @@ try {
         check(!str_contains($header, 'php-zts-cli'), "Library depends on PHP CLI: {$header}");
         check(!str_contains($header, 'php84'), "Library version is PHP-tagged: {$header}");
         check(str_contains($header, $id === 'base' ? '1.19' : '1.2.3'), "Missing upstream library version: {$header}");
-        check(str_contains($header, '-abi-7'), "Missing private ABI capability: {$header}");
+        check(!preg_match('/php-zts-lib-[a-z0-9-]+-abi-[0-9]+/', $header), "Synthetic library ABI capability remains: {$header}");
         if ($type === 'rpm') {
             check(!preg_match('/^libfixture-.*\(\)\(64bit\)$/m', $header), 'Private library advertises a system SONAME capability');
         }
     }
     check(str_contains($headers['consumer'], 'php-zts-lib-fixture-base'), 'Direct library dependency missing');
-    check(str_contains($headers['consumer'], 'php-zts-lib-fixture-base-abi-7'), 'Private ABI dependency missing');
     $manifest = json_decode(file_get_contents(BUILD_ROOT_PATH . '/shared-libraries.json'), true, flags: JSON_THROW_ON_ERROR);
     $newFloor = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->getPackageVersion('fixture-base', $type);
     check($newFloor !== $oldFloor && str_contains($newFloor, $type === 'apk' ? '-r2' : '-2'), 'Resolved library revision was not persisted');
@@ -171,7 +170,6 @@ try {
     };
     check(str_contains($headers['consumer'], $requirement($newFloor)), 'New-symbol consumer permits the older library revision');
     check(str_contains($oldHeader, $requirement($oldFloor)), 'Old compatible consumer lost its original library floor');
-    check(str_contains($oldHeader, 'php-zts-lib-fixture-base-abi-7') && str_contains($headers['base'], 'php-zts-lib-fixture-base-abi-7'), 'Compatible rebuild changed its ABI capability');
     check(!str_contains($headers['base'], 'php-zts-lib-fixture-consumer'), 'Dependency incorrectly inherited from another package');
     $consumers = json_decode(file_get_contents(DIST_PATH . '/' . $type . '/shared-library-consumers.json'), true, flags: JSON_THROW_ON_ERROR);
     check($consumers['consumers']['php-zts-lib-fixture-consumer']['libraries'] === ['fixture-base'], 'Incorrect consumer metadata');
@@ -227,7 +225,7 @@ try {
             installApkFixture($root . '/installed-version-' . $index++, $pair, [$name => $expected . '-r1', $name . '-debuginfo' => $expected . '-r1']);
         }
     }
-    echo "Passed {$type} shared library packages, revision floors, ABI capabilities and debuginfo without PHP.\n";
+    echo "Passed {$type} shared library packages, revision floors and debuginfo without PHP.\n";
 } finally {
     $oldTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $oldTmp);
     removeFixture($root);

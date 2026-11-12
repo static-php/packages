@@ -52,6 +52,9 @@ final class SharedLibraries
             if (!is_string($id) || !preg_match('/^[a-z0-9][a-z0-9-]*$/D', $id) || !is_array($entry)) {
                 throw new RuntimeException('Invalid shared-library identifier');
             }
+            unset($entry['abi_dump'], $entry['abi_dump_hashes'], $entry['abi_empty'], $entry['abi_comparison'], $entry['abi_reference_version'],
+                $entry['abi_epoch'], $entry['abi_capability'], $entry['abi_capabilities']);
+            $this->manifest['libraries'][$id] = $entry;
             foreach (['version', 'source_hash', 'license'] as $field) {
                 if (!is_string($entry[$field] ?? null) || trim($entry[$field]) === '') {
                     throw new RuntimeException("Library {$id} has no {$field}");
@@ -63,7 +66,6 @@ final class SharedLibraries
             if (!is_array($entry['files'] ?? null) || $entry['files'] === [] || !is_array($entry['license_files'] ?? null) || $entry['license_files'] === []) {
                 throw new RuntimeException("Library {$id} must declare runtime files and licenses");
             }
-            $this->abiCapability($id);
             $mapping = [];
             foreach ($entry['files'] as $key => $value) {
                 $relative = is_int($key) ? $value : $key;
@@ -102,12 +104,6 @@ final class SharedLibraries
             foreach ($entry['license_files'] as $relative) {
                 $source = $this->source($relative);
                 $this->expandFile($source, '/usr/share/licenses/' . $this->libraryPackageName($id) . '/' . $relative, $mapping);
-            }
-            foreach ($entry['abi_dump'] ?? [] as $soname => $relative) {
-                if (!is_string($soname) || basename($soname) !== $soname || !preg_match('/^[A-Za-z0-9_.+-]+$/D', $soname)) {
-                    throw new RuntimeException("Invalid ABI dump SONAME for {$id}");
-                }
-                $mapping[$this->source($relative)] = '/usr/share/php-zts/libraries/abi/' . $id . '/' . $soname . '.xml';
             }
             $this->files[$id] = $mapping;
         }
@@ -303,7 +299,7 @@ final class SharedLibraries
     {
         $data = $this->manifest;
         foreach ($data['libraries'] as &$entry) {
-            foreach (['elf', 'runtime_assets', 'abi_dump', 'abi_dump_hashes', 'package_versions'] as $field) {
+            foreach (['elf', 'runtime_assets', 'package_versions'] as $field) {
                 if (isset($entry[$field]) && is_array($entry[$field])) {
                     $entry[$field] = (object) $entry[$field];
                 }
@@ -356,26 +352,7 @@ final class SharedLibraries
         }
     }
 
-    public function abiCapability(string $id): string
-    {
-        $entry = $this->get($id);
-        $epoch = $entry['abi_epoch'] ?? 1;
-        if (!is_int($epoch) || $epoch < 1) {
-            throw new RuntimeException("Invalid ABI epoch for {$id}");
-        }
-        $capability = $this->libraryPackageName($id) . '-abi-' . $epoch;
-        if (isset($entry['abi_capability']) && $entry['abi_capability'] !== $capability) {
-            throw new RuntimeException("Invalid ABI capability for {$id}");
-        }
-        foreach ($entry['abi_capabilities'] ?? [] as $provided) {
-            if ($provided !== $capability) {
-                throw new RuntimeException("Historical ABI capability for {$id} must not satisfy current consumers");
-            }
-        }
-        return $capability;
-    }
-
-    /** @return list<array{id:string,package:string,version:string,capability:string}> */
+    /** @return list<array{id:string,package:string,version:string}> */
     public function dependenciesForFiles(array $files, ?string $ownId = null, array $extraDlopen = []): array
     {
         $ids = [];
@@ -429,7 +406,7 @@ final class SharedLibraries
         ksort($ids);
         $dependencies = [];
         foreach (array_keys($ids) as $id) {
-            $dependencies[] = ['id' => $id, 'package' => $this->libraryPackageName($id), 'version' => self::normalizeVersion($this->get($id)['version']), 'capability' => $this->abiCapability($id)];
+            $dependencies[] = ['id' => $id, 'package' => $this->libraryPackageName($id), 'version' => self::normalizeVersion($this->get($id)['version'])];
         }
         return $dependencies;
     }
@@ -463,7 +440,6 @@ final class SharedLibraries
                 'apk' => $dependency['package'] . '>=' . $version,
                 default => $dependency['package'] . ' >= ' . $version,
             };
-            $result[] = $dependency['capability'];
         }
         return $result;
     }

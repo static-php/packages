@@ -64,13 +64,14 @@ try {
     foreach (['stable', 'changing'] as $name) {
         $relative = 'lib/lib' . $name . '.so.1';
         $manifest['libraries'][$name] = ['version' => '1.0', 'source_hash' => 'fixture', 'files' => [$relative],
-            'elf' => [$relative => ['soname' => basename($relative)]], 'abi_epoch' => 1];
+            'elf' => [$relative => ['soname' => basename($relative)]]];
     }
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     $configuration = ['php-version' => '8.6.0RC4', 'extensions' => '', 'shared-extensions' => 'pdo_pgsql', 'sapi' => 'cli',
         'build-options' => ['with-shared-libs' => true, 'with-shared-libdir' => '/usr/lib/php-zts/lib'], 'extra-env' => ['SPC_LIBC' => 'glibc']];
     BuildPayload::record($root, $configuration, '8.6.0RC4', php_uname('m'));
     $cached = BuildPayload::seal($root)->metadata();
+    $cached['library_abi']['stable']['epoch'] = 999;
     $metadataPath = 'provenance/cached-consumer/build-payload.json';
     file_put_contents($root . '/' . $metadataPath, json_encode($cached));
     $coreHash = hash_file('sha256', $root . '/bin/php');
@@ -82,10 +83,10 @@ try {
     $proof = ['schema' => 1, 'cached_metadata_path' => $metadataPath,
         'cached_metadata_sha256' => hash_file('sha256', $root . '/' . $metadataPath),
         'rebuild_packages' => ['pdo_pgsql'], 'incompatible_libraries' => ['changing'],
-        'retained_library_abi' => ['stable' => $cached['library_abi']['stable']],
+        'retained_library_abi' => ['stable' => ['sonames' => $cached['library_abi']['stable']['sonames']]],
         'removed_files' => $removed, 'library_dependencies' => ['changing' => [], 'stable' => []],
         'retained_dlopen_libraries' => []];
-    $manifest['libraries']['changing']['abi_epoch'] = 2;
+    $manifest['libraries']['changing']['elf']['lib/libchanging.so.1']['soname'] = 'libchanging.so.2';
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     rejected(static fn () => BuildPayload::graft($root, $cached), 'requires a different library ABI');
     rejected(static fn () => BuildPayload::graft($root, $cached, $proof), 'was not removed');
@@ -113,12 +114,12 @@ try {
     $tampered = $proof;
     $tampered['retained_dlopen_libraries'] = ['changing'];
     rejected(static fn () => BuildPayload::graft($root, $cached, $tampered), 'Retained PHP consumers require');
-    $manifest['libraries']['stable']['abi_epoch'] = 2;
+    $manifest['libraries']['stable']['elf']['lib/libstable.so.1']['soname'] = 'libstable.so.2';
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     $tampered = $proof;
     $tampered['incompatible_libraries'][] = 'stable';
     rejected(static fn () => BuildPayload::graft($root, $cached, $tampered), 'Retained PHP consumers require');
-    $manifest['libraries']['stable']['abi_epoch'] = 1;
+    $manifest['libraries']['stable']['elf']['lib/libstable.so.1']['soname'] = 'libstable.so.1';
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     $payload = BuildPayload::graft($root, $cached, $proof);
     check($payload->isSealed(), 'Scoped ABI graft was not sealed');
@@ -126,7 +127,8 @@ try {
     check(hash_file('sha256', $root . '/bin/php') === $coreHash, 'Scoped ABI graft changed raw core bytes');
     check(hash_file('sha256', $root . '/' . $cached['prepared']['bin/php']['runtime']['path']) === $preparedCoreHash, 'Scoped ABI graft changed prepared core bytes');
     check(!file_exists($root . '/modules/pdo_pgsql-zts-86.so'), 'Scoped ABI graft restored an incompatible module');
-    check($payload->metadata()['library_abi']['changing']['epoch'] === 2, 'Graft did not retain the current SDK ABI');
+    check($payload->metadata()['library_abi']['changing'] === ['sonames' => ['libchanging.so.2']], 'Graft did not retain the current SDK library name');
+    check($payload->metadata()['library_abi']['stable'] === ['sonames' => ['libstable.so.1']], 'Graft retained a synthetic library generation');
     check($payload->metadata()['consumer_build_provenance']['library_build_provenance'] === $cached['library_build_provenance'], 'Original consumer provenance changed');
     check(hash_file('sha256', $root . '/' . $metadataPath) === $proof['cached_metadata_sha256'], 'Original cached metadata was modified');
     file_put_contents($root . '/proof.json', json_encode($proof));
@@ -142,7 +144,7 @@ try {
     foreach ($proof['removed_files'] as $relative) {
         unlink($root . '/' . $relative);
     }
-    $manifest['libraries']['changing']['abi_epoch'] = 3;
+    $manifest['libraries']['changing']['elf']['lib/libchanging.so.1']['soname'] = 'libchanging.so.3';
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     check(BuildPayload::graft($root, $cached, $proof)->isSealed(), 'A core with no private-library dependency could not be reused');
     echo "Passed scoped ABI graft, unchanged core bytes, original provenance, direct and transitive retained dependency checks.\n";

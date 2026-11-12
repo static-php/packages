@@ -313,8 +313,22 @@ class CreatePackages
     private static function migrationNextIteration(string $name, string $version, string $architecture, string $type): int
     {
         $version = $type === 'apk' ? self::validApkPackageVersion($version) : $version;
+        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         if ($name === 'php-zts-runtime-layout') {
-            return $type === 'apk' ? 0 : 1;
+            $revision = $type === 'apk' ? 0 : 1;
+            foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
+                $baseline = self::migrationBaseline($path);
+                if (isset($baseline['type']) && $baseline['type'] !== $type
+                    || $type === 'apk' && isset($baseline['architecture']) && $normalizeArch($baseline['architecture']) !== $normalizeArch($architecture)) {
+                    continue;
+                }
+                $published = preg_replace('/^\d+:/', '', $baseline['runtime_layout']['package_version'] ?? '');
+                $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
+                if (preg_match($pattern, $published, $release)) {
+                    $revision = max($revision, (int) $release[1]);
+                }
+            }
+            return $revision;
         }
         if (str_starts_with($name, 'php-zts-lib-')) {
             $minimum = $type === 'apk' ? 0 : 1;
@@ -328,12 +342,11 @@ class CreatePackages
             }
             $published = preg_replace('/^\d+:/', '', $plan['published_versions'][substr($name, strlen('php-zts-lib-'))] ?? '');
             $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
-            return preg_match($pattern, $published, $release) ? max($minimum, (int) $release[1] + 1) : $minimum;
+            return preg_match($pattern, $published, $release) ? max($minimum, (int) $release[1]) : $minimum;
         }
         $paths = json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR);
         $minimum = $type === 'apk' ? 0 : 1;
         $matchName = $type === 'deb' ? str_replace('_', '-', $name) : $name;
-        $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         [$phpVersion] = self::getPhpVersionAndArchitecture();
         preg_match('/^(\d+\.\d+)/', $phpVersion, $targetStream);
         foreach ($paths as $path) {
@@ -361,7 +374,7 @@ class CreatePackages
                 }
                 $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
                 if (preg_match($pattern, $published, $release)) {
-                    $minimum = max($minimum, (int) $release[1] + 1);
+                    $minimum = max($minimum, (int) $release[1]);
                 }
             }
         }
@@ -603,8 +616,7 @@ class CreatePackages
             $resolved = null;
             foreach ($packages as $package) {
                 if (($package['name'] ?? '') !== self::$sharedLibraries->libraryPackageName($id)
-                    || $normalizeArch($package['architecture'] ?? '') !== self::$sharedLibraries->architecture()
-                    || !in_array(self::$sharedLibraries->abiCapability($id), $package['provides'] ?? [], true)) {
+                    || $normalizeArch($package['architecture'] ?? '') !== self::$sharedLibraries->architecture()) {
                     continue;
                 }
                 $version = $package['version'];
@@ -1372,7 +1384,7 @@ class CreatePackages
 
         $rpmVersion = self::migrationPackageVersion('rpm', $name, $rpmVersion, $architecture);
 
-        // Calculate iteration for RPM (--iteration override > --bump remote query > local)
+        // Calculate iteration for RPM (--iteration override > --bump > existing revision).
         $baseIteration = self::resolveIteration($name, $rpmVersion, $architecture, 'rpm');
 
         $iteration = $baseIteration;
@@ -1380,6 +1392,7 @@ class CreatePackages
 
         $fpmArgs = [...[
             'fpm',
+            '--force',
             '-s', 'dir',
             '-t', 'rpm',
             '--no-rpm-autoreqprov',
@@ -1575,7 +1588,7 @@ class CreatePackages
 
         $debVersion = self::migrationPackageVersion('deb', $name, $debVersion, $debArch);
 
-        // Calculate iteration for DEB (--iteration override > --bump remote query > local)
+        // Calculate iteration for DEB (--iteration override > --bump > existing revision).
         $iteration = self::resolveIteration($name, $debVersion, $debArch, 'deb');
 
         //$osRelease = parse_ini_file('/etc/os-release');
@@ -1589,6 +1602,7 @@ class CreatePackages
 
         $fpmArgs = [...[
             'fpm',
+            '--force',
             '-s', 'dir',
             '-t', 'deb',
             '--deb-compression', $isDebuginfo ? 'gz' : 'xz',
@@ -1786,7 +1800,7 @@ class CreatePackages
 
         $apkVersion = self::migrationPackageVersion('apk', $name, self::toApkVersion($apkVersion), $architecture);
 
-        // Calculate iteration for APK (--iteration override > --bump remote query > local)
+        // Calculate iteration for APK (--iteration override > --bump > existing revision).
         $iteration = self::resolveIteration($name, $apkVersion, $architecture, 'apk');
 
         // APK uses r{iteration} format for revision number
@@ -2405,7 +2419,7 @@ class CreatePackages
             }
         }
 
-        return $maxIteration + 1;
+        return max($maxIteration, $packageType === 'apk' ? 0 : 1);
     }
 
     /**
@@ -2413,7 +2427,7 @@ class CreatePackages
      *   1. explicit --iteration override (same value for every package)
      *   2. --bump: (max iteration currently published on the remote for this exact
      *      name+version+arch) + 1, computed per package
-     *   3. default: next iteration derived from locally-present dist files
+     *   3. default: preserve the existing published/local revision, or use the initial revision
      */
     public static function resolveIteration(string $name, string $version, string $architecture, string $packageType): string
     {
@@ -2422,21 +2436,11 @@ class CreatePackages
         }
         // A -debuginfo package pins its base with a strict (= version-iteration) dependency,
         // so the pair must resolve to ONE iteration. Resolve per base package and memoise:
-        // the debuginfo call hits the cache instead of re-querying (remote registries can
-        // have drifted base/debuginfo iterations from past partial publishes, and a local
-        // dist scan after the base file exists would be off by one).
+        // the debuginfo call hits the cache instead of re-querying remote registries.
         $base = preg_replace('/-debuginfo$/', '', $name);
         $key = "{$base}|{$version}|{$architecture}|{$packageType}";
         if (!isset(self::$resolvedIterations[$key])) {
-            $publishingLibrary = false;
-            if (str_starts_with($base, 'php-zts-lib-') && getenv('PUBLISH') === 'true' && ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN'))) {
-                $plan = self::migrationBaseline($planPath);
-                $publishingLibrary = ($plan['type'] ?? null) === $packageType && !($plan['build_only'] ?? false)
-                    && in_array(substr($base, strlen('php-zts-lib-')), $plan['libraries'] ?? [], true);
-            }
-            // Only selected libraries reach packaging. Their captured baseline may
-            // belong to a PHP stream with a lower revision than another live stream.
-            if (self::$bump || $publishingLibrary) {
+            if (self::$bump) {
                 $next = self::getRemoteNextIteration($base, $version, $architecture, $packageType);
                 if (self::$debuginfo) {
                     // Heal existing drift: jump past the highest published iteration of either

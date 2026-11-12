@@ -22,9 +22,9 @@ $options = getopt('', ['baseline-root:']);
 
 try {
     foreach ([
-        ['rpm', '1.13.3_86.0~rc4', '1.13.3_86.0~rc4-1.el8', 'x86_64', 2, 'rpm/el8/x86_64/8.6/baseline.json'],
-        ['deb', '1.13.3+php86.0~rc4', '1.13.3+php86.0~rc4-1', 'amd64', 2, 'deb/x86_64/8.6/baseline.json'],
-        ['apk', '1.13.3.0_p86_p0_rc4', '1.13.3p86.0_rc4-r0', 'x86_64', 1, 'apk/x86_64/8.6/baseline.json'],
+        ['rpm', '1.13.3_86.0~rc4', '1.13.3_86.0~rc4-1.el8', 'x86_64', 1, 'rpm/el8/x86_64/8.6/baseline.json'],
+        ['deb', '1.13.3+php86.0~rc4', '1.13.3+php86.0~rc4-1', 'amd64', 1, 'deb/x86_64/8.6/baseline.json'],
+        ['apk', '1.13.3.0_p86_p0_rc4', '1.13.3p86.0_rc4-r0', 'x86_64', 0, 'apk/x86_64/8.6/baseline.json'],
     ] as [$type, $version, $published, $arch, $expected, $relative]) {
         $path = $root . '/' . $type . '.json';
         if (isset($options['baseline-root'])) {
@@ -40,13 +40,13 @@ try {
         putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$path], JSON_THROW_ON_ERROR));
         $iteration = $resolve->invoke(new frankenphp(), 'frankenphp', $version, 'x86_64', $type, null, false);
         if ($iteration !== (string) $expected) {
-            throw new RuntimeException($type . ' FrankenPHP bump=false did not advance the captured static revision');
+            throw new RuntimeException($type . ' FrankenPHP bump=false changed the captured revision');
         }
         if ($resolve->invoke(new frankenphp(), 'frankenphp', $version, 'x86_64', $type, '17', false) !== '17') {
             throw new RuntimeException($type . ' FrankenPHP lost the explicit revision override');
         }
     }
-    echo "Passed FrankenPHP RPM/DEB/APK first shared migration with bump=false and explicit overrides.\n";
+    echo "Passed FrankenPHP RPM/DEB/APK revision preservation with bump=false and explicit overrides.\n";
 } finally {
     $previous === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previous);
     foreach (glob($root . '/*') as $path) {

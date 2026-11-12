@@ -62,7 +62,7 @@ try {
     symlink('libanswer.so.1', $root . '/lib/libanswer.so');
     command([$compiler, '-g', $root . '/main.c', '-L' . $root . '/lib', '-lanswer', '-Wl,--enable-new-dtags,-rpath,/usr/lib/php-zts/lib', '-o', $root . '/bin/php']);
     $manifest = ['schema' => 1, 'linkage' => 'shared', 'libc' => 'glibc', 'architecture' => php_uname('m'), 'libraries' => [
-        'openssl' => ['version' => '1.0', 'source_hash' => 'fixture', 'files' => ['lib/libanswer.so.1'], 'elf' => ['lib/libanswer.so.1' => ['soname' => 'libanswer.so.1']], 'abi_epoch' => 1],
+        'openssl' => ['version' => '1.0', 'source_hash' => 'fixture', 'files' => ['lib/libanswer.so.1'], 'elf' => ['lib/libanswer.so.1' => ['soname' => 'libanswer.so.1']], 'abi_dump' => ['libanswer.so.1' => 'abi/answer.xml']],
     ]];
     file_put_contents($root . '/shared-libraries.json', json_encode($manifest));
     $configuration = ['php-version' => '8.6.0RC4', 'extensions' => 'openssl', 'shared-extensions' => 'curl,fileinfo', 'sapi' => 'cli', 'build-options' => ['with-shared-libs' => true, 'with-shared-libdir' => '/usr/lib/php-zts/lib', 'with-config-file-path' => '/etc/php-zts'], 'extra-env' => ['SPC_LIBC' => 'glibc']];
@@ -72,7 +72,9 @@ try {
     $payload = BuildPayload::seal($root);
     check($payload->isSealed() && $payload->phpVersion() === '8.6.0RC4', 'Sealed build identity lost');
     check($payload->configuration() === $configuration, 'Recorded build configuration changed');
+    check($payload->metadata()['library_abi']['openssl'] === ['sonames' => ['libanswer.so.1']], 'Library cache identity contains more than runtime names');
     check($payload->metadata()['module_api'] === '20260922', 'Recorded PHP module ABI is missing');
+    check($payload->metadata()['openssl_files'] === ['lib/libanswer.so.1'], 'OpenSSL variant still requires obsolete ABI dumps');
     $prepared = $payload->prepareFile($root . '/bin/php');
     check($sourceHash === hash_file('sha256', $root . '/bin/php'), 'Sealing changed SDK ABI input');
     check($prepared['runtime'] === $root . '/payload/runtime/bin/php', 'Prepared runtime path is unstable');
@@ -120,6 +122,7 @@ try {
     rejected(static fn () => BuildPayload::refreshAssets($root, $root . '/downloads'), 'does not match');
     check(hash_file('sha256', $root . '/packaging/pie/pie.phar') === $pie['sha256'], 'Rejected PIE source changed the sealed package asset');
     $cached = BuildPayload::load($root)->metadata();
+    $cached['library_abi']['openssl']['epoch'] = 999;
     $originalBinary = file_get_contents($root . '/bin/php');
     file_put_contents($root . '/bin/php', 'wrong cached binary', FILE_APPEND);
     rejected(static fn () => BuildPayload::graft($root, $cached), 'Cached PHP consumer bytes were not restored');

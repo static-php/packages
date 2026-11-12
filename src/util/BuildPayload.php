@@ -111,13 +111,11 @@ final class BuildPayload
             $manifest = json_decode((string) file_get_contents($manifestPath), true, 512, JSON_THROW_ON_ERROR);
             foreach ($manifest['libraries'] ?? [] as $id => $entry) {
                 $data['library_files'][$id] = array_is_list($entry['files']) ? $entry['files'] : array_keys($entry['files']);
-                $sonames = array_values(array_unique(array_filter(array_column($entry['elf'] ?? [], 'soname'))));
-                sort($sonames);
-                $data['library_abi'][$id] = ['epoch' => $entry['abi_epoch'] ?? 1, 'sonames' => $sonames];
+                $data['library_abi'][$id] = ['sonames' => self::libraryNames($entry)];
                 $data['library_build_provenance'][$id] = array_intersect_key($entry, array_flip(['source_hash', 'version', 'build_identity', 'deployment_relocation']));
                 if ($id === 'openssl') {
                     $files = array_is_list($entry['files']) ? $entry['files'] : array_keys($entry['files']);
-                    $data['openssl_files'] = array_values(array_unique(array_merge($files, array_keys($entry['runtime_assets'] ?? []), array_values($entry['abi_dump'] ?? []))));
+                    $data['openssl_files'] = array_values(array_unique(array_merge($files, array_keys($entry['runtime_assets'] ?? []))));
                 }
             }
         }
@@ -371,13 +369,10 @@ final class BuildPayload
                 throw new RuntimeException('Consumer cache does not match the current SDK architecture/libc');
             }
         }
-        [$abi, $removed] = $reuseProof === [] ? [$cached['library_abi'] ?? [], []] : self::verifyAbiReuseProof($root, $cached, $manifest, $reuseProof);
+        [$abi, $removed] = $reuseProof === [] ? [self::libraryIdentities($cached['library_abi'] ?? []), []] : self::verifyAbiReuseProof($root, $cached, $manifest, $reuseProof);
         foreach ($abi as $id => $identity) {
             $entry = $manifest['libraries'][$id] ?? null;
-            $sonames = $entry === null ? [] : array_values(array_unique(array_filter(array_column($entry['elf'] ?? [], 'soname'))));
-            sort($sonames);
-            if ($entry === null || ($entry['abi_epoch'] ?? 1) !== ($identity['epoch'] ?? null)
-                || array_diff($identity['sonames'] ?? [], $sonames) !== []) {
+            if ($entry === null || self::libraryNames($entry) !== $identity['sonames']) {
                 throw new RuntimeException("Consumer cache requires a different library ABI: {$id}");
             }
         }
@@ -476,7 +471,7 @@ final class BuildPayload
         $removed = array_fill_keys($removed, true);
         $incompatible = [];
         $owners = [];
-        foreach ($cached['library_abi'] ?? [] as $id => $identity) {
+        foreach (self::libraryIdentities($cached['library_abi'] ?? []) as $id => $identity) {
             foreach ($identity['sonames'] ?? [] as $soname) {
                 if (isset($owners[$soname]) && $owners[$soname] !== $id) {
                     throw new RuntimeException('Cached library ABI has conflicting SONAME owners');
@@ -484,9 +479,7 @@ final class BuildPayload
                 $owners[$soname] = $id;
             }
             $entry = $manifest['libraries'][$id] ?? null;
-            $sonames = $entry === null ? [] : array_values(array_unique(array_filter(array_column($entry['elf'] ?? [], 'soname'))));
-            if ($entry === null || ($entry['abi_epoch'] ?? 1) !== ($identity['epoch'] ?? null)
-                || array_diff($identity['sonames'] ?? [], $sonames) !== []) {
+            if ($entry === null || self::libraryNames($entry) !== $identity['sonames']) {
                 $incompatible[] = $id;
             }
         }
@@ -536,8 +529,8 @@ final class BuildPayload
         if (array_intersect(array_keys($retained), $incompatible) !== []) {
             throw new RuntimeException('Retained PHP consumers require a changed SDK library ABI');
         }
-        $abi = array_intersect_key($cached['library_abi'] ?? [], $retained);
-        if (!is_array($proof['retained_library_abi'] ?? null) || !self::equal($abi, $proof['retained_library_abi'])) {
+        $abi = self::libraryIdentities(array_intersect_key($cached['library_abi'] ?? [], $retained));
+        if (!is_array($proof['retained_library_abi'] ?? null) || !self::equal($abi, self::libraryIdentities($proof['retained_library_abi']))) {
             throw new RuntimeException('ABI reuse proof retained library identities do not match the retained consumers');
         }
         return [$abi, $removed];
@@ -857,6 +850,29 @@ final class BuildPayload
         $process->setTimeout(null);
         $process->mustRun();
         return $process->getOutput();
+    }
+
+    private static function libraryNames(array $entry): array
+    {
+        $names = [];
+        foreach ($entry['elf'] ?? [] as $path => $elf) {
+            if (!empty($elf['soname']) || preg_match('/\.so(?:\.|$)/', basename($path))) {
+                $names[] = ($elf['soname'] ?? null) ?: basename($path);
+            }
+        }
+        $names = array_values(array_unique($names));
+        sort($names);
+        return $names;
+    }
+
+    private static function libraryIdentities(array $identities): array
+    {
+        foreach ($identities as &$identity) {
+            $names = array_values(array_unique($identity['sonames'] ?? []));
+            sort($names);
+            $identity = ['sonames' => $names];
+        }
+        return $identities;
     }
 
     private static function equal(mixed $first, mixed $second): bool

@@ -334,8 +334,8 @@ def assert_elf(kind, names, manifest=None):
                     required_by_owner[owner] = dependencies(kind, owner)
                 required = required_by_owner[owner]
                 base = re.search(r'(?<![A-Za-z0-9+_.-])' + re.escape(provider) + r'(?![A-Za-z0-9+_.-])', required)
-                if not base or provider + '-abi-' not in required:
-                    raise RuntimeError(f'{owner}: {soname} lacks its private package and ABI dependencies on {provider}')
+                if not base:
+                    raise RuntimeError(f'{owner}: {soname} lacks its private package dependency on {provider}')
     if not elf_count:
         raise RuntimeError('Installed package set contains no dynamic ELF objects')
     if any(name.startswith('php-zts-lib-') for name in names) and not private_count:
@@ -746,15 +746,13 @@ def build_fixtures(kind):
     for stage, lib_version, abi, revisions in (
         ('shared', '1.0.0', 1, (2, 2)),
         ('compatible', '1.1.0', 1, (2, 2)),
-        ('incomplete', '2.0.0', 2, (3, 2)),
         ('complete', '2.0.0', 2, (3, 3)),
     ):
         directory = root / stage
-        fixture_package(kind, directory, library_name, lib_version, libraries[abi],
-                        provides=[f'{library_name}-abi-{abi}'])
+        fixture_package(kind, directory, library_name, lib_version, libraries[abi])
         for name, revision in zip(consumers, revisions):
             consumer_abi = 2 if revision == 3 else 1
-            deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})', f'{library_name}-abi-{consumer_abi}']
+            deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})']
             fixture_package(kind, directory, name, f'{revision}.0.0',
                             {'/usr/bin/' + name: binaries[consumer_abi]}, depends=deps)
         index_repo(kind, directory)
@@ -763,7 +761,7 @@ def build_fixtures(kind):
 def fixture_checks(kind):
     consumers = ['php-zts-runtime-fixture82', 'php-zts-runtime-fixture86']
     library = 'php-zts-lib-runtime-fixture'
-    for stage in ('shared', 'compatible', 'incomplete', 'complete'):
+    for stage in ('shared', 'compatible', 'complete'):
         configure_repo(kind, '/spp/fixtures/' + stage)
         before = {name: installed(kind, name) for name in consumers}
         if stage == 'shared':
@@ -776,18 +774,11 @@ def fixture_checks(kind):
                 raise RuntimeError('Compatible library update was not installed')
             if before != {name: installed(kind, name) for name in consumers}:
                 raise RuntimeError('Compatible library update changed consumer packages')
-        elif stage == 'incomplete':
-            version = '2.0.0-r0' if kind == 'apk' else '2.0.0-1'
-            install(kind, [library + '=' + version] if kind in ('deb', 'apk') else [library + '-' + version], check=False)
-            if '2.0.0' in (installed(kind, library) or ''):
-                raise RuntimeError('Package manager installed an incomplete ABI transition')
-            if before != {name: installed(kind, name) for name in consumers}:
-                raise RuntimeError('Incomplete ABI transition changed or removed consumers')
         else:
             # A single transaction includes every installed reverse dependency.
             transaction = install(kind, [library, *consumers], upgrade=True)
             if not all('3.0.0' in (installed(kind, name) or '') for name in consumers):
-                raise RuntimeError('Complete ABI transition did not upgrade both consumers: '
+                raise RuntimeError('Complete SONAME transition did not upgrade both consumers: '
                                    + repr({name: installed(kind, name) for name in [library, *consumers]})
                                    + '\n' + transaction.stdout + transaction.stderr)
         for name in consumers:
@@ -795,7 +786,7 @@ def fixture_checks(kind):
             if run(['/usr/bin/' + name]).stdout.strip() != expected:
                 raise RuntimeError(f'{stage}: installed fixture consumer {name} cannot run')
     return {'shared_install': True, 'compatible_library_only': True,
-            'incomplete_abi_rejected': True, 'complete_abi_cohort': True}
+            'complete_soname_cohort': True}
 
 
 def inside(args):

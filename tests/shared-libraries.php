@@ -73,12 +73,10 @@ try {
     mkdir($temporary . '/assets');
     mkdir($temporary . '/debug');
     mkdir($temporary . '/debug/lib');
-    mkdir($temporary . '/abi');
     define('TEMP_DIR', $temporary);
     file_put_contents($temporary . '/license/base.txt', 'Base test license');
     file_put_contents($temporary . '/license/top.txt', 'Top test license');
     file_put_contents($temporary . '/assets/data.txt', 'runtime data');
-    file_put_contents($temporary . '/abi/base.xml', '<abi-corpus/>');
     file_put_contents($temporary . '/base.c', 'int base(void) { return 42; }');
     file_put_contents($temporary . '/top.c', 'extern int base(void); int top(void) { return base(); }');
     file_put_contents($temporary . '/main.c', 'extern int top(void); int main(void) { return top() != 42; }');
@@ -110,9 +108,7 @@ try {
     expect($libraries->libraryIds() === ['base', 'top'], 'Unstable library identifiers');
     expect($libraries->architecture() === $architecture, 'Incorrect architecture');
     expect($libraries->getPackageVersion('base', 'deb') === '1.0-2', 'Resolved package revision ignored');
-    expect($libraries->abiCapability('top') === 'php-zts-lib-top-abi-2', 'ABI epoch ignored');
-    // Consumer-only repackaging restores ABI data without downloading library archives.
-    // Recover native dependency revisions from the already captured package index.
+    expect(array_intersect_key($libraries->get('top'), array_flip(['abi_epoch', 'abi_capability', 'abi_capabilities'])) === [], 'Legacy library ABI metadata survived loading');
     require dirname(__DIR__) . '/vendor/autoload.php';
     $withoutVersions = $manifest;
     unset($withoutVersions['libraries']['base']['package_versions']);
@@ -128,8 +124,8 @@ try {
     file_put_contents($planPath, json_encode(['libraries' => ['top']]));
     putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
     foreach (['rpm' => '1.0-5.el8', 'deb' => '1.0-5', 'apk' => '1.0-r5'] as $type => $version) {
-        $record = ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']];
-        $records = [array_replace($record, ['version' => '9.0-99']), array_replace($record, ['architecture' => 'wrong']), array_replace($record, ['provides' => ['php-zts-lib-base-abi-2']]), $record];
+        $record = ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture];
+        $records = [array_replace($record, ['version' => '9.0-99']), array_replace($record, ['architecture' => 'wrong']), $record];
         $baselinePath = $temporary . '/published-' . $type . '.json';
         file_put_contents($baselinePath, json_encode(['type' => $type, 'published_packages' => $records]));
         putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$baselinePath]));
@@ -151,7 +147,7 @@ try {
     foreach (['8.2' => '1.0-r5', '8.5' => '1.0-r1'] as $stream => $version) {
         $path = $temporary . '/stream-' . $stream . '.json';
         file_put_contents($path, json_encode(['type' => 'apk', 'php_stream' => $stream, 'packages' => [
-            ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture, 'provides' => ['php-zts-lib-base-abi-1']],
+            ['name' => 'php-zts-lib-base', 'version' => $version, 'architecture' => $architecture],
         ]]));
         $baselinePaths[] = $path;
     }
@@ -175,10 +171,10 @@ try {
     $typeProperty->setValue(null, 'rpm');
     $save($manifest);
     $payload = [$temporary . '/php' => '/usr/bin/php-zts-test'];
-    expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)', 'php-zts-lib-top-abi-2'], 'Consumer must require its direct owner and ABI capability');
-    expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2', 'php-zts-lib-top-abi-2'], 'APK prerelease version not normalized');
-    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8', 'php-zts-lib-base-abi-1'], 'Transitive library dependency missing');
-    expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)', 'php-zts-lib-base-abi-1'], 'Declared dlopen dependencies missing');
+    expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)'], 'Consumer must require its direct owner at the built version');
+    expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2'], 'APK prerelease version not normalized');
+    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8'], 'Transitive library dependency missing');
+    expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)'], 'Declared dlopen dependencies missing');
     expect(SharedLibraries::normalizeVersion('v3.8.0') === '3.8.0', 'Leading version marker retained');
     expect(SharedLibraries::normalizeVersion('libssh2-1.11.1') === '1.11.1', 'Artifact tag prefix retained');
     expect(SharedLibraries::normalizeVersion('grpc-v1.74.0RC1') === '1.74.0~rc1', 'Prefixed prerelease not normalized');
@@ -189,13 +185,14 @@ try {
     $package = new library($libraries, 'base');
     $config = $package->getFpmConfig();
     expect($package->getName() === 'php-zts-lib-base' && $package->getVersion() === '1.0', 'PHP-independent package identity changed');
-    expect($config['provides_unversioned'] === ['php-zts-lib-base-abi-1'] && $config['depends'] === ['php-zts-runtime-layout'], 'Base library must require its runtime layout without a PHP dependency');
+    expect(($config['provides_unversioned'] ?? []) === [] && $config['depends'] === ['php-zts-runtime-layout'], 'Base library must require its runtime layout without a PHP dependency');
     expect($config['files'][$temporary . '/lib/libbase.so.1'] === $runtime . '/libbase.so.1', 'Runtime library path incorrect');
     expect($config['files'][$temporary . '/assets/data.txt'] === '/usr/share/php-zts/base/data.txt', 'Runtime asset path incorrect');
-    expect($config['files'][$temporary . '/abi/base.xml'] === '/usr/share/php-zts/libraries/abi/base/libbase.so.1.xml', 'ABI dump missing from package');
+    expect(!isset($config['files'][$temporary . '/abi/base.xml']), 'Obsolete ABI dump was packaged');
     $metadata = json_decode(file_get_contents($temporary . '/library-base.json'), true, 512, JSON_THROW_ON_ERROR);
     expect($metadata['package_version'] === '1.0-2.el8' && $metadata['package_versions']['apk'] === '1.0-r2', 'Published metadata lost resolved library revisions');
-    expect($metadata['abi_capability'] === 'php-zts-lib-base-abi-1' && $metadata['id'] === 'base', 'Installed library ABI metadata missing');
+    expect($metadata['id'] === 'base' && array_intersect_key($metadata, array_flip(['abi_epoch', 'abi_capability', 'abi_capabilities'])) === [], 'Published library metadata retains synthetic ABI capabilities');
+    expect(!isset($metadata['abi_dump']), 'Published library metadata retains obsolete ABI dumps');
     $debugSource = $temporary . '/library-base/debug/lib/libbase.so.1.0.debug';
     expect($package->getDebuginfoFpmConfig()['files'][$debugSource] === '/usr/lib/debug' . $runtime . '/libbase.so.1.0.debug', 'Library debuginfo path incorrect');
     expect(hash_file('sha256', $temporary . '/lib/libbase.so.1.0') === $originalHash, 'Packaging mutated the ABI comparison input');
@@ -213,7 +210,10 @@ try {
     $reloaded = SharedLibraries::load($temporary);
     expect($reloaded->getPackageVersion('base', 'deb') === '1.0-3', 'Resolved package revision did not survive manifest persistence');
     expect($reloaded->get('base')['source_hash'] === $manifest['libraries']['base']['source_hash'], 'Persisting package versions lost source identity');
-    expect($reloaded->get('base')['abi_dump'] === $manifest['libraries']['base']['abi_dump'], 'Persisting package versions lost ABI metadata');
+    expect(!isset($reloaded->get('base')['abi_dump']), 'Legacy ABI dumps remain in packaging metadata');
+    $reloaded->exportManifest($temporary . '/exported-libraries.json');
+    $exported = json_decode(file_get_contents($temporary . '/exported-libraries.json'), true, 512, JSON_THROW_ON_ERROR);
+    expect(!isset($exported['libraries']['base']['abi_dump']), 'Exported manifest retains obsolete ABI dumps');
     expect(glob($temporary . '/.shared-libraries-*') === [], 'Atomic manifest temporary files were left behind');
     $format = $manifest;
     $format['libraries']['base']['package_versions']['deb'] = '1.0-10';
@@ -264,7 +264,7 @@ try {
     $bad = $manifest;
     $bad['libraries']['top']['abi_capabilities'] = ['php-zts-lib-top-abi-1'];
     $save($bad);
-    rejected(static fn () => SharedLibraries::load($temporary), 'Historical ABI');
+    expect(!isset(SharedLibraries::load($temporary)->get('top')['abi_capabilities']), 'Legacy library capabilities were retained');
     $bad = $manifest;
     $bad['libraries']['base']['license_files'] = [];
     $save($bad);
@@ -300,7 +300,7 @@ try {
     rejected(static fn () => $libraries->dependenciesForPackage([$temporary . '/staging-runpath' => '/usr/bin/staging-runpath'], 'deb'), 'Unexpected runtime search path');
     unlink($temporary . '/shared-libraries.json');
     expect(SharedLibraries::load($temporary, false) === null, 'Optional absent manifest must preserve static mode');
-    echo "Passed shared-library ownership, ELF dependency, ABI, payload, and path checks.\n";
+    echo "Passed shared-library ownership, ELF dependency, native version floors, payload, and path checks.\n";
 } finally {
     removeTree($temporary);
 }

@@ -52,33 +52,38 @@ class ConsumerVersionPreflight(unittest.TestCase):
     def test_apk_numeric_rollback_is_not_hidden_by_a_newer_php_tag(self):
         self.check_numeric_rollback('apk', '1.84.1p86.0_rc4-r0')
 
-    def test_rpm_old_boundary_and_highest_el_release_migrate_using_production_rules(self):
+    def test_rpm_legacy_release_requires_an_explicit_bump_to_advance(self):
         version = '1.13.3_86.0~rc4+ext-47.el8'
-        result, receipt = self.run_preflight('rpm', [self.candidate(name='frankenphp', upstream='1.13.3')],
-                                            [self.package('frankenphp', version)])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        candidate = receipt['candidates'][0]
-        self.assertEqual(candidate['production_base_version'], '1.13.3_86.0~rc4+ext')
-        self.assertEqual(candidate['version'], '1.13.3_86.0~rc4+ext-48')
+        for flags, revision, status in [((), 47, 3), (('--bump',), 48, 0)]:
+            with self.subTest(flags=flags):
+                result, receipt = self.run_preflight('rpm', [self.candidate(name='frankenphp', upstream='1.13.3')],
+                                                    [self.package('frankenphp', version)], flags=flags)
+                self.assertEqual(result.returncode, status, result.stderr)
+                candidate = receipt['candidates'][0]
+                self.assertEqual(candidate['production_base_version'], '1.13.3_86.0~rc4+ext')
+                self.assertEqual(candidate['version'], '1.13.3_86.0~rc4+ext-' + str(revision))
+                if status:
+                    self.assertEqual(receipt['rejected'][0]['reason'], 'native-version-downgrade')
 
     def test_deb_old_boundary_migrates_using_production_rules(self):
         result, receipt = self.run_preflight('deb', [self.candidate(name='frankenphp', upstream='1.13.3')],
                                             [self.package('frankenphp', '1.13.3+php86.0~rc4+ext-7')])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['version'], '1.13.3+php86.0~rc4+ext-8')
+        self.assertEqual(receipt['candidates'][0]['version'], '1.13.3+php86.0~rc4+ext-7')
 
     def test_apk_old_boundary_migrates_using_production_rules(self):
         result, receipt = self.run_preflight('apk', [self.candidate(name='frankenphp', upstream='1.13.3')],
                                             [self.package('frankenphp', '1.13.3p86.0_rc4_p0-r7')])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['version'], '1.13.3.0_p86_p0_rc4_p0-r8')
+        self.assertEqual(receipt['candidates'][0]['version'], '1.13.3.0_p86_p0_rc4_p0-r7')
 
     def test_rpm_snapshot_keeps_all_actual_streams(self):
         result, receipt = self.run_preflight('rpm', [self.candidate(upstream='1.84.1', php='8.5.12')], [],
                                             published_packages=[self.package('php-zts-grpc', '1.84.1_85.12-23.el8'),
                                                                 self.package('php-zts-grpc', '1.99.0_86.0~rc4-1.el8')])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['version'], '1.84.1_85.12-24')
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(receipt['candidates'][0]['version'], '1.84.1_85.12-23')
+        self.assertEqual(receipt['rejected'][0]['reason'], 'native-version-downgrade')
         self.assertEqual(receipt['candidates'][0]['published_versions'], ['0:1.84.1_85.12-23.el8'])
 
     def test_foreign_architecture_does_not_block_a_new_package(self):
@@ -121,7 +126,7 @@ class ConsumerVersionPreflight(unittest.TestCase):
     def check_shared_bump(self, kind, base):
         separator = '-r' if kind == 'apk' else '-'
         packages = [self.package('php-zts-grpc', base + separator + '5')]
-        for flags, expected_revision, expected_status in [([], 6, 0), (['--bump'], 6, 0),
+        for flags, expected_revision, expected_status in [([], 5, 0), (['--bump'], 6, 0),
                                                           (['--iteration=7'], 7, 0), (['--bump', '--iteration=4'], 4, 3)]:
             with self.subTest(flags=flags):
                 result, receipt = self.run_preflight(kind, [self.candidate()], packages, flags=flags,
@@ -144,7 +149,7 @@ class ConsumerVersionPreflight(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertEqual(receipt['rejected'][0]['reason'], 'upstream-version-rollback')
 
-    def test_shared_abi_plan_advances_only_the_affected_consumer_with_bump_false(self):
+    def test_shared_abi_plan_preserves_the_affected_consumer_revision_with_bump_false(self):
         plan = self.root / 'plan.json'
         plan.write_text(json.dumps({'schema': 1, 'type': 'rpm', 'abi_break': True,
                                     'published_consumers': {'8.6': {'php-zts-grpc': '0:1.83.0_86.0~rc4-5'}}}))
@@ -155,7 +160,7 @@ class ConsumerVersionPreflight(unittest.TestCase):
                                                 [self.package('php-zts-grpc', '1.83.0_86.0~rc4-5')],
                                                 migration_cutoffs={'8.6': {}})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(receipt['candidates'][0]['version'], '1.83.0_86.0~rc4-6')
+        self.assertEqual(receipt['candidates'][0]['version'], '1.83.0_86.0~rc4-5')
 
     def test_apk_package_names_remain_unchanged(self):
         result, receipt = self.run_preflight('apk', [self.candidate(name='php-zts-amqp', upstream='2.2.0')],

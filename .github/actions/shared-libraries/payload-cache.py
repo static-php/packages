@@ -60,19 +60,19 @@ def core_file(name, record=None):
 
 
 def abi(manifest):
-    return {name: {'epoch': record.get('abi_epoch', 1),
-                   'sonames': sorted({entry['soname'] for entry in record.get('elf', {}).values() if entry.get('soname')})}
+    return {name: {'sonames': sorted({entry.get('soname') or Path(path).name
+                                     for path, entry in record.get('elf', {}).items()
+                                     if entry.get('soname') or re.search(r'\.so(?:\.|$)', Path(path).name)})}
             for name, record in sorted(manifest.get('libraries', {}).items())}
 
 
 def compatible(old, current):
-    return all(name in current and entry['epoch'] == current[name]['epoch']
-               and set(entry['sonames']) <= set(current[name]['sonames']) for name, entry in old.items())
+    return all(name in current and set(entry['sonames']) == set(current[name]['sonames'])
+               for name, entry in old.items())
 
 
 def library_graph(manifest):
-    owners = {entry['soname']: name for name, library in manifest['libraries'].items()
-              for entry in library.get('elf', {}).values() if entry.get('soname')}
+    owners = {soname: name for name, identity in abi(manifest).items() for soname in identity['sonames']}
     result = {}
     for name, library in manifest['libraries'].items():
         declared = library.get('depends', []) + library.get('dlopen_dependencies', [])
@@ -420,7 +420,8 @@ def restore_payload(args):
                 removed_files.update(entry['path'] for entry in manifest['build_payload'].get('prepared', {}).get(name, {}).values())
             proof = {'schema': 1, 'cached_metadata_path': 'provenance/cached-consumer/build-payload.json',
                      'incompatible_libraries': sorted(incompatible), 'rebuild_packages': sorted(packages),
-                     'retained_library_abi': {name: manifest['library_abi'][name] for name in sorted(retained_roots)},
+                     'retained_library_abi': {name: {'sonames': sorted(set(manifest['library_abi'][name]['sonames']))}
+                                              for name in sorted(retained_roots)},
                      'removed_files': sorted(removed_files), 'library_dependencies': graph,
                      'retained_dlopen_libraries': []}
         selection = set(filter(None, getattr(args, 'package_selection', '').split(',')))
@@ -535,8 +536,6 @@ def packaging_projection(payload, record, manifest, packages, library_selection=
                 retained.update(paths)
             else:
                 excluded.update(paths)
-                for path in entry.get('abi_dump', {}).values():
-                    excluded.update([path, path + '.inputs.json'])
         for name, prepared in record.get('prepared', {}).items():
             if name not in retained:
                 excluded.add(name)

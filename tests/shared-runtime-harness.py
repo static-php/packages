@@ -279,11 +279,11 @@ class RuntimeHarness(unittest.TestCase):
             queries = []
             required = []
             for name in providers:
-                required.extend(['php-zts-lib-' + name, 'php-zts-lib-' + name + '-abi-1'])
+                required.append('php-zts-lib-' + name)
             answer = ['']
             def dependency_text(kind, entries):
                 floor = {'deb': ' (>= 1.0)', 'rpm': ' >= 1.0', 'apk': '>=1.0'}[kind]
-                lines = [name + ('' if '-abi-' in name else floor) for name in entries]
+                lines = [name + floor for name in entries]
                 return ', '.join(lines) if kind == 'deb' else (owner + ' depends on:\n' if kind == 'apk' else '') + '\n'.join(lines)
             def dependencies(kind, name):
                 queries.append((kind, name))
@@ -305,15 +305,15 @@ class RuntimeHarness(unittest.TestCase):
                                      {'elf_objects': 3, 'private_runpaths': 3})
                     self.assertEqual(queries[before:], [(kind, owner)])
                     for name in providers:
-                        for missing in ('provider', 'abi', 'prefixed', 'suffixed'):
+                        for missing in ('provider', 'prefixed', 'suffixed'):
                             prefix = 'php-zts-lib-' + name
-                            entries = [value for value in required if value != (prefix + '-abi-1' if missing == 'abi' else prefix)]
+                            entries = [value for value in required if value != prefix]
                             if missing in ('prefixed', 'suffixed'):
                                 entries.append('other-' + prefix if missing == 'prefixed' else prefix + '-other')
                             with self.subTest(kind=kind, provider=name, missing=missing):
                                 answer[0] = dependency_text(kind, entries)
                                 before = len(queries)
-                                with self.assertRaisesRegex(RuntimeError, 'lacks its private package and ABI dependencies on ' + prefix):
+                                with self.assertRaisesRegex(RuntimeError, 'lacks its private package dependency on ' + prefix):
                                     harness['assert_elf'](kind, [owner], manifest)
                                 self.assertEqual(queries[before:], [(kind, owner)])
                     answer[0] = dependency_text(kind, required)
@@ -485,13 +485,12 @@ void php_embed_shutdown(void) {
             source.write_text('temporary payload')
             harness['fixture_package']('apk', root / 'repo', 'php-zts-fixture', '1.0.0',
                                        {'/usr/bin/consumer': source},
-                                       depends=['php-zts-lib-fixture (>= 1.0.0)', 'php-zts-lib-fixture-abi-1'])
+                                       depends=['php-zts-lib-fixture (>= 1.0.0)'])
             package = next((root / 'repo').glob('*.apk'))
             self.assertEqual(harness['metadata']('apk', package), 'php-zts-fixture')
             with tarfile.open(fileobj=io.BytesIO(gzip.decompress(package.read_bytes())), mode='r:') as control:
                 info = control.extractfile('.PKGINFO').read().decode()
             self.assertIn('depend = php-zts-lib-fixture>=1.0.0', info)
-            self.assertIn('depend = php-zts-lib-fixture-abi-1', info)
             # Locate the second gzip member by consuming the first with zlib.
             inflater = harness['gzip'].zlib.decompressobj(31)
             inflater.decompress(package.read_bytes())
@@ -544,34 +543,32 @@ void php_embed_shutdown(void) {
             self.assertEqual((installed / 'usr/share/fixture').read_text(), 'temporary native payload')
 
     @unittest.skipUnless(shutil.which('rpmbuild') and shutil.which('rpm'), 'RPM tools required')
-    def test_native_rpm_private_capability(self):
+    def test_native_rpm_private_dependency(self):
         with TemporaryDirectory(prefix='spp-runtime-unit-') as scratch:
             root = Path(scratch)
             source = root / 'consumer'
             source.write_text('temporary payload')
             harness['fixture_package']('rpm', root / 'repo', 'php-zts-fixture', '1.0.0',
                                        {'/usr/share/fixture': source},
-                                       depends=['php-zts-lib-fixture (>= 1.0.0)', 'php-zts-lib-fixture-abi-1'])
+                                       depends=['php-zts-lib-fixture (>= 1.0.0)'])
             package = next((root / 'repo').glob('*.rpm'))
             self.assertEqual(harness['metadata']('rpm', package), 'php-zts-fixture')
             requires = harness['run'](['rpm', '-qpR', '--nosignature', package]).stdout
             self.assertIn('php-zts-lib-fixture >= 1.0.0', requires)
-            self.assertIn('php-zts-lib-fixture-abi-1', requires)
 
     @unittest.skipUnless(shutil.which('dpkg-deb'), 'Debian tools required')
-    def test_native_debian_private_capability(self):
+    def test_native_debian_private_dependency(self):
         with TemporaryDirectory(prefix='spp-runtime-unit-') as scratch:
             root = Path(scratch)
             source = root / 'consumer'
             source.write_text('temporary payload')
             harness['fixture_package']('deb', root / 'repo', 'php-zts-fixture', '1.0.0',
                                        {'/usr/share/fixture': source},
-                                       depends=['php-zts-lib-fixture (>= 1.0.0)', 'php-zts-lib-fixture-abi-1'])
+                                       depends=['php-zts-lib-fixture (>= 1.0.0)'])
             package = next((root / 'repo').glob('*.deb'))
             self.assertEqual(harness['metadata']('deb', package), 'php-zts-fixture')
             requires = harness['run'](['dpkg-deb', '-f', package, 'Depends']).stdout
             self.assertIn('php-zts-lib-fixture (>= 1.0.0)', requires)
-            self.assertIn('php-zts-lib-fixture-abi-1', requires)
 
     def test_runtime_reports_startup_warnings_and_wrong_vm(self):
         with self.assertRaisesRegex(RuntimeError, 'startup'):
@@ -600,7 +597,6 @@ void php_embed_shutdown(void) {
             with self.subTest(kind=kind), patch.dict(scope, {'run': native}):
                 self.assertEqual(harness['installed_packages'](kind), expected)
                 self.assertEqual(len(commands), 1)
-                self.assertNotIn('php-zts-lib-base-abi-1', harness['installed_packages'](kind))
 
     def test_installed_inventory_rejects_malformed_or_failed_native_queries(self):
         cases = [('rpm', ''), ('rpm', 'php-zts-cli unexpected\n'),
@@ -666,8 +662,8 @@ void php_embed_shutdown(void) {
             self.assertEqual(harness['installed']('apk', 'php-zts-lib-fixture'), '1.1.0-r0')
 
     def test_apk_dependencies_use_installed_metadata_and_fail_for_missing_owner(self):
-        current = 'php-zts-fixture-1.0-r0 depends on:\nphp-zts-lib-base>=1.0-r0\nphp-zts-lib-base-abi-1\n\n'
-        candidate = 'php-zts-fixture-2.0-r0 depends on:\nphp-zts-lib-other>=2.0-r0\nphp-zts-lib-other-abi-2\n\n'
+        current = 'php-zts-fixture-1.0-r0 depends on:\nphp-zts-lib-base>=1.0-r0\n\n'
+        candidate = 'php-zts-fixture-2.0-r0 depends on:\nphp-zts-lib-other>=2.0-r0\n\n'
         def native(command, **kwargs):
             installed_only = '--from' in command and command[command.index('--from') + 1] == 'installed'
             if installed_only and command[-1] == 'php-zts-missing':
@@ -686,13 +682,13 @@ void php_embed_shutdown(void) {
             installed.mkdir()
             source = root / 'payload'
             source.write_text('native installed metadata fixture')
-            for name, version, provides in [('base', '1.0.0', 'php-zts-lib-base-abi-1'), ('other', '2.0.0', 'php-zts-lib-other-abi-2')]:
+            for name, version in [('base', '1.0.0'), ('other', '2.0.0')]:
                 harness['fixture_package']('apk', repo, 'php-zts-lib-' + name, version,
-                                           {'/usr/share/spp-' + name: source}, provides=[provides])
+                                           {'/usr/share/spp-' + name: source})
             for version, owner, floor, feature, payload in [('8.4.24', 'base', '1.0.0', 'openssl', 'old'), ('8.4.25', 'other', '2.0.0', 'gmp', 'new')]:
                 harness['fixture_package']('apk', repo, 'php-zts-cli', version,
                                            {'/usr/share/spp-cli-' + payload: source},
-                                           depends=['php-zts-lib-' + owner + ' (>= ' + floor + ')', 'php-zts-lib-' + owner + '-abi-' + ('1' if owner == 'base' else '2')],
+                                           depends=['php-zts-lib-' + owner + ' (>= ' + floor + ')'],
                                            provides=['php-zts-curl', 'php-zts-' + feature])
             harness['index_repo']('apk', repo)
             repositories = root / 'repositories'
@@ -719,9 +715,9 @@ void php_embed_shutdown(void) {
                     self.assertEqual(harness['expected_builtins']('apk', True), ['curl', feature] if feature == 'gmp' else ['curl', 'openssl'])
                     required = harness['dependencies']('apk', 'php-zts-cli')
                     self.assertIn('php-zts-cli-' + version + '-r0 depends on:', required)
-                    self.assertIn('php-zts-lib-' + owner + '-abi-', required)
+                    self.assertIn('php-zts-lib-' + owner + '>=', required)
                     self.assertNotIn(absent_version, required)
-                    self.assertNotIn('php-zts-lib-' + absent_owner + '-abi-', required)
+                    self.assertNotIn('php-zts-lib-' + absent_owner + '>=', required)
                     self.assertIsNone(harness['installed']('apk', 'php-zts-missing'))
                     with self.assertRaises(RuntimeError):
                         harness['dependencies']('apk', 'php-zts-missing')
@@ -737,13 +733,9 @@ class MatrixDriver(unittest.TestCase):
         (buildroot / 'lib').mkdir(parents=True)
         (buildroot / 'lib/libfixture.so.1').write_text('original library')
         (buildroot / 'lib/libfixture.so').symlink_to('libfixture.so.1')
-        (buildroot / 'abi').mkdir()
-        (buildroot / 'abi/fixture.xml').write_text('prepared ABI fixture')
         manifest = {'schema': 1, 'linkage': 'shared',
                     'runtime_libdir': '/usr/lib64/php-zts/lib' if kind == 'rpm' else '/usr/lib/php-zts/lib',
-                    'libraries': {'fixture': {'abi_epoch': 2, 'abi_capability': 'php-zts-lib-fixture-abi-2',
-                                              'package_versions': {kind: '1.0-2'},
-                                              'abi_dump': {'libfixture.so.1': 'abi/fixture.xml'}}}}
+                    'libraries': {'fixture': {'package_versions': {kind: '1.0-2'}}}}
         (buildroot / 'shared-libraries.json').write_text(json.dumps(manifest))
         dist = directory / 'dist' / kind
         dist.mkdir(parents=True)
@@ -751,7 +743,7 @@ class MatrixDriver(unittest.TestCase):
         return directory, manifest
 
     def test_reused_library_inputs_fail_before_source_copies(self):
-        for invalid in ['missing-target', 'manifest', 'schema', 'runtime', 'epoch', 'capability', 'revision', 'abi-dump', 'packages', 'consumer-only', 'escaping-symlink']:
+        for invalid in ['missing-target', 'manifest', 'schema', 'runtime', 'revision', 'packages', 'consumer-only', 'escaping-symlink']:
             with self.subTest(invalid=invalid), TemporaryDirectory(prefix='spp-library-baseline-') as scratch:
                 root = Path(scratch)
                 directory, manifest = self.reused_baseline(root)
@@ -760,10 +752,7 @@ class MatrixDriver(unittest.TestCase):
                 elif invalid == 'manifest': manifest_path.write_text('invalid json')
                 elif invalid == 'schema': manifest['schema'] = 9
                 elif invalid == 'runtime': manifest['runtime_libdir'] = '/usr/lib64/php-zts/lib'
-                elif invalid == 'epoch': manifest['libraries']['fixture']['abi_epoch'] = 0
-                elif invalid == 'capability': manifest['libraries']['fixture']['abi_capability'] = 'php-zts-lib-fixture-abi-1'
                 elif invalid == 'revision': manifest['libraries']['fixture']['package_versions'] = {}
-                elif invalid == 'abi-dump': (directory / 'buildroot/abi/fixture.xml').unlink()
                 elif invalid in ['packages', 'consumer-only']:
                     (directory / 'dist/deb/php-zts-lib-fixture_1.0-2.deb').unlink()
                     if invalid == 'consumer-only':
@@ -853,66 +842,10 @@ class MatrixDriver(unittest.TestCase):
             rerun = text.split('## Real package matrix targeted-rerun', 1)[1]
             self.assertIn('Requested: 2 PHP/distro combinations. Completed reports: 2.', rerun)
             self.assertEqual(rerun.count('| Reused |'), 2)
-            self.assertIn('Libraries and ABI data were not rebuilt in this run.', rerun)
+            self.assertIn('Libraries were not rebuilt in this run.', rerun)
             self.assertIn(result['library_manifest_sha256'], rerun)
             self.assertIn('previous failure', text)
             self.assertIn('Requested: 25', text)
-
-    def test_abi_slots_limit_concurrent_stages(self):
-        semaphore = threading.Semaphore(2)
-        cancelled = threading.Event()
-        release = threading.Event()
-        reached_limit = threading.Event()
-        lock = threading.Lock()
-        state = {'active': 0, 'maximum': 0}
-        def worker():
-            with matrix['abi_slot'](semaphore, cancelled):
-                with lock:
-                    state['active'] += 1
-                    state['maximum'] = max(state['maximum'], state['active'])
-                    if state['active'] == 2:
-                        reached_limit.set()
-                release.wait(timeout=2)
-                with lock:
-                    state['active'] -= 1
-        threads = [threading.Thread(target=worker) for _ in range(6)]
-        try:
-            for thread in threads:
-                thread.start()
-            self.assertTrue(reached_limit.wait(timeout=2))
-        finally:
-            release.set()
-            for thread in threads:
-                thread.join(timeout=2)
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(state['maximum'], 2)
-
-    def test_cancelled_abi_wait_does_not_start_a_stage(self):
-        waiting = threading.Event()
-        cancelled = threading.Event()
-        started = threading.Event()
-        failures = []
-        class Occupied:
-            def acquire(self, timeout):
-                waiting.set()
-                cancelled.wait(timeout)
-                return False
-        def worker():
-            try:
-                with matrix['abi_slot'](Occupied(), cancelled):
-                    started.set()
-            except matrix['StageFailure'] as error:
-                failures.append(error)
-        thread = threading.Thread(target=worker)
-        thread.start()
-        try:
-            self.assertTrue(waiting.wait(timeout=2))
-        finally:
-            cancelled.set()
-            thread.join(timeout=2)
-        self.assertFalse(thread.is_alive())
-        self.assertFalse(started.is_set())
-        self.assertEqual(len(failures), 1)
 
     def compatibility_snapshot(self, root):
         downloads = root / 'downloads'

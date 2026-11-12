@@ -126,10 +126,10 @@ function migrationVersionContracts(string $root): void
                 $baseline = ['type' => $type, 'packages' => [['name' => 'php-zts-imagick', 'version' => $legacy . $revision(9), 'architecture' => $architecture]]];
                 file_put_contents($path, json_encode($baseline, JSON_THROW_ON_ERROR));
                 putenv('SPP_BASELINE_MANIFESTS=' . json_encode([$path], JSON_THROW_ON_ERROR));
-                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 10, $type . ' first shared build does not advance the captured static release automatically');
+                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 9, $type . ' first shared build changed the captured revision without --bump');
                 $baseline['migration_cutoffs']['8.6'] = [];
                 file_put_contents($path, json_encode($baseline, JSON_THROW_ON_ERROR));
-                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 10, $type . ' ignored the captured published revision after the stream is shared');
+                migrationCheck($minimum->invoke(null, 'php-zts-imagick', $legacy, 'x86_64', $type) === 9, $type . ' changed the captured published revision after the stream is shared');
             }
         } finally {
             $runtime->setValue(null, $previousRuntime);
@@ -421,12 +421,12 @@ try {
         'libraries' => ['migration-contract' => [
             'version' => '1.2.3', 'source_hash' => str_repeat('a', 64), 'license' => 'MIT',
             'license_files' => ['licenses/contract'], 'files' => ['lib/libmigration-contract.so.1'],
-            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [], 'abi_epoch' => 1,
+            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [],
             'elf' => ['lib/libmigration-contract.so.1' => ['soname' => 'libmigration-contract.so.1', 'needed' => [], 'runpath' => ['/usr/lib/php-zts/lib']]],
         ], 'openssl' => [
             'version' => '3.6.0', 'source_hash' => str_repeat('b', 64), 'license' => 'Apache-2.0',
             'license_files' => ['licenses/contract'], 'files' => ['lib/libssl.so.3'],
-            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [], 'abi_epoch' => 1,
+            'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [],
             'elf' => ['lib/libssl.so.3' => ['soname' => 'libssl.so.3', 'needed' => [], 'runpath' => ['/usr/lib/php-zts/lib']]],
         ]],
     ];

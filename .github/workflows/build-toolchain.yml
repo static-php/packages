@@ -58,7 +58,7 @@ jobs:
                         -t toolchain-build .
                     rm -f /tmp/github_token
 
-            -   name: Verify runtime debug information and licenses
+            -   name: Verify shared runtime and licenses
                 env:
                     GCC_VERSION: ${{ inputs.gcc_version }}
                 run: |
@@ -85,5 +85,5 @@ jobs:
                     gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
                         gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --latest=false \
                             --title "Toolchain: GCC ${GCC_VERSION}" \
-                            --notes "Prebuilt native GCC toolchains with runtime DWARF and GCC runtime licenses."
+                            --notes "Prebuilt native GCC toolchains with shared runtimes and GCC runtime licenses."
                     gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$BLOB"

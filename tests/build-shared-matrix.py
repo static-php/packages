@@ -7,7 +7,6 @@ RPM and DEB. Use shared-runtime-containers.py for packaged runtime validation.
 
 import argparse
 from collections import deque
-from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
@@ -110,17 +109,9 @@ def library_baseline(root, os_name):
     for identifier, entry in manifest['libraries'].items():
         if not isinstance(entry, dict):
             raise StageFailure('reuse library baseline', 'Invalid library metadata: ' + str(identifier))
-        epoch = entry.get('abi_epoch')
         versions = entry.get('package_versions') or {}
-        if type(epoch) is not int or epoch < 1 or entry.get('abi_capability') != 'php-zts-lib-' + identifier + '-abi-' + str(epoch) or not isinstance(versions, dict) or not isinstance(versions.get(kind), str) or not versions[kind]:
-            raise StageFailure('reuse library baseline', 'Missing prepared ABI or package revision for ' + identifier)
-        dumps = entry.get('abi_dump', {})
-        if not isinstance(dumps, dict):
-            raise StageFailure('reuse library baseline', 'Invalid ABI dump metadata for ' + identifier)
-        for relative in dumps.values():
-            path = Path(relative) if isinstance(relative, str) else Path('/')
-            if path.is_absolute() or '..' in path.parts or not (buildroot / path).is_file():
-                raise StageFailure('reuse library baseline', 'Missing or invalid ABI dump for ' + identifier)
+        if not isinstance(versions, dict) or not isinstance(versions.get(kind), str) or not versions[kind]:
+            raise StageFailure('reuse library baseline', 'Missing package revision for ' + identifier)
     for current, directories, files in os.walk(buildroot):
         for name in directories + files:
             path = Path(current) / name
@@ -192,29 +183,13 @@ class StageFailure(RuntimeError):
         self.detail = detail
 
 
-@contextmanager
-def abi_slot(semaphore, cancelled):
-    while not cancelled.is_set():
-        if not semaphore.acquire(timeout=0.1):
-            continue
-        try:
-            if cancelled.is_set():
-                raise StageFailure('prepare library ABI', 'Interrupted while waiting for an ABI slot')
-            yield
-        finally:
-            semaphore.release()
-        return
-    raise StageFailure('prepare library ABI', 'Interrupted while waiting for an ABI slot')
-
-
 class Target:
-    def __init__(self, args, os_name, cancelled, abi_slots=None):
+    def __init__(self, args, os_name, cancelled):
         self.args = args
         self.os = os_name
         self.kind = FORMATS[os_name]
         self.image = args.image_prefix + os_name + '-debug'
         self.cancelled = cancelled
-        self.abi_slots = abi_slots if abi_slots is not None else threading.Semaphore(1)
         self.prefix = 'spp-matrix-' + os_name + '-' + uuid.uuid4().hex[:10]
         self.containers = []
         self.stages = []
@@ -355,12 +330,11 @@ class Target:
                 library_packages = reused['packages']
             else:
                 self.builder('build libraries', ['php', 'bin/spp', 'build', '--libs-only', '--phpv=8.4', '--type=' + self.kind, '--debuginfo'])
-                with abi_slot(self.abi_slots, self.cancelled):
-                    self.builder('prepare library ABI', ['python3', 'bin/shared-library-plan', 'prepare',
-                                 '--type', self.kind, '--manifest', '/build/buildroot/shared-libraries.json',
-                                 '--root', '/build/buildroot', '--baseline', '/build/.validation/empty-baseline',
-                                 '--mode', 'full', '--manifest-output', '/build/buildroot/shared-libraries.json',
-                                 '--output', '/build/.validation/library-plan.json'])
+                self.builder('prepare library ABI', ['python3', 'bin/shared-library-plan', 'prepare',
+                             '--type', self.kind, '--manifest', '/build/buildroot/shared-libraries.json',
+                             '--baseline', '/build/.validation/empty-baseline',
+                             '--mode', 'full', '--manifest-output', '/build/buildroot/shared-libraries.json',
+                             '--output', '/build/.validation/library-plan.json'])
                 self.builder('package libraries', ['php', 'bin/spp', 'package', '--libs-only', '--phpv=8.4',
                              '--type=' + self.kind, '--iteration=1', '--debuginfo'])
                 shutil.copytree(self.project / 'buildroot', baseline, symlinks=True)
@@ -429,7 +403,7 @@ def write_report(destination, results, run_id, requested):
                          + ('Pass' if cell['ok'] else 'Fail: ' + cell.get('stage', 'unknown').replace('|', '/')) + ' |')
     for target in results:
         if target.get('library_mode') == 'reused':
-            lines += ['', 'Reused library baseline for ' + target['os'] + ': `' + target.get('library_baseline', 'invalid input') + '`; manifest SHA256 `' + target.get('library_manifest_sha256', 'unavailable') + '`. Libraries and ABI data were not rebuilt in this run.']
+            lines += ['', 'Reused library baseline for ' + target['os'] + ': `' + target.get('library_baseline', 'invalid input') + '`; manifest SHA256 `' + target.get('library_manifest_sha256', 'unavailable') + '`. Libraries were not rebuilt in this run.']
         if target.get('custom_master_commits'):
             lines += ['', 'Source snapshot for ' + target['os'] + ': PHP releases ' + ', '.join(stream + '=' + version for stream, version in sorted(target['php_sources'].items())) + '.',
                       'Compatibility master commits: ' + ', '.join(name + '=' + revision for name, revision in sorted(target['custom_master_commits'].items())) + '. Xdebug retains the fixed `3.6.0alpha1` tag.']

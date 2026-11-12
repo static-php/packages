@@ -109,7 +109,6 @@ def compiler_runtime_inputs(compiler="g++"):
     headers = cxx_header_inputs(compiler)
     semantic["headers_sha256"] = headers["sha256"]
     actual["headers"] = headers
-    # Shared-runtime implementation/debug updates are handled by library ABI gates.
     # Only a static archive contributes its implementation to the consumer itself.
     return {"schema": 1, "compiler": output([compiler, "-dumpfullversion"]),
             "target": output([compiler, "-dumpmachine"]), "semantic": semantic,

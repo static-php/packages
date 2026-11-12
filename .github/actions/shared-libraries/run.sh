@@ -126,10 +126,6 @@ case "$command" in
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
         cp stage/shared-libraries.json buildroot/shared-libraries.json
-        if [[ -d stage/abi ]]; then
-            mkdir -p buildroot/usr/share/php-zts/libraries/abi
-            cp -a stage/abi/. buildroot/usr/share/php-zts/libraries/abi/
-        fi
         mkdir -p dist/"$TYPE"
         if [[ -d stage/libraries ]]; then find stage/libraries -maxdepth 1 -name "*.$TYPE" -exec cp -a {} "dist/$TYPE/" \;; fi
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi

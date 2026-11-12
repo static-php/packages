@@ -69,8 +69,8 @@ try {
         file_put_contents($path, json_encode(['schema' => 1, 'type' => $type, 'published_versions' => ['ngtcp2' => $published]], JSON_THROW_ON_ERROR));
         putenv('SPP_SHARED_LIBRARY_PLAN=' . $path);
         foreach (['php-zts-lib-ngtcp2', 'php-zts-lib-ngtcp2-debuginfo'] as $name) {
-            if (CreatePackages::resolveIteration($name, '1.26.0', 'aarch64', $type) !== '8') {
-                throw new RuntimeException("Repacked {$type} library did not advance past its captured revision");
+            if (CreatePackages::resolveIteration($name, '1.26.0', 'aarch64', $type) !== '7') {
+                throw new RuntimeException("Repacked {$type} library changed its captured revision without --bump");
             }
         }
         if (CreatePackages::resolveIteration('php-zts-lib-ngtcp2', '1.27.0', 'aarch64', $type) !== ($type === 'apk' ? '0' : '1')) {
@@ -99,9 +99,13 @@ try {
     $cache->setValue(null, $pages);
     (new ReflectionProperty(CreatePackages::class, 'resolvedIterations'))->setValue(null, []);
     (new ReflectionProperty(CreatePackages::class, 'debuginfo'))->setValue(null, true);
-    foreach (['php-zts-lib-ngtcp2', 'php-zts-lib-ngtcp2-debuginfo'] as $name) {
-        if (CreatePackages::resolveIteration($name, '1.26.0', 'aarch64', 'apk') !== '8') {
-            throw new RuntimeException('Selected library publication ignored a higher revision in another PHP stream');
+    foreach ([false => '1', true => '8'] as $bump => $expected) {
+        (new ReflectionProperty(CreatePackages::class, 'bump'))->setValue(null, (bool) $bump);
+        (new ReflectionProperty(CreatePackages::class, 'resolvedIterations'))->setValue(null, []);
+        foreach (['php-zts-lib-ngtcp2', 'php-zts-lib-ngtcp2-debuginfo'] as $name) {
+            if (CreatePackages::resolveIteration($name, '1.26.0', 'aarch64', 'apk') !== $expected) {
+                throw new RuntimeException('Library publication did not honor the explicit bump setting');
+            }
         }
     }
 } finally {
@@ -113,4 +117,4 @@ try {
     rmdir($directory);
 }
 echo "Passed library repack revision floors and runtime/debuginfo pairing without remote queries.\n";
-echo "Passed selected library publication above every primary stream's runtime and debug revisions.\n";
+echo "Passed explicit library publication bumps and unchanged revisions with bump=false.\n";

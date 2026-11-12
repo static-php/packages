@@ -244,8 +244,8 @@ foreach ($types as $type) {
                     $equal($type, $selected, $publishedVersion);
                 }
                 $iteration = (new ReflectionMethod(CreatePackages::class, 'migrationNextIteration'))->invoke(null, $name, $selected, 'x86_64', $type);
-                if ($iteration !== 2) {
-                    throw new RuntimeException('Same-version migration did not advance the published revision');
+                if ($iteration !== 1) {
+                    throw new RuntimeException('Same-version migration changed the revision without --bump');
                 }
                 $historicalUpgrade($type, $published, $selected . ($type === 'apk' ? '-r2' : '-2'));
                 $next = $version($type, '1.13.6', '8.2.36');

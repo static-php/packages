@@ -49,10 +49,10 @@ class BaselineCapture(unittest.TestCase):
     def test_selective_tls_baseline_includes_published_curl_and_its_closure(self):
         inventory = [{'name': name, 'version': '1-1', 'requires': requires, 'provides': []} for name, requires in [
             ('php-zts-cli', []), ('php-zts-fpm', []), ('frankenphp', []), ('php-zts-xdebug', []),
-            ('php-zts-curl', ['php-zts-lib-curl-abi-1']), ('php-zts-lib-curl', ['php-zts-lib-openssl-abi-1']),
+            ('php-zts-curl', ['php-zts-lib-curl']), ('php-zts-lib-curl', ['php-zts-lib-openssl']),
             ('php-zts-lib-openssl', []), ('php-zts-unrelated', [])]]
-        inventory[5]['provides'] = ['php-zts-lib-curl-abi-1']
-        inventory[6]['provides'] = ['php-zts-lib-openssl-abi-1']
+        inventory[5]['provides'] = ['php-zts-lib-curl']
+        inventory[6]['provides'] = ['php-zts-lib-openssl']
         latest = {item['name']: item for item in inventory}
         for kind in ('rpm', 'deb', 'apk'):
             with self.subTest(kind=kind):
@@ -179,11 +179,11 @@ class BaselineCapture(unittest.TestCase):
             ('php-zts-fpm', ['php-zts-cli'], []),
             ('frankenphp', ['php-zts-embed'], []),
             ('php-zts-embed', ['php-zts-cli'], []),
-            ('php-zts-imagick', ['php-zts-lib-imagemagick-abi-1'], []),
-            ('php-zts-lib-imagemagick', ['php-zts-runtime-layout'], ['php-zts-lib-imagemagick-abi-1']),
+            ('php-zts-imagick', ['php-zts-lib-imagemagick'], []),
+            ('php-zts-lib-imagemagick', ['php-zts-runtime-layout'], ['php-zts-lib-imagemagick']),
             ('php-zts-runtime-layout', [], []),
             ('php-zts-redis', ['php-zts-cli'], []),
-            ('php-zts-grpc', ['php-zts-lib-unrelated-missing-abi-1'], []),
+            ('php-zts-grpc', ['php-zts-lib-unrelated-missing'], []),
         ]
         inventory, archives, downloaded = [], {}, []
         another_download = Event()
@@ -217,8 +217,8 @@ class BaselineCapture(unittest.TestCase):
 
     def test_library_update_does_not_download_static_php_hosts(self):
         latest = {'php-zts-cli': {'requires': []}, 'frankenphp': {'requires': ['php-zts-cli']},
-                  'php-zts-lib-zlib': {'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib-abi-1']},
-                  'php-zts-lib-user': {'requires': ['php-zts-lib-zlib-abi-1'], 'provides': ['php-zts-lib-user-abi-1']}}
+                  'php-zts-lib-zlib': {'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib']},
+                  'php-zts-lib-user': {'requires': ['php-zts-lib-zlib'], 'provides': ['php-zts-lib-user']}}
         self.assertEqual(helper['affected_profile'](latest, [], ['zlib']), {'lib-zlib', 'lib-user'})
 
     def test_library_update_selects_reverse_consumers_without_unrelated_extensions(self):
@@ -226,9 +226,9 @@ class BaselineCapture(unittest.TestCase):
             {'name': 'php-zts-cli', 'version': '1', 'requires': []},
             {'name': 'php-zts-fpm', 'version': '1', 'requires': ['php-zts-cli']},
             {'name': 'frankenphp', 'version': '1', 'requires': ['php-zts-cli']},
-            {'name': 'php-zts-lib-base', 'version': '1', 'provides': ['php-zts-lib-base-abi-1']},
-            {'name': 'php-zts-lib-dependent', 'version': '1', 'requires': ['php-zts-lib-base-abi-1'], 'provides': ['php-zts-lib-dependent-abi-1']},
-            {'name': 'php-zts-imagick', 'version': '1', 'requires': ['php-zts-lib-dependent-abi-1']},
+            {'name': 'php-zts-lib-base', 'version': '1', 'provides': ['php-zts-lib-base']},
+            {'name': 'php-zts-lib-dependent', 'version': '1', 'requires': ['php-zts-lib-base'], 'provides': ['php-zts-lib-dependent']},
+            {'name': 'php-zts-imagick', 'version': '1', 'requires': ['php-zts-lib-dependent']},
             {'name': 'php-zts-redis', 'version': '1', 'requires': ['php-zts-cli']},
         ]
         latest = helper['latest_packages']('apk', packages)
@@ -328,9 +328,9 @@ class BaselineCapture(unittest.TestCase):
     def test_managed_closure_includes_private_library_and_layout(self):
         packages = [
             {'name': 'php-zts-cli', 'version': '8.6.0-4',
-             'requires': ['php-zts-lib-zlib-abi-1', 'libc.so.6'], 'provides': ['php-zts-cli']},
+             'requires': ['php-zts-lib-zlib', 'libc.so.6'], 'provides': ['php-zts-cli']},
             {'name': 'php-zts-lib-zlib', 'version': '1.3.2-1',
-             'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib-abi-1']},
+             'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib']},
             {'name': 'php-zts-runtime-layout', 'version': '1-1',
              'requires': [], 'provides': ['php-zts-runtime-layout']},
             {'name': 'php-zts-imagick', 'version': '3.8.1-1', 'requires': [], 'provides': []},
@@ -339,14 +339,14 @@ class BaselineCapture(unittest.TestCase):
         self.assertEqual(set(selected), {'php-zts-cli', 'php-zts-lib-zlib', 'php-zts-runtime-layout'})
 
     def test_missing_or_ambiguous_managed_dependency_fails(self):
-        cli = {'name': 'php-zts-cli', 'version': '8.6.0-4', 'requires': ['php-zts-lib-ssl-abi-1']}
+        cli = {'name': 'php-zts-cli', 'version': '8.6.0-4', 'requires': ['php-zts-lib-ssl']}
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli], {'cli'})
         defects = []
         selected = helper['select_packages']('rpm', [cli], {'cli'}, defects=defects)
         self.assertEqual(selected, {'php-zts-cli': cli})
-        self.assertEqual(defects[0]['dependency'], 'php-zts-lib-ssl-abi-1')
-        providers = [dict(name='php-zts-lib-' + name, version='1-1', provides=['php-zts-lib-ssl-abi-1'])
+        self.assertEqual(defects[0]['dependency'], 'php-zts-lib-ssl')
+        providers = [dict(name='php-zts-lib-' + name, version='1-1', provides=['php-zts-lib-ssl'])
                      for name in ['openssl', 'another']]
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli, *providers], {'cli'})
@@ -360,8 +360,8 @@ class BaselineCapture(unittest.TestCase):
             helper['select_packages']('deb', [dict(cli, requires=['php-zts-lib-curl']), library], {'all'})
 
     def test_full_user_baseline_keeps_required_private_libraries_and_layout(self):
-        packages = [{'name': 'php-zts-cli', 'version': '8.3.36-3', 'requires': ['php-zts-lib-zlib-abi-1']},
-                    {'name': 'php-zts-lib-zlib', 'version': '1.4-1', 'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib-abi-1']},
+        packages = [{'name': 'php-zts-cli', 'version': '8.3.36-3', 'requires': ['php-zts-lib-zlib']},
+                    {'name': 'php-zts-lib-zlib', 'version': '1.4-1', 'requires': ['php-zts-runtime-layout'], 'provides': ['php-zts-lib-zlib']},
                     {'name': 'php-zts-runtime-layout', 'version': '1-1', 'requires': []}]
         self.assertEqual(set(helper['select_packages']('deb', packages, {'all'})), {p['name'] for p in packages})
 

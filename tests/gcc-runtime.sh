@@ -16,8 +16,6 @@ case $1 in
         printf '%s\n' "$GCC_RUNTIME_FIXTURE" ;;
     -print-file-name=libstdc++.so)
         printf '%s\n' "${GCC_RUNTIME_SELECTOR_FIXTURE:-$GCC_RUNTIME_FIXTURE}" ;;
-    -print-file-name=libatomic.so.1)
-        printf '%s\n' "${GCC_RUNTIME_OPTIONAL_FIXTURE:-libatomic.so.1}" ;;
     -print-file-name=*) printf '%s\n' "${1#-print-file-name=}" ;;
     *) exit 1 ;;
 esac
@@ -25,35 +23,19 @@ COMPILER
 chmod +x "$temporary/prefix/bin/gcc"
 ln -s gcc "$temporary/prefix/bin/g++"
 printf 'int exported(int value) { return value + 1; }\n' > "$temporary/runtime.c"
-"${CC:-gcc}" -shared -fPIC -g "$temporary/runtime.c" -o "$temporary/compiler-default.so"
-"${CC:-gcc}" -shared -fPIC -g -gdwarf-4 "$temporary/runtime.c" -o "$temporary/dwarf4.so"
-"${CC:-gcc}" -shared -fPIC -g -gdwarf-5 "$temporary/runtime.c" -o "$temporary/dwarf5.so"
-cp "$temporary/dwarf4.so" "$temporary/stripped.so"
+"${CC:-gcc}" -shared -fPIC -g "$temporary/runtime.c" -o "$temporary/runtime.so"
+cp "$temporary/runtime.so" "$temporary/stripped.so"
 strip --strip-debug "$temporary/stripped.so"
 
 check() {
     SPP_GCC_PREFIX="$temporary/prefix" GCC_RUNTIME_FIXTURE="$1" \
-        GCC_RUNTIME_OPTIONAL_FIXTURE="${2-}" bash "$repository/bin/build-gcc-runtime" --check
+        bash "$repository/bin/build-gcc-runtime" --check
 }
 
-for valid in compiler-default dwarf4 dwarf5; do
-    check "$temporary/$valid.so"
-    for optional in compiler-default dwarf4 dwarf5; do
-        check "$temporary/$valid.so" "$temporary/$optional.so"
-    done
-done
-if check "$temporary/stripped.so" > "$temporary/check.log" 2>&1; then
-    printf 'Incorrectly accepted stripped runtime\n' >&2
-    exit 1
-fi
-grep -q "Missing GCC runtime DWARF type information: $temporary/stripped.so" "$temporary/check.log"
-if check "$temporary/dwarf5.so" "$temporary/stripped.so" > "$temporary/check.log" 2>&1; then
-    printf 'Incorrectly accepted stripped optional runtime\n' >&2
-    exit 1
-fi
-grep -q "Missing GCC runtime DWARF type information: $temporary/stripped.so" "$temporary/check.log"
+check "$temporary/runtime.so"
+check "$temporary/stripped.so"
 mkdir -p "$temporary/prefix/lib64"
-cp "$temporary/dwarf5.so" "$temporary/prefix/lib64/libstdc++.so.6"
+cp "$temporary/stripped.so" "$temporary/prefix/lib64/libstdc++.so.6"
 printf 'INPUT(libstdc++.a)\n' > "$temporary/prefix/lib64/libstdc++.so"
 if GCC_RUNTIME_SELECTOR_FIXTURE="$temporary/prefix/lib64/libstdc++.so" \
     check "$temporary/prefix/lib64/libstdc++.so.6" > "$temporary/check.log" 2>&1; then
@@ -72,11 +54,9 @@ PATH="$temporary/no-download:$PATH" SPP_GCC_PREFIX="$temporary/prefix" \
     bash "$repository/bin/build-gcc-runtime"
 [[ $(readlink "$temporary/prefix/lib64/libstdc++.so") == libstdc++.so.6 ]]
 [[ $(sha256sum "$temporary/prefix/lib64/libstdc++.so.6") == "$before" ]]
-if [[ -f /etc/alpine-release ]]; then
-    readelf --debug-dump=info "$temporary/dwarf4.so" | awk '
-        /^[[:space:]]*Version:/ { versions[$2]++ }
-        END { exit !(versions[4] && versions[5]) }
-    '
-    printf 'Mixed musl startup assembly and runtime C debug formats accepted.\n'
+rm "$temporary/prefix/share/licenses/gcc/COPYING.RUNTIME"
+if check "$temporary/runtime.so" > "$temporary/check.log" 2>&1; then
+    printf 'Incorrectly accepted missing runtime license\n' >&2
+    exit 1
 fi
-printf 'GCC shared selector and runtime DWARF validation passed.\n'
+printf 'GCC shared selector and license validation passed.\n'

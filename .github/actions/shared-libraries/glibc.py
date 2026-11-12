@@ -63,7 +63,7 @@ def architecture():
     return 'aarch64' if os.environ['MATRIX_ARCH'] == 'arm64' else 'x86_64'
 
 
-def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None):
+def baseline(kind, directory, consumers=False, libraries=None):
     args = ['python3', 'bin/shared-library-plan', 'baseline', '--type', kind,
             '--arch', os.environ['MATRIX_ARCH'], '--output', directory]
     streams = sorted(set(filter(None, os.environ.get('PHP_VERSIONS', '').split(','))) or set(STREAMS))
@@ -72,7 +72,6 @@ def baseline(kind, directory, consumers=False, abi_libraries=(), libraries=None)
     args += ['--php-versions', ','.join(streams)]
     if not consumers:
         args += ['--skip-consumers']
-    args += ['--abi-libraries', ','.join(sorted(abi_libraries))]
     if libraries is not None:
         args += ['--libraries', ','.join(sorted(libraries))]
     if kind == 'rpm':
@@ -146,38 +145,6 @@ def combine_plans(plans):
 
 
 
-def merge_library_abi(common, formats):
-    for name, entry in common['libraries'].items():
-        candidates = [(kind, manifest['libraries'][name]) for kind, manifest in formats.items() if name in manifest['libraries']]
-        if not candidates:
-            continue
-        kind, current = max(candidates, key=lambda item: item[1].get('abi_epoch', 1))
-        entry['abi_epoch'] = current.get('abi_epoch', 1)
-        capability = 'php-zts-lib-' + name + '-abi-' + str(entry['abi_epoch'])
-        entry['abi_capability'] = capability
-        entry['abi_capabilities'] = [capability]
-        for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_comparison', 'abi_reference_version']:
-            if field in current:
-                entry[field] = current[field]
-        yield kind, entry
-
-
-def seed_abi_cache(root, kind):
-    target = Path(root) / 'usr/share/php-zts/libraries/abi'
-    for cache in [STAGE / 'abi-cache/common', STAGE / 'abi-cache' / kind]:
-        if cache.exists():
-            target.mkdir(parents=True, exist_ok=True)
-            run(['cp', '-a', str(cache) + '/.', target])
-
-
-def save_abi_cache(root, kind):
-    source = Path(root) / 'usr/share/php-zts/libraries/abi'
-    if source.exists():
-        for directory in source.iterdir():
-            if directory.is_dir():
-                copy_tree(directory, STAGE / 'abi-cache' / (kind if directory.name == 'openssl' else 'common') / directory.name)
-
-
 def format_stage(kind):
     return STAGE if kind == 'apk' else STAGE / kind
 
@@ -231,9 +198,6 @@ def package_libraries(kind):
         write(manifest, classified)
         run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
     manifest_option = ['--library-manifest=' + str(manifest)] if shared else []
-    abi = selected_sdk / 'usr/share/php-zts/libraries/abi'
-    if abi.exists():
-        copy_tree(abi, directory / 'abi')
     retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
                   '--plan', directory / 'shared-library-plan.json', '--destination', ROOT / 'dist' / kind,
                   '--manifest', manifest, '--manifest-output', manifest,
@@ -318,10 +282,8 @@ def classify():
                     copy_tree(sdk, selected_sdk)
             if glibc and not shared and variants_ready:
                 run(variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
-            if glibc and not shared:
-                seed_abi_cache(selected_sdk, kind)
             args = ['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
-                    '--manifest', selected_sdk / 'shared-libraries.json', '--root', selected_sdk,
+                    '--manifest', selected_sdk / 'shared-libraries.json',
                     '--baseline', directory / 'baseline', '--mode', os.environ.get('MODE', 'full'),
                     '--libraries', os.environ.get('LIBRARIES', ''), '--php-versions', os.environ.get('PHP_VERSIONS', ''),
                     '--packages', os.environ.get('PACKAGES', ''), '--output', directory / 'shared-library-plan.json',
@@ -330,8 +292,6 @@ def classify():
             if (STAGE / 'effective-source-plan.json').is_file():
                 args += ['--request', STAGE / 'effective-source-plan.json']
             run(args)
-            if glibc and not shared:
-                save_abi_cache(selected_sdk, kind)
             plan = read(directory / 'shared-library-plan.json')
             plans[kind] = plan
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
@@ -361,18 +321,10 @@ def classify():
     if not glibc:
         return
     sdk_manifest = read(sdk / 'shared-libraries.json')
-    format_manifests = {kind: read(STAGE / kind / 'shared-libraries.json') for kind in FORMATS}
-    for kind, entry in merge_library_abi(sdk_manifest, format_manifests):
-        for relative in entry.get('abi_dump', {}).values():
-            source = format_sdk(kind) / relative
-            destination = sdk / relative
-            if source == destination:
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            proof = source.with_suffix(source.suffix + '.inputs.json')
-            if proof.exists():
-                shutil.copy2(proof, destination.with_suffix(destination.suffix + '.inputs.json'))
+    for entry in sdk_manifest['libraries'].values():
+        for field in list(entry):
+            if field.startswith('abi_'):
+                entry.pop(field)
     write(sdk / 'shared-libraries.json', sdk_manifest)
     common = STAGE / 'common'
     write(common / 'shared-library-plan.json', combine_plans(plans))
@@ -381,8 +333,6 @@ def classify():
             target = common / kind / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(STAGE / kind / name, target)
-        if (STAGE / kind / 'abi').exists():
-            copy_tree(STAGE / kind / 'abi', common / kind / 'abi')
         source = STAGE / kind / 'baseline'
         if source.exists():
             copy_tree(source, common / kind / 'baseline')
@@ -413,8 +363,7 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
         if previous is None or version(package) != version(previous) and compare(plan['type'], version(package), version(previous)) > 0:
             latest[package['name']] = package
     libraries = set(plan.get('libraries', []))
-    owners = {capability: library for library in libraries for capability in
-              ['php-zts-lib-' + library, *latest.get('php-zts-lib-' + library, {}).get('provides', [])]}
+    owners = {'php-zts-lib-' + library: library for library in libraries}
     dependencies = {name: sorted({owners[item] for item in package.get('requires', []) if item in owners})
                     for name, package in latest.items()
                     if not name.startswith('php-zts-lib-') and name != 'php-zts-runtime-layout'}
@@ -425,19 +374,6 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
         raise RuntimeError('Cannot map native ABI consumers for PHP ' + stream)
     pairs = {name: component for name, component in zip(consumers, components) if name in latest}
     pairs.update(zip(native['consumers'], native['packages']))
-    targets = {root: plan.get('expected_libraries', {}).get(root, {}).get('abi_capability')
-               for root in plan.get('abi_rebuild_roots', [])}
-    current = bool(targets) and all(target and target in latest.get('php-zts-lib-' + root, {}).get('provides', [])
-                                    for root, target in targets.items())
-    if current and stream in plan.get('abi_core_rebuild_streams', []):
-        current = bool(set(targets.values()) & set(latest.get('php-zts-cli', {}).get('requires', [])))
-    if current:
-        current = not any(('php-zts-lib-' + root in package.get('requires', [])
-                          or any(item.startswith('php-zts-lib-' + root + '-abi-') for item in package.get('requires', [])))
-                         and target not in package.get('requires', [])
-                         for package in latest.values() for root, target in targets.items())
-    if current:
-        pairs = {}
     before = json.dumps([abi, plan['php_requests'][stream], plan.get('expected_consumers', {}).get(stream),
                          plan.get('published_consumers', {}).get(stream)], sort_keys=True)
     removed = set(components) - set(pairs.values()) - set(requested)
@@ -659,8 +595,6 @@ def package():
             raise RuntimeError('Packaging selection exceeds the sealed artifact')
         manifest['libraries'] = {name: entry for name, entry in manifest['libraries'].items() if name in selection['libraries']}
     write(root / 'shared-libraries.json', manifest)
-    if (STAGE / kind / 'abi').exists():
-        copy_tree(STAGE / kind / 'abi', root / 'usr/share/php-zts/libraries/abi')
     run(['php', 'bin/build-payload', 'seal', '--root', root])
     flags = ['--phpv=' + stream, '--buildroot=' + str(root), '--prefix=-zts', '--type=' + kind, '--debuginfo', *revision_flags()]
     if os.environ.get('PACKAGES'):

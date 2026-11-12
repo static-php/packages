@@ -50,9 +50,6 @@ final class library implements package
         $files = $this->runtimeFiles;
         $metadata = array_merge($this->getManifestEntry(), ['schema' => 1, 'id' => $this->id, 'runtime_libdir' => $this->libraries->getRuntimeLibdir(), 'architecture' => $this->libraries->architecture(), 'libc' => $this->libraries->getLibc()]);
         $metadata['package_version'] = $this->libraries->getPackageVersion($this->id, defined('SPP_TYPE') ? SPP_TYPE : 'rpm') ?? $this->getVersion();
-        $metadata['abi_epoch'] ??= 1;
-        $metadata['abi_capability'] = $this->libraries->abiCapability($this->id);
-        $metadata['abi_capabilities'] = [$metadata['abi_capability']];
         if (!defined('TEMP_DIR') || !is_dir(TEMP_DIR)) {
             throw new RuntimeException('Library packaging requires an existing TEMP_DIR');
         }
@@ -69,7 +66,6 @@ final class library implements package
                 ...$this->libraries->dependenciesForPackage($files, defined('SPP_TYPE') ? SPP_TYPE : 'rpm', $this->id),
             ])),
             'provides' => [],
-            'provides_unversioned' => [$this->libraries->abiCapability($this->id)],
         ];
     }
 

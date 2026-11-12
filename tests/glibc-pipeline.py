@@ -187,34 +187,22 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(actual['expected_consumers']['8.6'], ['php-zts-cli'])
                 self.assertEqual(common['format_selection'][kind]['php_requests']['8.6']['packages'], ['cli'])
 
-    def test_native_bindings_add_stream_specific_consumers_and_skip_completed_abi_rollouts(self):
+    def test_native_bindings_add_stream_specific_consumers(self):
         plan = {'type': 'apk', 'libraries': ['openssl'], 'abi_rebuild_roots': ['openssl'],
-                'expected_libraries': {'openssl': {'abi_capability': 'php-zts-lib-openssl-abi-2'}},
                 'abi_core_rebuild_streams': ['8.4'],
                 'php_requests': {'8.4': {'full': False, 'packages': ['cli', 'curl', 'mysqlnd_parsec'], 'compile_full': True}},
                 'expected_consumers': {'8.4': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec']},
                 'abi_consumer_requests': {'8.4': {'full': False, 'consumers': ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd_parsec'],
                     'packages': ['cli', 'curl', 'mysqlnd_parsec']}}}
         snapshot = {'type': 'apk', 'php_stream': '8.4', 'architecture': 'arm64', 'inventory': [
-            {'name': 'php-zts-lib-openssl', 'version': '3.6.5-r1', 'provides': ['php-zts-lib-openssl-abi-1']},
-            {'name': 'php-zts-cli', 'version': '8.4.27-r4', 'requires': ['php-zts-lib-openssl-abi-1']},
-            {'name': 'php-zts-mysqlnd', 'version': '8.4.27-r2', 'requires': ['php-zts-lib-openssl-abi-1']},
+            {'name': 'php-zts-lib-openssl', 'version': '3.6.5-r1'},
+            {'name': 'php-zts-cli', 'version': '8.4.27-r4', 'requires': ['php-zts-lib-openssl']},
+            {'name': 'php-zts-mysqlnd', 'version': '8.4.27-r2', 'requires': ['php-zts-lib-openssl']},
             {'name': 'php-zts-curl', 'version': '8.4.27-r2', 'requires': []}]}
         self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4'))
         self.assertEqual(plan['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
         self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-cli', 'php-zts-curl', 'php-zts-mysqlnd'])
         self.assertEqual(plan['published_consumers']['8.4']['php-zts-mysqlnd'], '8.4.27-r2')
-        previous = copy.deepcopy(plan)
-        snapshot['inventory'][0]['provides'] = ['php-zts-lib-openssl-abi-2']
-        for package in snapshot['inventory'][1:3]:
-            package['requires'] = ['php-zts-lib-openssl-abi-2']
-        self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.4', ['curl']))
-        self.assertEqual(plan['php_requests']['8.4']['packages'], ['curl'])
-        self.assertEqual(plan['expected_consumers']['8.4'], [])
-        snapshot['inventory'].append({'name': 'php-zts-lib-curl', 'requires': ['php-zts-lib-openssl-abi-1']})
-        glibc.scope_abi_consumers(previous, snapshot, '8.4')
-        self.assertEqual(previous['php_requests']['8.4']['packages'], ['cli', 'curl', 'mysqlnd'])
-
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
         data = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
@@ -281,9 +269,9 @@ class Pipeline(unittest.TestCase):
             with self.subTest(kind=kind, rebuilt=rebuilt, cached_variants=cached_variants), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 sdk, stage = root / 'buildroot', root / 'stage'
-                value = {'libraries': {'fixture': {'abi_epoch': 1}}}
+                value = {'libraries': {'fixture': {}}}
                 if rebuilt == 'pending':
-                    value['libraries']['consumer'] = {'abi_epoch': 1}
+                    value['libraries']['consumer'] = {}
                     value['pending_rebuilds'] = {'consumer': {'libfixture.so.1': 'fixture'}}
                 glibc.write(sdk / 'shared-libraries.json', value)
                 glibc.write(stage / 'library-build-plan.json', {'full': False, 'rebuilt_libraries': ['fixture'] if rebuilt else []})
@@ -293,8 +281,8 @@ class Pipeline(unittest.TestCase):
                 calls, scans, scopes = [], [], []
                 formats = ('apk',) if kind == 'apk' else ('rpm', 'deb')
                 packaging = Barrier(len(formats))
-                def baseline(kind, destination, consumers=False, abi_libraries=(), libraries=None):
-                    scans.append((kind, consumers, set(abi_libraries)))
+                def baseline(kind, destination, consumers=False, libraries=None):
+                    scans.append((kind, consumers))
                     scopes.append(libraries)
                     glibc.write(destination / 'shared-libraries.json', dict(value, consumer_inventory_complete=consumers))
                 def execute(arguments, **kwargs):
@@ -331,9 +319,9 @@ class Pipeline(unittest.TestCase):
                         patch.object(glibc, 'baseline', baseline), patch.object(glibc, 'run', execute), patch.dict(os.environ, TYPE=kind, LIBRARIES='fixture' if manual is True else '', PACKAGES='curl' if manual == 'consumer' else '', PUBLISH='true'):
                     glibc.classify()
                 expected = {'fixture'} if rebuilt else set()
-                expected_scans = [(format, False, set()) for format in formats]
+                expected_scans = [(format, False) for format in formats]
                 if rebuilt == 'breaking':
-                    expected_scans += [(format, True, set()) for format in formats]
+                    expected_scans += [(format, True) for format in formats]
                 self.assertCountEqual(scans, expected_scans)
                 if manual == 'consumer':
                     self.assertEqual(scopes, [[] for _ in formats])
@@ -367,20 +355,6 @@ class Pipeline(unittest.TestCase):
         self.assertFalse(value['reuse_payload'])
         metadata = glibc.combine_plans({'rpm': {'php_requests': {'8.5': {'full': True, 'compile': False}}}})
         self.assertTrue(metadata['php_requests']['8.5']['reuse_payload'])
-
-    def test_common_abi_merge_keeps_epoch_capability_and_dump_consistent(self):
-        common = {'libraries': {'fixture': {'source_hash': 'actual', 'abi_epoch': 1,
-                    'abi_capability': 'php-zts-lib-fixture-abi-1', 'abi_capabilities': ['php-zts-lib-fixture-abi-1']}}}
-        formats = {'rpm': {'libraries': {'fixture': {'abi_epoch': 2, 'abi_dump': {'libfixture.so.2': 'new.xml'}, 'abi_dump_hashes': {'libfixture.so.2': 'new'}}}},
-                   'deb': {'libraries': {'fixture': {'abi_epoch': 1}}}}
-        selected = list(glibc.merge_library_abi(common, formats))
-        self.assertEqual(selected[0][0], 'rpm')
-        value = common['libraries']['fixture']
-        self.assertEqual(value['abi_epoch'], 2)
-        self.assertEqual(value['abi_capability'], 'php-zts-lib-fixture-abi-2')
-        self.assertEqual(value['abi_capabilities'], ['php-zts-lib-fixture-abi-2'])
-        self.assertEqual(value['abi_dump'], {'libfixture.so.2': 'new.xml'})
-        self.assertEqual(value['source_hash'], 'actual')
 
     def test_one_successful_payload_fans_out_two_formats_and_failed_target_does_not_cascade(self):
         with tempfile.TemporaryDirectory(prefix='spp-glibc-matrix-') as temporary:
@@ -487,42 +461,18 @@ class Pipeline(unittest.TestCase):
             self.assertEqual([value['type'] for value in publish], ['deb'])
             self.assertEqual(publish[0]['package-image-digest'], 'b' * 64)
 
-    def test_common_abi_cache_transports_receipts_and_keeps_openssl_profiles_separate(self):
-        with tempfile.TemporaryDirectory(prefix='spp-format-abi-cache-') as temporary:
-            root = Path(temporary)
-            source = root / 'rpm'
-            abi = source / 'usr/share/php-zts/libraries/abi'
-            for name, value in [('grpc/libgrpc.so.50.xml', 'typed-common'), ('grpc/libgrpc.so.50.xml.inputs.json', 'bound-input-proof'),
-                                ('openssl/libssl.so.3.xml', 'rpm-openssl'), ('openssl/libssl.so.3.xml.inputs.json', 'rpm-proof')]:
-                path = abi / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(value)
-            with patch.object(glibc, 'STAGE', root / 'stage'):
-                glibc.save_abi_cache(source, 'rpm')
-                glibc.seed_abi_cache(root / 'deb', 'deb')
-                deb = root / 'deb/usr/share/php-zts/libraries/abi'
-                self.assertEqual((deb / 'grpc/libgrpc.so.50.xml.inputs.json').read_text(), 'bound-input-proof')
-                self.assertFalse((deb / 'openssl').exists())
-                (deb / 'openssl').mkdir()
-                (deb / 'openssl/libssl.so.3.xml').write_text('deb-openssl')
-                glibc.save_abi_cache(root / 'deb', 'deb')
-                glibc.seed_abi_cache(root / 'rpm-next-phase', 'rpm')
-                self.assertEqual((root / 'rpm-next-phase/usr/share/php-zts/libraries/abi/openssl/libssl.so.3.xml').read_text(), 'rpm-openssl')
-
     def test_service_fixture_stages_only_the_real_selected_library_and_its_provenance(self):
         with tempfile.TemporaryDirectory(prefix='spp-runtime-sdk-') as temporary:
             root = Path(temporary)
             source, output = root / 'source', root / 'fixture'
             for relative, contents in {'lib/libz.so.1.3.1': b'actual-zlib', 'licenses/zlib/LICENSE': b'license',
                                        'debug/lib/libz.so.1.3.1.debug': b'actual-debug',
-                                       'usr/share/php-zts/libraries/abi/zlib/libz.so.1.xml': b'actual-abi',
                                        'lib/unrelated.so': b'unchanged-other-library'}.items():
                 path = source / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents)
             (source / 'lib/libz.so.1').symlink_to('libz.so.1.3.1')
-            entry = {'files': ['lib/libz.so.1', 'lib/libz.so.1.3.1'], 'license_files': ['licenses/zlib/LICENSE'],
-                     'abi_dump': {'libz.so.1': 'usr/share/php-zts/libraries/abi/zlib/libz.so.1.xml'}}
+            entry = {'files': ['lib/libz.so.1', 'lib/libz.so.1.3.1'], 'license_files': ['licenses/zlib/LICENSE']}
             (source / 'shared-libraries.json').write_text(json.dumps({'libraries': {'zlib': entry, 'other': {}}}))
             record = {'state': 'sealed', 'files': {'lib/libz.so.1.3.1': {'sha256': 'recorded-production-input'}}}
             (source / 'build-payload.json').write_text(json.dumps(record))

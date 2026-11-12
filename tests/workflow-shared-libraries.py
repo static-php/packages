@@ -370,20 +370,18 @@ class CacheAndCohortTests(unittest.TestCase):
                     result = pipeline.read(directory / 'shared-libraries.json')
                     self.assertEqual(result['libraries']['zlib']['package_versions'][kind], '1.3.1-2')
 
-    def test_annotated_abi_files_are_restored_before_php_build(self):
+    def test_classified_library_metadata_is_restored_before_php_build(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
             root = Path(temporary)
-            for directory in ['stage/abi/example', 'buildroot', 'shims', 'tests']:
+            for directory in ['stage', 'buildroot', 'shims', 'tests']:
                 (root / directory).mkdir(parents=True)
-            (root / 'stage/shared-libraries.json').write_text('{"planned_epoch":2}')
+            (root / 'stage/shared-libraries.json').write_text('{"libraries":{"example":{"version":"1.0"}}}')
             (root / 'stage/shared-library-plan.json').write_text('{"schema":1}')
             helper = root / '.github/actions/shared-libraries/workflow.py'
             helper.parent.mkdir(parents=True)
             shutil.copy2(ROOT / '.github/actions/shared-libraries/workflow.py', helper)
-            (root / 'stage/abi/example/libexample.so.1.xml').write_text('<abi-corpus/>')
             (helper.parent / 'glibc.py').write_text('''from pathlib import Path
-assert Path('buildroot/usr/share/php-zts/libraries/abi/example/libexample.so.1.xml').is_file()
-assert 'planned_epoch' in Path('buildroot/shared-libraries.json').read_text()
+assert Path('buildroot/shared-libraries.json').read_bytes() == Path('stage/shared-libraries.json').read_bytes()
 ''')
             (root / 'tests/upgrade-guards.py').write_text('')
             for name in ['git', 'composer']:
@@ -391,7 +389,7 @@ assert 'planned_epoch' in Path('buildroot/shared-libraries.json').read_text()
                 path.write_text('#!/bin/sh\nexit 0\n')
                 path.chmod(0o755)
             php = root / 'shims/php'
-            php.write_text('#!/bin/sh\nif [ "$1" = bin/spp ] && [ "$2" = all ]; then\n test -s buildroot/usr/share/php-zts/libraries/abi/example/libexample.so.1.xml || exit 91\n grep -q planned_epoch buildroot/shared-libraries.json || exit 92\nfi\n')
+            php.write_text('#!/bin/sh\nif [ "$1" = bin/spp ] && [ "$2" = package ]; then\n cmp stage/shared-libraries.json buildroot/shared-libraries.json || exit 92\nfi\n')
             php.chmod(0o755)
             env = dict(os.environ, PATH=str(root / 'shims') + ':' + os.environ['PATH'], TYPE='deb', PHPV='8.4', PACKAGES='', ITERATION='', BUMP='false', SOURCE_RUN_ID='101', IMAGE='ghcr.io/builder@sha256:' + '1' * 64)
             result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'php'], cwd=root, env=env, capture_output=True, text=True)

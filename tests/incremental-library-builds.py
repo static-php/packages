@@ -347,7 +347,6 @@ for name in p['selected']:
    if name=='base':pending['consumer']={pathlib.Path(old).name:'base'}
    (r/'buildroot'/old).unlink()
  m['libraries'][name].update(source_hash=source['hash'],files=[relative],file_hashes={relative:hashlib.sha256(dest.read_bytes()).hexdigest()})
- for field in ['abi_epoch','abi_dump','abi_dump_hashes','abi_empty','abi_reference_version']:m['libraries'][name].pop(field,None)
  if name=='consumer':pending.pop(name,None)
 if pending:m['pending_rebuilds']=pending
 else:m.pop('pending_rebuilds',None)
@@ -361,8 +360,6 @@ else:m.pop('pending_rebuilds',None)
         incremental.execute(self.root, self.sdk, seed, "rpm", command)
         (self.root / "counts.json").write_text("{}")
         self.manifest = incremental.read(self.sdk / "shared-libraries.json")
-        self.manifest['libraries']['base'].update(abi_epoch=7, abi_dump={'libbase.so.1': 'abi/base.xml'},
-            abi_dump_hashes={'libbase.so.1': 'a' * 64}, abi_empty=[], abi_reference_version='1.2.3')
         incremental.write(self.sdk / 'shared-libraries.json', self.manifest)
         self.state = incremental.read(self.sdk / incremental.STATE)
         unchanged = {n: ((self.sdk / self.manifest["libraries"][n]["files"][0]).read_bytes(),
@@ -372,12 +369,10 @@ else:m.pop('pending_rebuilds',None)
         incremental.write(plan_path, first)
         incremental.execute(self.root, self.sdk, first, "rpm", command)
         self.assertEqual(incremental.read(self.root / "counts.json"), {"base": 1})
-        entry = incremental.read(self.sdk / 'shared-libraries.json')['libraries']['base']
-        self.assertEqual((entry['abi_epoch'], entry['abi_reference_version']), (7, '1.2.3'))
         for name, (contents, mtime) in unchanged.items():
             path = self.sdk / self.manifest["libraries"][name]["files"][0]
             self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (contents, mtime))
-        # A SONAME/symbol change recompiles the reverse library in a separate pass, not the root twice.
+        # A SONAME change recompiles the reverse library in a separate pass, not the root twice.
         self.manifest = incremental.read(self.sdk / "shared-libraries.json")
         self.state = incremental.read(self.sdk / incremental.STATE)
         first = self.plan(sources=self.changed("base", "3"))

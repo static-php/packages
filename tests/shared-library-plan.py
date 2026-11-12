@@ -1,7 +1,6 @@
 import argparse
 import copy
 import gzip
-import hashlib
 import io
 import json
 import runpy
@@ -19,10 +18,10 @@ planner = runpy.run_path(str(root / 'bin/shared-library-plan'))
 namespace = planner['compare'].__globals__
 
 
-def library(version='1.0', soname='libfixture.so.1', epoch=1, depends=None):
-    return {'version': version, 'source_hash': version, 'abi_epoch': epoch,
+def library(version='1.0', soname='libfixture.so.1', depends=None):
+    return {'version': version, 'source_hash': version,
             'files': ['lib/' + soname], 'elf': {'lib/' + soname: {'soname': soname, 'needed': []}},
-            'depends': depends or [], 'abi_dump': {soname: 'abi/' + soname + '.xml'}}
+            'depends': depends or []}
 
 
 def manifest(libraries=None):
@@ -64,84 +63,37 @@ class SharedLibraryPlan(unittest.TestCase):
             with self.subTest(pending=pending), self.assertRaisesRegex(RuntimeError, 'Invalid pending'):
                 planner['validate_manifest'](dict(value, pending_rebuilds=pending), allow_pending=True)
 
-    def test_epoch_is_published_generation(self):
-        previous = manifest({'fixture': library(epoch=7)})
-        current = manifest({'fixture': library(version='1.1')})
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'abi/libfixture.so.1.xml'
-            path.parent.mkdir()
-            path.write_text('<abi-corpus/>')
-            with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': Mock(return_value='compatible')}):
-                updated, plan = planner['compare'](previous, current, temporary, temporary)
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 7)
-        self.assertEqual(updated['libraries']['fixture']['abi_capability'], 'php-zts-lib-fixture-abi-7')
-        self.assertEqual(plan['libraries']['fixture']['status'], 'compatible')
+    def test_obsolete_abi_counters_are_ignored_and_removed(self):
+        previous, current = manifest(), manifest()
+        previous['libraries']['fixture'].update(abi_epoch=9, abi_capability='obsolete', abi_capabilities=['obsolete'])
+        current['libraries']['fixture'].update(abi_epoch=1, abi_capability='different', abi_capabilities=['different'])
+        updated, plan = planner['compare'](previous, current)
+        self.assertEqual(plan['libraries']['fixture'], {'status': 'compatible'})
+        for field in ['abi_epoch', 'abi_capability', 'abi_capabilities']:
+            self.assertNotIn(field, updated['libraries']['fixture'])
+        self.assertEqual(planner['fingerprint'](previous), planner['fingerprint'](current))
 
-    def test_incompatible_changes_rotate_epoch(self):
-        previous = manifest({'fixture': library(epoch=4)})
-        current = manifest()
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'abi/libfixture.so.1.xml'
-            path.parent.mkdir()
-            path.write_text('<abi-corpus/>')
-            with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': Mock(return_value='breaking')}):
-                updated, _ = planner['compare'](previous, current, temporary, temporary)
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 5)
-        self.assertEqual(updated['libraries']['fixture']['abi_capabilities'], ['php-zts-lib-fixture-abi-5'])
+    def test_soname_change_has_no_synthetic_version(self):
+        _, plan = planner['compare'](manifest(), manifest({'fixture': library(soname='libfixture.so.2')}))
+        self.assertEqual(plan['libraries']['fixture'], {'status': 'breaking'})
 
     def test_removed_soname_is_breaking(self):
-        previous = manifest()
-        previous['libraries']['fixture']['abi_empty'] = ['libfixture.so.1']
-        with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': Mock()}):
-            updated, result = planner['compare'](previous, manifest({'fixture': library(soname='libfixture.so.2')}), '.', '.')
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 2)
+        current = manifest()
+        current['libraries']['fixture']['elf'] = {}
+        updated, result = planner['compare'](manifest(), current)
         self.assertEqual(result['libraries']['fixture']['status'], 'breaking')
 
-    def test_new_soname_is_compatible(self):
+    def test_added_soname_changes_the_library_inventory(self):
         old = manifest()
         new = copy.deepcopy(old)
         new['libraries']['fixture']['elf']['lib/libextra.so.1'] = {'soname': 'libextra.so.1'}
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'abi/libfixture.so.1.xml'
-            path.parent.mkdir()
-            path.write_text('<abi-corpus/>')
-            with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': Mock(return_value='compatible')}):
-                updated, _ = planner['compare'](old, new, temporary, temporary)
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
+        updated, result = planner['compare'](old, new)
+        self.assertEqual(result['libraries']['fixture']['status'], 'breaking')
 
-    def test_trusted_empty_corpus_ignores_crt_representation_changes(self):
-        previous = manifest()
-        previous['libraries']['fixture']['abi_empty'] = ['libfixture.so.1']
-        current = manifest()
-        current['libraries']['fixture']['abi_empty'] = ['libfixture.so.1']
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'abi/libfixture.so.1.xml'
-            path.parent.mkdir()
-            path.write_text('<abi-corpus><elf-function-symbols><elf-symbol name="_init" type="func-type"/></elf-function-symbols></abi-corpus>')
-            difference = Mock(side_effect=RuntimeError('CRT symbol differences must not classify source ABI'))
-            with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': difference}):
-                updated, result = planner['compare'](previous, current, temporary, temporary)
-            difference.assert_not_called()
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
-        self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
-
-    def test_missing_empty_annotation_uses_normal_abi_comparison(self):
-        previous = manifest()
-        current = manifest()
-        current['libraries']['fixture']['abi_empty'] = ['libfixture.so.1']
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'abi/libfixture.so.1.xml'
-            path.parent.mkdir()
-            path.write_text('<abi-corpus/>')
-            difference = Mock(return_value='breaking')
-            with patch.dict(namespace, {'dump_abi': Mock(), 'abi_difference': difference}):
-                updated, _ = planner['compare'](previous, current, temporary, temporary)
-            difference.assert_called_once()
-        self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 2)
 
     def test_missing_published_abi_baseline_blocks_release(self):
-        with self.assertRaisesRegex(RuntimeError, 'No published shared-library ABI baseline'):
-            planner['compare'](planner['empty_manifest'](), manifest(), '.', '.')
+        with self.assertRaisesRegex(RuntimeError, 'No published shared-library SONAME baseline'):
+            planner['compare'](planner['empty_manifest'](), manifest())
 
     def test_apk_baseline_does_not_download_archives_for_other_architectures(self):
         import requests
@@ -155,7 +107,7 @@ class SharedLibraryPlan(unittest.TestCase):
             def load(path):
                 return helper if str(path).endswith('forgejo-helper') else native
             args = argparse.Namespace(type='apk', output=temporary, arch='x86_64', skip_consumers=True,
-                                      abi_libraries='', consumer_stream='8.5', owner='85',
+                                      consumer_stream='8.5', owner='85',
                                       host='https://example.com', password_env=None, consumer_password_env=None)
             with patch.object(runpy, 'run_path', load), patch.object(requests, 'get', side_effect=AssertionError('Unexpected archive download')):
                 planner['baseline_single'](args)
@@ -163,90 +115,48 @@ class SharedLibraryPlan(unittest.TestCase):
             self.assertEqual(result['libraries'], {})
             self.assertEqual(queried, ['php-zts-lib-', 'php-zts-runtime-layout'])
 
-    def test_newly_rebuilt_dependent_uses_retained_archive_for_abi(self):
+    def test_baseline_merge_keeps_the_selected_package_archive(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             source, output = directory / 'source', directory / 'output'
             source.mkdir()
             (source / 'fixture.deb').write_bytes(b'captured package')
             value = manifest()
-            entry = value['libraries']['fixture']
-            entry.update(published_version='1.0-1', published_archive='fixture.deb',
-                         published_archive_sha256=hashlib.sha256(b'captured package').hexdigest(),
-                         abi_dump_hashes={'libfixture.so.1': hashlib.sha256(b'<abi-corpus/>').hexdigest()})
-            def extract(archive, kind, destination, libraries):
-                self.assertEqual(libraries, {'fixture'})
-                self.assertEqual(kind, 'deb')
-                path = destination / 'abi/libfixture.so.1.xml'
-                path.parent.mkdir()
-                path.write_bytes(b'<abi-corpus/>')
-            extracted = Mock(side_effect=extract)
-            with patch.dict(namespace, {'extract_metadata': extracted}):
-                planner['merge_baselines']([(value, source)], 'deb', output, {'fixture'})
-            extracted.assert_called_once()
-            self.assertEqual((output / 'abi/libfixture.so.1.xml').read_bytes(), b'<abi-corpus/>')
+            value['libraries']['fixture'].update(published_version='1.0-1', published_archive='fixture.deb')
+            planner['merge_baselines']([(value, source)], 'deb', output)
+            self.assertEqual((output / 'fixture.deb').read_bytes(), b'captured package')
 
-    def test_scoped_library_baseline_preserves_unselected_cached_abi_epochs(self):
-        current = manifest({'fixture': library(), 'other': library(epoch=3, soname='libother.so.3')})
-        for entry in current['libraries'].values():
-            entry['abi_dump_hashes'] = {name: 'a' * 64 for name in entry['abi_dump']}
-            entry['abi_empty'] = []
+    def test_scoped_library_baseline_preserves_unselected_metadata(self):
+        current = manifest({'fixture': library(), 'other': library(soname='libother.so.3')})
         current['libraries']['other']['package_versions'] = {'deb': '1.0-7'}
         previous = manifest({'fixture': copy.deepcopy(current['libraries']['fixture'])})
         previous['metadata_scope'] = ['fixture']
-        with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
-            annotated, result = planner['compare'](previous, current, Path('.'), Path('.'), rebuilt_libraries=set())
+        annotated, result = planner['compare'](previous, current, rebuilt_libraries=set())
         self.assertEqual(annotated['libraries']['other'], current['libraries']['other'])
         self.assertEqual(result['libraries']['other']['status'], 'unchanged')
         self.assertEqual(planner['source_changes'](previous, current), {})
         with TemporaryDirectory() as temporary:
-            merged, _ = planner['merge_baselines']([(previous, temporary)], 'deb', temporary, set())
+            merged, _ = planner['merge_baselines']([(previous, temporary)], 'deb', temporary)
             self.assertEqual(merged['metadata_scope'], ['fixture'])
             with self.assertRaisesRegex(RuntimeError, 'different library metadata scopes'):
-                planner['merge_baselines']([(previous, temporary), (manifest(), temporary)], 'deb', temporary, set())
+                planner['merge_baselines']([(previous, temporary), (manifest(), temporary)], 'deb', temporary)
 
-    def test_missing_debug_baseline_blocks_release(self):
-        old = manifest()
-        old['libraries']['fixture'].pop('abi_dump')
-        with patch.dict(namespace, {'dump_abi': Mock()}), self.assertRaisesRegex(RuntimeError, 'no debug ABI'):
-            planner['compare'](old, manifest(), '.', '.')
 
     def test_foreign_platform_baseline_is_rejected(self):
         old = manifest()
         old['libc'] = 'musl'
         with self.assertRaisesRegex(RuntimeError, 'libc'):
-            planner['compare'](old, manifest(), '.', '.')
+            planner['compare'](old, manifest())
 
-    def test_ambiguous_and_failed_comparisons_block(self):
-        for status in [1, 3, 4, 5, 8, 16, -1]:
-            with self.subTest(status=status), patch.dict(namespace, {'run': Mock(return_value=Mock(returncode=status, stderr='error', stdout='changed'))}), self.assertRaises(RuntimeError):
-                planner['abi_difference']('old.xml', 'new.xml')
-
-    def test_additions_require_filtered_comparison_to_be_equal(self):
-        command = Mock(side_effect=[Mock(returncode=4, stdout='added', stderr=''), Mock(returncode=0)])
-        with patch.dict(namespace, {'run': command}):
-            self.assertEqual(planner['abi_difference']('old.xml', 'new.xml'), 'compatible')
-        self.assertIn('--no-added-syms', command.call_args_list[1][0][0])
-
-    def test_breaking_abidiff_status(self):
-        with patch.dict(namespace, {'run': Mock(return_value=Mock(returncode=12))}):
-            self.assertEqual(planner['abi_difference']('old.xml', 'new.xml'), 'breaking')
-
-    def test_abi_dump_requires_debug_info(self):
-        with TemporaryDirectory() as temporary, patch.dict(namespace, {'run': Mock(return_value=Mock(returncode=1, stderr='no debug'))}) as mocked:
-            with self.assertRaisesRegex(RuntimeError, 'debug ABI'):
-                planner['dump_abi'](temporary, 'fixture', library())
-            self.assertIn('--debug-info-dir', namespace['run'].call_args[0][0])
 
     def test_reverse_dependencies_include_transitive_and_dlopen_edges(self):
         value = manifest({'fixture': library(), 'middle': library(depends=['fixture']), 'consumer': library(depends=['middle']), 'other': library()})
         value['libraries']['other']['dlopen_dependencies'] = ['consumer']
         self.assertEqual(planner['reverse_closure'](value, ['fixture']), ['consumer', 'fixture', 'middle', 'other'])
 
-    def test_source_changes_ignore_abi_bookkeeping(self):
+    def test_source_changes_ignore_package_version_bookkeeping(self):
         old = manifest()
         new = copy.deepcopy(old)
-        new['libraries']['fixture']['abi_epoch'] = 2
         new['libraries']['fixture']['package_versions'] = {'deb': '1.0-7'}
         self.assertEqual(planner['source_changes'](old, new), {})
         new['libraries']['fixture']['source_hash'] = 'new-source'
@@ -259,12 +169,12 @@ class SharedLibraryPlan(unittest.TestCase):
         new['libraries']['fixture']['file_hashes'] = {'etc/fixture.conf': 'new-configuration'}
         self.assertEqual(planner['source_changes'](old, new), {'fixture': 'changed'})
 
-    def test_fingerprint_covers_abi_and_ignores_generation_time(self):
+    def test_fingerprint_covers_sonames_and_ignores_generation_time(self):
         first = manifest()
         second = copy.deepcopy(first)
         second['generated_at'] = 'tomorrow'
         self.assertEqual(planner['fingerprint'](first), planner['fingerprint'](second))
-        second['libraries']['fixture']['abi_epoch'] = 2
+        second['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         self.assertNotEqual(planner['fingerprint'](first), planner['fingerprint'](second))
 
     def test_invalid_manifests_fail_closed(self):
@@ -276,9 +186,6 @@ class SharedLibraryPlan(unittest.TestCase):
         value['libraries']['fixture']['depends'] = ['missing']
         cases.append(value)
         cases.append(manifest({'fixture': library(), 'duplicate': library()}))
-        value = manifest()
-        value['libraries']['fixture']['abi_epoch'] = False
-        cases.append(value)
         for value in cases:
             with self.subTest(value=value), self.assertRaises(RuntimeError):
                 planner['validate_manifest'](value)
@@ -305,8 +212,6 @@ class SharedLibraryPlan(unittest.TestCase):
             current = temporary / 'current.json'
             baseline = temporary / 'baseline'
             baseline.mkdir()
-            (baseline / 'abi').mkdir()
-            (baseline / 'abi/libfixture.so.1.xml').write_text('<abi-corpus/>')
             current.write_text(json.dumps(manifest()))
             published = manifest()
             published['libraries']['fixture']['published_version'] = '1.0-7'
@@ -344,11 +249,11 @@ class SharedLibraryPlan(unittest.TestCase):
                 planner['cohort'](args)
 
     def manual_plan(self, names=('fixture', 'other'), selected='fixture', rebuilt='', changed=(), breaking=(), packages=None, dependencies=None,
-                    bump=True, mode='full', metadata=()):
+                    bump=True, mode='full', metadata=(), php_versions='8.4'):
         with TemporaryDirectory(prefix='shared-library-manual-') as directory:
             temporary = Path(directory)
             baseline = temporary / 'baseline'
-            (baseline / 'abi').mkdir(parents=True)
+            baseline.mkdir()
             old = manifest({name: library(soname='lib' + name + '.so.1') for name in names})
             if dependencies is not None:
                 old['consumers'] = {stream: sorted(dependencies.get(stream, {})) for stream in planner['STREAMS']}
@@ -356,8 +261,9 @@ class SharedLibraryPlan(unittest.TestCase):
                 old['consumer_versions'] = {stream: {name: '1.0-1' for name in names} for stream, names in old['consumers'].items()}
             for name, entry in old['libraries'].items():
                 entry['published_version'] = '1.0-1'
-                (baseline / entry['abi_dump']['lib' + name + '.so.1']).write_text('<abi-corpus/>')
             current = copy.deepcopy(old)
+            for name in breaking:
+                current['libraries'][name]['elf'] = {'lib/lib' + name + '.so.2': {'soname': 'lib' + name + '.so.2', 'needed': []}}
             for name in changed:
                 current['libraries'][name]['source_hash'] = 'new-source'
             if 'consumer' in current['libraries']:
@@ -371,16 +277,23 @@ class SharedLibraryPlan(unittest.TestCase):
             args = argparse.Namespace(manifest=str(temporary / 'current.json'), baseline=str(baseline),
                                       request=str(temporary / 'request.json'), mode=mode, bump=bump,
                                       root=str(temporary), libraries=selected, rebuilt_libraries=rebuilt,
-                                      php_versions='8.4', packages=packages, type='deb',
+                                      php_versions=php_versions, packages=packages, type='deb',
                                       manifest_output=str(temporary / 'annotated.json'), output=str(temporary / 'plan.json'))
-            comparison = {'schema': 1,
-                          'libraries': {name: {'status': 'breaking' if name in breaking else 'compatible'} for name in names}}
-            with patch.dict(namespace, {'compare': Mock(return_value=(current, comparison))}):
-                planner['prepare'](args)
+            planner['prepare'](args)
             return json.loads(Path(args.output).read_text())
 
+    def test_full_bump_repackages_unchanged_sdk_and_all_php_streams(self):
+        for bump in (False, True):
+            with self.subTest(bump=bump):
+                plan = self.manual_plan(selected=None, rebuilt='', bump=bump, mode='full', php_versions='')
+                self.assertEqual(plan['libraries'], ['fixture', 'other'] if bump else [])
+                self.assertTrue(all(request['full'] for request in plan['php_requests'].values()))
+                self.assertFalse(plan['abi_break'])
+        incremental = self.manual_plan(selected=None, rebuilt='', bump=True, mode='incremental')
+        self.assertEqual(incremental['libraries'], [])
+
     def test_manual_library_bump_ignores_unrelated_snapshot_and_full_default(self):
-        plan = self.manual_plan()
+        plan = self.manual_plan(dependencies={'8.4': {'php-zts-curl': ['fixture']}})
         self.assertEqual(plan['libraries'], ['fixture'])
         self.assertFalse(any(value['full'] or value['packages'] for value in plan['php_requests'].values()))
 
@@ -447,31 +360,62 @@ class SharedLibraryPlan(unittest.TestCase):
             self.manual_plan(packages='curl')
 
     def test_peer_baselines_reconcile_an_interrupted_publication(self):
-        first = manifest({'fixture': library(version='1.1', epoch=2)})
-        second = manifest({'fixture': library(version='1.0', epoch=1)})
+        first = manifest({'fixture': library(version='1.1', soname='libfixture.so.2')})
+        second = manifest({'fixture': library(version='1.0')})
         first['libraries']['fixture']['published_version'] = '1.1-1'
         second['libraries']['fixture']['published_version'] = '1.0-1'
         first['consumers'] = {'8.4': ['php-zts-cli', 'php-zts-curl']}
         second['consumers'] = {'8.5': ['php-zts-cli']}
         with TemporaryDirectory() as temporary:
             temporary = Path(temporary)
-            for host in ['first', 'second']:
-                (temporary / host / 'abi').mkdir(parents=True)
-                (temporary / host / 'abi/libfixture.so.1.xml').write_text(host)
             with patch.dict(namespace, {'native_compare': lambda kind, a, b: (a > b) - (a < b)}):
                 merged, divergent = planner['merge_baselines']([(first, temporary / 'first'), (second, temporary / 'second')], 'deb', temporary / 'merged')
-            self.assertEqual(merged['libraries']['fixture']['abi_epoch'], 2)
+            self.assertEqual(planner['library_names'](merged['libraries']['fixture']), ['libfixture.so.2'])
             self.assertEqual(divergent, {'fixture'})
-            self.assertEqual((temporary / 'merged/abi/libfixture.so.1.xml').read_text(), 'first')
             self.assertEqual(merged['consumers']['8.4'], ['php-zts-cli', 'php-zts-curl'])
             self.assertEqual(merged['consumers']['8.5'], ['php-zts-cli'])
 
-    def test_same_published_version_cannot_have_different_abi_generations(self):
-        first = manifest({'fixture': library(epoch=2)})
-        second = manifest({'fixture': library(epoch=1)})
+    def test_peer_soname_change_rebuilds_older_consumers(self):
+        latest = manifest({'fixture': library(version='1.1', soname='libfixture.so.2')})
+        older = manifest()
+        for value, version in [(latest, '1.1-1'), (older, '1.0-1')]:
+            value['libraries']['fixture']['published_version'] = version
+        latest['consumers'] = {'8.4': []}
+        older['consumers'] = {'8.5': ['php-zts-imagick']}
+        older['consumer_dependencies'] = {'8.5': {'php-zts-imagick': ['fixture']}}
+        with TemporaryDirectory() as temporary, patch.dict(namespace, {
+                'native_compare': lambda kind, left, right: (left > right) - (left < right)}):
+            directory = Path(temporary)
+            baselines = []
+            for name, value in [('latest', latest), ('older', older)]:
+                baseline = directory / name
+                baseline.mkdir()
+                (baseline / 'shared-libraries.json').write_text(json.dumps(value))
+                baselines.append((value, baseline))
+            merged, divergent = planner['merge_baselines'](baselines, 'deb', directory / 'merged')
+            self.assertEqual(divergent, {'fixture'})
+            self.assertEqual(merged['libraries']['fixture']['elf'], latest['libraries']['fixture']['elf'])
+            (directory / 'current.json').write_text(json.dumps(latest))
+            args = argparse.Namespace(manifest=directory / 'current.json', baseline=directory / 'latest',
+                peer_baseline=directory / 'older', request=None, mode='incremental', libraries='fixture',
+                rebuilt_libraries='', php_versions='8.4', packages=None, type='deb',
+                manifest_output=directory / 'annotated.json', output=directory / 'plan.json')
+            planner['prepare'](args)
+            plan = json.loads(args.output.read_text())
+            self.assertEqual(plan['comparison']['fixture']['status'], 'compatible')
+            self.assertEqual(plan['divergent_libraries'], ['fixture'])
+            self.assertEqual(plan['abi_rebuild_roots'], ['fixture'])
+            self.assertTrue(plan['abi_break'])
+            self.assertTrue(plan['php_requests']['8.5']['compile'])
+            self.assertEqual(plan['php_requests']['8.5']['compile_packages'], ['imagick'])
+            self.assertFalse(plan['php_requests']['8.4']['compile'])
+
+    def test_same_published_version_cannot_have_different_sonames(self):
+        first = manifest({'fixture': library(soname='libfixture.so.2')})
+        second = manifest()
         for value in [first, second]:
             value['libraries']['fixture']['published_version'] = '1.0-1'
-        with TemporaryDirectory() as temporary, patch.dict(namespace, {'native_compare': Mock(return_value=0)}), self.assertRaisesRegex(RuntimeError, 'conflicting ABI'):
+        with TemporaryDirectory() as temporary, patch.dict(namespace, {'native_compare': Mock(return_value=0)}), self.assertRaisesRegex(RuntimeError, 'conflicting library'):
             planner['merge_baselines']([(first, temporary), (second, temporary)], 'deb', temporary)
 
     def test_cohort_accepts_either_known_peer_baseline(self):
@@ -550,50 +494,42 @@ class SharedLibraryPlan(unittest.TestCase):
             planner['validate_manifest'](partial)
         self.assertEqual(planner['validate_manifest'](partial, complete=False), partial)
 
-    def test_library_cohort_checks_native_floor_provides_and_abi_payload(self):
+    def test_library_cohort_checks_native_floor_and_soname_metadata(self):
         with TemporaryDirectory() as temporary:
             temporary = Path(temporary)
             artifacts = temporary / 'artifacts'
             artifacts.mkdir()
-            abi_path = 'usr/share/php-zts/libraries/abi/fixture/libfixture.so.1.xml'
-            abi = b'<abi-corpus><abi-instr><type-decl/></abi-instr></abi-corpus>'
             entry = library()
-            entry.update({'abi_capability': 'php-zts-lib-fixture-abi-1', 'abi_dump': {'libfixture.so.1': abi_path},
-                          'abi_dump_hashes': {'libfixture.so.1': hashlib.sha256(abi).hexdigest()}, 'package_versions': {'apk': '1.0-r2'}})
-            expected = {key: entry[key] for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes']}
+            entry['package_versions'] = {'apk': '1.0-r2'}
+            expected = {key: entry[key] for key in ['version', 'source_hash', 'elf']}
             plan = {'schema': 1, 'baseline_fingerprint': 'old', 'expected_members': ['php-zts-lib-fixture'],
                     'expected_libraries': {'fixture': expected}, 'published_versions': {'fixture': '1.0-r1'}}
             (temporary / 'plan.json').write_text(json.dumps(plan))
             args = argparse.Namespace(plan=str(temporary / 'plan.json'), baseline_manifest=None, artifacts=str(artifacts), type='apk', output=str(temporary / 'result.json'))
 
-            def archive(provides, floor):
+            def archive(floor, soname=None):
                 value = copy.deepcopy(entry)
                 value['package_versions']['apk'] = floor
-                metadata = 'pkgname = php-zts-lib-fixture\npkgver = 1.0-r2\narch = x86_64\n' + ('provides = ' + provides + '\n' if provides else '')
+                if soname:
+                    value['elf']['lib/libfixture.so.1']['soname'] = soname
+                metadata = 'pkgname = php-zts-lib-fixture\npkgver = 1.0-r2\narch = x86_64\n'
                 with gzip.open(artifacts / 'fixture.apk', 'wb') as compressed, tarfile.open(fileobj=compressed, mode='w|') as output:
-                    for name, data in [('.PKGINFO', metadata.encode()), ('usr/share/php-zts/libraries/fixture.json', json.dumps(value).encode()), (abi_path, abi)]:
+                    for name, data in [('.PKGINFO', metadata.encode()), ('usr/share/php-zts/libraries/fixture.json', json.dumps(value).encode())]:
                         member = tarfile.TarInfo(name)
                         member.size = len(data)
                         output.addfile(member, io.BytesIO(data))
 
             with patch.dict(namespace, {'native_compare': lambda kind, a, b: (a > b) - (a < b)}):
-                archive(entry['abi_capability'], '1.0-r2')
+                archive('1.0-r2')
                 planner['cohort'](args)
                 self.assertEqual(len(json.loads(Path(args.output).read_text())['files']), 1)
-                archive('', '1.0-r2')
-                with self.assertRaisesRegex(RuntimeError, 'provide its private ABI'):
+                archive('1.0-r2', 'libfixture.so.2')
+                with self.assertRaisesRegex(RuntimeError, 'does not match prepared ABI plan'):
                     planner['cohort'](args)
-                archive(entry['abi_capability'], '1.0-r1')
+                archive('1.0-r1')
                 with self.assertRaisesRegex(RuntimeError, 'package-version floor'):
                     planner['cohort'](args)
 
-    def test_only_reserved_crt_notype_or_function_exports_are_empty(self):
-        for kind, name, expected in [('NOTYPE', '_init', []), ('FUNC', '_fini', []), ('OBJECT', '_init', ['_init']),
-                                     ('TLS', '_fini', ['_fini']), ('FUNC', 'public_api', ['public_api']),
-                                     ('NOTYPE', 'public_untyped', ['public_untyped'])]:
-            output = "Symbol table '.dynsym' contains 1 entry:\n  1: 0000000000001000 0 {} GLOBAL DEFAULT 6 {}\n".format(kind, name)
-            with self.subTest(kind=kind, name=name), patch.dict(namespace, {'run': Mock(return_value=Mock(returncode=0, stdout=output))}):
-                self.assertEqual(planner['defined_public_symbols']('fixture.so'), expected)
 
     def test_unchanged_manual_library_without_bump_does_not_repackage(self):
         self.assertEqual(self.manual_plan(bump=False)['libraries'], [])
@@ -669,15 +605,14 @@ class SharedLibraryPlan(unittest.TestCase):
             baseline.mkdir()
             previous = dict(manifest({}), metadata_scope=[])
             (baseline / 'shared-libraries.json').write_text(json.dumps(previous))
-            current = manifest({'fixture': dict(library(epoch=3), package_versions={'deb': '1.0-7'})})
+            current = manifest({'fixture': dict(library(), package_versions={'deb': '1.0-7'})})
             (directory / 'current.json').write_text(json.dumps(current))
             args = argparse.Namespace(manifest=str(directory / 'current.json'), baseline=str(baseline),
                                       root=str(directory), request=None,
                                       mode='incremental', libraries='', rebuilt_libraries='',
                                       php_versions='8.5', packages='fpm', type='deb',
                                       manifest_output=str(directory / 'annotated.json'), output=str(directory / 'plan.json'))
-            with patch.dict(namespace, {'cached_abi': lambda *args: True, 'dump_abi': Mock(side_effect=AssertionError('ABI scan'))}):
-                planner['prepare'](args)
+            planner['prepare'](args)
             plan = json.loads(Path(args.output).read_text())
             self.assertEqual(plan['libraries'], [])
             self.assertEqual(plan['php_requests']['8.5']['packages'], ['fpm'])
@@ -686,146 +621,6 @@ class SharedLibraryPlan(unittest.TestCase):
             args.rebuilt_libraries = 'fixture'
             with self.assertRaisesRegex(RuntimeError, 'Scoped baselines must cover'):
                 planner['prepare'](args)
-
-
-
-
-@unittest.skipUnless(all(shutil.which(tool) for tool in ['gcc', 'abidw', 'abidiff']), 'GCC and libabigail required')
-class NativeAbiComparison(unittest.TestCase):
-    def build(self, root, source, debug=True, extra_flags=()):
-        (root / 'lib').mkdir(parents=True)
-        (root / 'source.c').write_text(source)
-        command = ['gcc', '-shared', '-fPIC', '-Wl,-soname,libfixture.so.1']
-        if debug:
-            command.append('-g')
-        command.extend(extra_flags)
-        subprocess.check_call(command + ['-o', str(root / 'lib/libfixture.so.1'), str(root / 'source.c')])
-
-    def test_liburing_statx_reserved_padding_changes_preserve_public_layout(self):
-        prefix = 'unsigned int stx_mask; unsigned int stx_blksize; unsigned char public_data[136];'
-        padding = 'unsigned long long __pad1[14];'
-        fields = ('unsigned long long stx_mnt_id; unsigned int stx_dio_mem_align, stx_dio_offset_align; '
-                  'unsigned long long stx_subvol; unsigned int stx_atomic_write_unit_min, stx_atomic_write_unit_max, '
-                  'stx_atomic_write_segments_max; unsigned int __pad1[1]; unsigned long long __pad2[9];')
-        source = lambda members: 'struct statx {' + members + '}; void fixture(struct statx *value) { value->stx_mask = 1; }'
-        cases = [
-            ('padding', prefix + fields, 'liburing-ffi.so.2', True),
-            ('moved-public-field', prefix.replace('stx_mask; unsigned int stx_blksize', 'stx_blksize; unsigned int stx_mask') + fields, 'liburing-ffi.so.2', False),
-            ('changed-public-type', prefix.replace('unsigned int stx_mask', 'unsigned long long stx_mask').replace('public_data[136]', 'public_data[132]') + fields, 'liburing-ffi.so.2', False),
-            ('changed-size', prefix + fields.replace('__pad2[9]', '__pad2[10]'), 'liburing-ffi.so.2', False),
-            ('other-library', prefix + fields, 'libfixture.so.1', False),
-        ]
-        for name, members, soname, compatible in cases:
-            with self.subTest(case=name), TemporaryDirectory(prefix='shared-library-statx-') as temporary:
-                old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
-                for directory, body in [(old_root, prefix + padding), (new_root, members)]:
-                    self.build(directory, source(body), extra_flags=['-Wl,-soname,' + soname])
-                    planner['dump_abi'](directory, 'fixture', library())
-                paths = [directory / 'usr/share/php-zts/libraries/abi/fixture/libfixture.so.1.xml' for directory in [old_root, new_root]]
-                original = [path.read_bytes() for path in paths]
-                if compatible:
-                    self.assertEqual(planner['abi_difference'](*paths), 'compatible')
-                else:
-                    with self.assertRaisesRegex(RuntimeError, 'Ambiguous ABI'):
-                        planner['abi_difference'](*paths)
-                self.assertEqual([path.read_bytes() for path in paths], original)
-
-    def test_native_compatible_addition_preserves_generation(self):
-        with TemporaryDirectory(prefix='shared-library-abi-') as temporary:
-            old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
-            self.build(old_root, 'int fixture(void) { return 1; }')
-            self.build(new_root, 'int fixture(void) { return 2; } int added(void) { return 3; }')
-            old, new = manifest(), manifest({'fixture': library(version='1.1')})
-            planner['dump_abi'](old_root, 'fixture', old['libraries']['fixture'])
-            updated, plan = planner['compare'](old, new, old_root, new_root)
-            self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
-            self.assertEqual(plan['libraries']['fixture']['status'], 'compatible')
-
-    def test_native_removed_symbol_rotates_generation(self):
-        with TemporaryDirectory(prefix='shared-library-abi-') as temporary:
-            old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
-            self.build(old_root, 'int fixture(void) { return 1; }')
-            self.build(new_root, 'int replacement(void) { return 3; }')
-            old, new = manifest(), manifest({'fixture': library(version='2.0')})
-            planner['dump_abi'](old_root, 'fixture', old['libraries']['fixture'])
-            updated, plan = planner['compare'](old, new, old_root, new_root)
-            self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 2)
-            self.assertEqual(plan['libraries']['fixture']['status'], 'breaking')
-
-    def test_missing_debug_information_blocks_dump(self):
-        with TemporaryDirectory(prefix='shared-library-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, 'int fixture(void) { return 1; }', debug=False)
-            with self.assertRaisesRegex(RuntimeError, 'type information'):
-                planner['dump_abi'](temporary, 'fixture', library())
-
-    def test_data_only_c_library_retains_type_information(self):
-        with TemporaryDirectory(prefix='shared-library-data-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, 'const struct { double alignment; unsigned char bytes[16]; } fixture_data = { 0, { 1, 2, 3 } };')
-            entry = library()
-            planner['dump_abi'](temporary, 'fixture', entry)
-            self.assertIn('libfixture.so.1', entry['abi_dump_hashes'])
-
-    def test_empty_compatibility_stub_has_an_empty_public_abi(self):
-        with TemporaryDirectory(prefix='shared-library-empty-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, '/* All interfaces use the C++ standard library. */')
-            entry = library()
-            planner['dump_abi'](temporary, 'fixture', entry)
-            self.assertEqual(entry['abi_empty'], ['libfixture.so.1'])
-
-    def test_empty_stub_without_crt_has_an_empty_public_abi(self):
-        with TemporaryDirectory(prefix='shared-library-no-crt-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, '/* Empty stub without startup objects. */', extra_flags=['-nostartfiles'])
-            entry = library()
-            planner['dump_abi'](temporary, 'fixture', entry)
-            self.assertEqual(entry['abi_empty'], ['libfixture.so.1'])
-
-    @unittest.skipUnless(shutil.which('strip'), 'strip required')
-    def test_stripped_real_api_is_rejected(self):
-        with TemporaryDirectory(prefix='shared-library-stripped-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, 'int fixture(void) { return 1; }')
-            subprocess.check_call(['strip', '--strip-debug', str(temporary / 'lib/libfixture.so.1')])
-            with self.assertRaisesRegex(RuntimeError, 'type information'):
-                planner['dump_abi'](temporary, 'fixture', library())
-
-    def test_non_crt_notype_export_is_rejected(self):
-        with TemporaryDirectory(prefix='shared-library-untyped-abi-') as temporary:
-            temporary = Path(temporary)
-            self.build(temporary, '__asm__(".globl public_untyped\\npublic_untyped:\\n.byte 0");', extra_flags=['-nostartfiles'])
-            with self.assertRaisesRegex(RuntimeError, 'type information'):
-                planner['dump_abi'](temporary, 'fixture', library())
-
-    def test_empty_to_real_api_is_compatible_and_reverse_is_breaking(self):
-        with TemporaryDirectory(prefix='shared-library-empty-transition-') as temporary:
-            old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
-            self.build(old_root, '/* Empty compatibility stub. */')
-            self.build(new_root, 'int fixture(void) { return 1; }')
-            old, new = manifest(), manifest({'fixture': library(version='1.1')})
-            planner['dump_abi'](old_root, 'fixture', old['libraries']['fixture'])
-            updated, result = planner['compare'](old, new, old_root, new_root)
-            self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
-            self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
-            restored, result = planner['compare'](updated, old, new_root, old_root)
-            self.assertEqual(result['libraries']['fixture']['status'], 'breaking')
-            self.assertEqual(restored['libraries']['fixture']['abi_epoch'], 2)
-
-    def test_empty_crt_startup_changes_keep_the_generation(self):
-        with TemporaryDirectory(prefix='shared-library-empty-crt-') as temporary:
-            old_root, new_root = Path(temporary) / 'old', Path(temporary) / 'new'
-            self.build(old_root, '/* Empty compatibility stub with native CRT. */')
-            self.build(new_root, '/* Empty compatibility stub without CRT. */', extra_flags=['-nostartfiles'])
-            old, new = manifest(), manifest({'fixture': library(version='1.1')})
-            planner['dump_abi'](old_root, 'fixture', old['libraries']['fixture'])
-            updated, result = planner['compare'](old, new, old_root, new_root)
-            self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
-            self.assertEqual(updated['libraries']['fixture']['abi_epoch'], 1)
-            restored, result = planner['compare'](updated, old, new_root, old_root)
-            self.assertEqual(result['libraries']['fixture']['status'], 'compatible')
-            self.assertEqual(restored['libraries']['fixture']['abi_epoch'], 1)
 
 
 if __name__ == '__main__':

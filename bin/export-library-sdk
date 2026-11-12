@@ -75,7 +75,6 @@ def export(source, destination):
         owned.update(entry['files'])
         owned.update(entry.get('license_files', []))
         owned.update(entry.get('runtime_assets', {}))
-        files.update(entry.get('abi_dump', {}).values())
     if removed & owned:
         raise RuntimeError('Consumer cleanup intersects library ownership: ' + ','.join(sorted(removed & owned)))
     files.update(owned)

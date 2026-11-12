@@ -69,7 +69,6 @@ def stage_library_sdk(source, destination):
     entry = manifest['libraries']['zlib']
     paths = set(entry['files'] if isinstance(entry['files'], list) else entry['files'].keys())
     paths.update(entry.get('license_files', []))
-    paths.update(entry.get('abi_dump', {}).values())
     assets = entry.get('runtime_assets', {})
     paths.update(assets if isinstance(assets, dict) else [item['source'] for item in assets])
     destination.mkdir()

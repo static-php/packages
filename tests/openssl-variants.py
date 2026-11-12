@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
 import copy
-import hashlib
 import importlib.util
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -56,7 +54,7 @@ class VariantTests(unittest.TestCase):
                       "runtime_assets": {}, "elf": {"lib/libcrypto.so.3": {"soname": "libcrypto.so.3"},
                                                    "lib/libssl.so.3": {"soname": "libssl.so.3"}},
                       "file_hashes": {name: variants.file_hash(self.sdk / name) for name in files},
-                      "abi_epoch": 2, "package_versions": {"rpm": "3.6.3-12"}}
+                      "package_versions": {"rpm": "3.6.3-12"}}
         self.manifest = {"schema": 1, "linkage": "shared", "libc": "glibc", "architecture": "x86_64",
                          "runtime_libdir": "/usr/lib/php-zts/lib", "libraries": {"openssl": self.entry,
                           "other": {"files": ["lib/libother.so.1"]}}}
@@ -66,7 +64,6 @@ class VariantTests(unittest.TestCase):
         self.environment = {"architecture": "x86_64", "environment": {"OPENSSLDIR": "/etc/pki/tls", "SPC_LIBC": "glibc"},
                             "options": {"with-shared-libdir": "/usr/lib/php-zts/lib"}}
         self.output = self.sdk / "openssl-variants"
-        self.abi = {"sonames": ["libcrypto.so.3", "libssl.so.3"], "symbols_sha256": "symbols", "types_verified": True}
         self.builds = []
 
     def fake_producer(self, root, sdk, environment, output, profile):
@@ -83,11 +80,10 @@ class VariantTests(unittest.TestCase):
             entry["file_hashes"] = {name: variants.file_hash(target / name) for name in entry["files"]}
             variants.write(target / variants.MANIFEST, manifest)
             return variants.export_overlay(target, entry, output, profile,
-                variants.fingerprint(root, sdk, environment, manifest["libraries"]["openssl"], profile), self.abi, variants.common_identity(sdk, manifest["libraries"]["openssl"]))
+                variants.fingerprint(root, sdk, environment, manifest["libraries"]["openssl"], profile), variants.common_identity(sdk, manifest["libraries"]["openssl"]))
 
     def build(self):
         with patch.object(variants, "assert_el8"), patch.object(variants, "probe_directory"), \
-                patch.object(variants, "abi_inventory", return_value=(self.abi, {})), \
                 patch.object(variants, "produce", side_effect=self.fake_producer):
             return variants.build(self.root, self.sdk, self.environment, self.output)
 
@@ -108,7 +104,7 @@ class VariantTests(unittest.TestCase):
     def test_cached_profiles_do_not_run_abi_tools(self):
         self.build()
         with patch.object(variants, 'assert_el8'), patch.object(variants, 'probe_directory'), \
-                patch.object(variants, 'abi_inventory', side_effect=AssertionError('unchanged ABI')), \
+                patch.object(variants.subprocess, 'run', side_effect=AssertionError('cached profile invoked a tool')), \
                 patch.object(variants, 'produce', side_effect=AssertionError('unchanged profile')):
             result = variants.build(self.root, self.sdk, self.environment, self.output)
         self.assertEqual(result['rebuilt_profiles'], [])
@@ -176,74 +172,40 @@ class VariantTests(unittest.TestCase):
             marker = variants.read(target / "openssl-variant.json")
             self.assertEqual(marker["files"]["lib/libcrypto.so.3"], variants.file_record(target / "lib/libcrypto.so.3"))
 
-    def test_apply_retains_classified_abi_added_after_profile_export(self):
-        self.build()
+    def test_legacy_abi_dumps_are_not_required_or_exported(self):
         manifest = variants.read(self.sdk / variants.MANIFEST)
-        relative = "usr/share/php-zts/libraries/abi/openssl/libcrypto.so.3.xml"
-        cache = self.sdk / relative
-        cache.parent.mkdir(parents=True)
-        cache.write_text("classified ABI cache\n")
-        manifest["libraries"]["openssl"].update(abi_dump={"libcrypto.so.3": relative},
-            abi_dump_hashes={"libcrypto.so.3": variants.file_hash(cache)}, abi_empty=[])
+        manifest["libraries"]["openssl"].update(abi_dump={"libcrypto.so.3": "missing.xml"},
+            abi_dump_hashes={"libcrypto.so.3": "unused"}, abi_empty=[],
+            abi_reference_version="3.0", abi_comparison={"result": "old"}, abi_epoch=2,
+            abi_capability="php-zts-lib-openssl-abi-2", abi_capabilities=["php-zts-lib-openssl-abi-2"])
         variants.write(self.sdk / variants.MANIFEST, manifest)
-        for profile in variants.PROFILES:
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory(dir=self.root) as temporary:
-                target = Path(temporary)
-                shutil.copytree(self.sdk, target, dirs_exist_ok=True, symlinks=True)
-                variants.apply(target, self.output, profile)
-                self.assertEqual((target / relative).read_text(), cache.read_text())
-                entry = variants.read(target / variants.MANIFEST)["libraries"]["openssl"]
-                for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
-                    self.assertEqual(entry[field], manifest['libraries']['openssl'][field])
-                self.assertEqual(entry["abi_epoch"], manifest["libraries"]["openssl"]["abi_epoch"])
-                self.assertEqual((target / "lib/libother.so.1").read_bytes(), b"unrelated consumer")
-        self.assertEqual(cache.read_text(), "classified ABI cache\n")
-
-    def test_cached_profiles_retire_old_abi_metadata_without_recompiling(self):
         self.build()
-        previous = 'usr/share/php-zts/libraries/abi/openssl/previous.xml'
-        current = 'usr/share/php-zts/libraries/abi/openssl/current.xml'
-        index = variants.read(self.output / 'variants.json')
+        for profile in variants.PROFILES:
+            receipt = variants.read(self.output / profile / "overlay.json")
+            self.assertNotIn("missing.xml", receipt["files"])
+            for field in ("abi_dump", "abi_dump_hashes", "abi_empty", "abi_reference_version", "abi_comparison", "abi_epoch", "abi_capability", "abi_capabilities"):
+                self.assertNotIn(field, receipt["entry"])
+        variants.apply(self.sdk, self.output, "deb")
+        entry = variants.read(self.sdk / variants.MANIFEST)["libraries"]["openssl"]
+        self.assertNotIn("abi_epoch", entry)
+        self.assertNotIn("abi_dump", entry)
+
+    def test_legacy_profiles_reuse_runtime_files_without_dumps_or_recompiling(self):
+        self.build()
+        index = variants.read(self.output / "variants.json")
         for profile in variants.PROFILES:
             directory = self.output / profile
-            path = directory / 'files' / previous
-            path.parent.mkdir(parents=True)
-            path.write_text('previous classified ABI\n')
-            receipt = variants.read(directory / 'overlay.json')
-            receipt['entry'].update(abi_dump={'libcrypto.so.3': previous},
-                abi_dump_hashes={'libcrypto.so.3': variants.file_hash(path)}, abi_empty=[])
-            receipt['files'][previous] = variants.file_record(path)
-            variants.write(directory / 'overlay.json', receipt)
-            index['profiles'][profile]['receipt_sha256'] = variants.file_hash(directory / 'overlay.json')
-        variants.write(self.output / 'variants.json', index)
-        previous_cache = self.sdk / previous
-        previous_cache.parent.mkdir(parents=True)
-        previous_cache.write_text('previous classified ABI\n')
-        cache = self.sdk / current
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text('current classified ABI\n')
-        manifest = variants.read(self.sdk / variants.MANIFEST)
-        manifest['libraries']['openssl'].update(abi_dump={'libcrypto.so.3': current},
-            abi_dump_hashes={'libcrypto.so.3': variants.file_hash(cache)}, abi_empty=[])
-        variants.write(self.sdk / variants.MANIFEST, manifest)
-        for refresh in (False, True):
-            if refresh:
-                with patch.object(variants, 'assert_el8'), patch.object(variants, 'probe_directory'), \
-                        patch.object(variants, 'abi_inventory', side_effect=AssertionError('unchanged ABI')), \
-                        patch.object(variants, 'produce', side_effect=AssertionError('unchanged profile')):
-                    result = variants.build(self.root, self.sdk, self.environment, self.output)
-                self.assertEqual(result['rebuilt_profiles'], [])
-            for profile in variants.PROFILES:
-                with self.subTest(profile=profile, refresh=refresh), tempfile.TemporaryDirectory(dir=self.root) as temporary:
-                    target = Path(temporary)
-                    shutil.copytree(self.sdk, target, dirs_exist_ok=True, symlinks=True)
-                    (target / previous).unlink()
-                    variants.apply(target, self.output, profile)
-                    self.assertFalse((target / previous).exists())
-                    self.assertEqual((target / current).read_text(), cache.read_text())
-                    entry = variants.read(target / variants.MANIFEST)['libraries']['openssl']
-                    for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
-                        self.assertEqual(entry[field], manifest['libraries']['openssl'][field])
+            receipt = variants.read(directory / "overlay.json")
+            receipt.pop("sonames")
+            receipt["abi"] = {"types_verified": True}
+            receipt["entry"]["abi_dump"] = {"libcrypto.so.3": "missing.xml"}
+            receipt["files"]["missing.xml"] = {"sha256": "unused"}
+            variants.write(directory / "overlay.json", receipt)
+            index["profiles"][profile]["receipt_sha256"] = variants.file_hash(directory / "overlay.json")
+        variants.write(self.output / "variants.json", index)
+        self.assertEqual(self.build()["rebuilt_profiles"], [])
+        variants.apply(self.sdk, self.output, "deb")
+        self.assertNotIn("abi_dump", variants.read(self.sdk / variants.MANIFEST)["libraries"]["openssl"])
 
     def test_apply_still_rejects_changed_runtime_ownership(self):
         self.build()
@@ -308,24 +270,51 @@ class VariantTests(unittest.TestCase):
             variants.relocated_environment(self.environment, current)
 
     def test_php_empty_arrays_and_structured_runtime_assets(self):
-        self.assertEqual(variants.entry_paths({"files": ["lib/libcrypto.so.3"], "runtime_assets": [], "abi_dump": []}), {"lib/libcrypto.so.3"})
-        self.assertEqual(variants.entry_paths({"files": [], "runtime_assets": [{"source": "lib/engines-3/afalg.so", "destination": "/usr/lib/php-zts/lib/engines-3/afalg.so"}]}), {"lib/engines-3/afalg.so"})
+        self.assertEqual(variants.runtime_paths({"files": ["lib/libcrypto.so.3"], "runtime_assets": [], "abi_dump": []}), {"lib/libcrypto.so.3"})
+        self.assertEqual(variants.runtime_paths({"files": [], "runtime_assets": [{"source": "lib/engines-3/afalg.so", "destination": "/usr/lib/php-zts/lib/engines-3/afalg.so"}]}), {"lib/engines-3/afalg.so"})
         with self.assertRaisesRegex(RuntimeError, "structured runtime asset"):
-            variants.entry_paths({"runtime_assets": ["lib/engines-3/afalg.so"]})
+            variants.runtime_paths({"runtime_assets": ["lib/engines-3/afalg.so"]})
 
     def test_paths_cannot_escape(self):
         for name in ["../bin/php", "/usr/bin/php", "", "."]:
             with self.assertRaises(RuntimeError):
                 variants.relative(name)
 
-    def test_type_abi_difference_is_fatal(self):
-        process = subprocess.CompletedProcess([], 12, "changed function type", "")
-        with patch.object(variants.subprocess, "run", return_value=process):
-            with self.assertRaisesRegex(RuntimeError, "type ABI"):
-                variants.compare_abi(self.abi, self.abi, {"libcrypto.so.3": Path("one")}, {"libcrypto.so.3": Path("two")})
+    def test_only_library_names_and_sonames_define_compatibility(self):
+        changed = copy.deepcopy(self.entry)
+        changed["version"] = "4.0.0"
+        changed["elf"]["lib/libcrypto.so.3"]["sha256"] = "different implementation"
+        changed["elf"]["lib/libcrypto.so.3.2"] = changed["elf"].pop("lib/libcrypto.so.3")
+        variants.compare_names(self.entry, changed)
+        changed["elf"]["lib/libcrypto.so.3.2"]["soname"] = "libcrypto.so.4"
+        with self.assertRaisesRegex(RuntimeError, "SONAMEs"):
+            variants.compare_names(self.entry, changed)
+
+    def test_added_removed_or_renamed_library_is_rejected(self):
+        for operation in ("add", "remove", "rename"):
+            with self.subTest(operation=operation):
+                changed = copy.deepcopy(self.entry)
+                if operation == "add":
+                    changed["elf"]["lib/libextra.so.1"] = {"soname": "libextra.so.1"}
+                elif operation == "remove":
+                    changed["elf"].pop("lib/libcrypto.so.3")
+                else:
+                    changed["elf"]["lib/libcrypto.so.3"]["soname"] = "librenamed.so.3"
+                with self.assertRaisesRegex(RuntimeError, "SONAMEs"):
+                    variants.compare_names(self.entry, changed)
+
+    def test_names_without_soname_use_the_shared_library_filename(self):
+        entry = {"elf": {"lib/plugin.so": {}, "bin/helper": {}}}
+        self.assertEqual(variants.library_names(entry), ["plugin.so"])
+        with self.assertRaisesRegex(RuntimeError, "SONAMEs"):
+            variants.compare_names(entry, {"elf": {"lib/renamed.so": {}}})
+
+    def test_library_names_have_no_openssl_specific_rules(self):
+        entry = {"elf": {"lib/libother.so.7": {"soname": "libother.so.7"}}}
+        variants.compare_names(entry, copy.deepcopy(entry))
 
     @unittest.skipUnless(all(shutil.which(name) for name in ["gcc", "readelf", "objcopy", "patchelf"]), "native ELF relocation tools unavailable")
-    def test_rpath_relocation_preserves_code_and_symbol_identity(self):
+    def test_rpath_relocation_preserves_code_and_dependencies(self):
         source = self.root / "relocation.c"
         output = self.root / "relocation.so"
         source.write_text("int shared_api(int value) { return value + 42; }\n")
@@ -334,20 +323,6 @@ class VariantTests(unittest.TestCase):
         subprocess.run(["patchelf", "--set-rpath", "/usr/lib/php-zts/lib", str(output)], check=True)
         self.assertEqual(before, variants.elf_identity(output, self.root))
         self.assertEqual(subprocess.check_output(["patchelf", "--print-rpath", str(output)], text=True).strip(), "/usr/lib/php-zts/lib")
-
-    @unittest.skipUnless(shutil.which("gcc") and shutil.which("readelf"), "native ELF tools unavailable")
-    def test_native_symbol_inventory_detects_export_changes(self):
-        source = self.root / "library.c"
-        output = self.root / "library.so"
-        source.write_text('const char *configuration_path(void) { return "/etc/pki/tls"; }\n')
-        subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(output), str(source)], check=True)
-        common = variants.public_symbols(output)
-        source.write_text('const char *configuration_path(void) { return "/etc/ssl"; }\n')
-        subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(output), str(source)], check=True)
-        self.assertEqual(common, variants.public_symbols(output))
-        source.write_text('int changed_public_api(void) { return 1; }\n')
-        subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(output), str(source)], check=True)
-        self.assertNotEqual(common, variants.public_symbols(output))
 
 
 if __name__ == "__main__":

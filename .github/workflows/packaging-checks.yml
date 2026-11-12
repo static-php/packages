@@ -53,8 +53,13 @@ jobs:
                             Pipeline.test_publication_rechecks_the_recorded_library_baseline_scope \
                             Pipeline.test_publication_guard_accepts_recorded_scope_and_rejects_real_changes
                         php tests/package-iterations.php
+                        php tests/library-iterations.php
+                        php tests/frankenphp-migration-iterations.php
                         python3 tests/apk-reuse-published.py
-                        for format in ${FORMATS//,/ }; do php tests/package-versions.php --type="$format"; done
+                        for format in ${FORMATS//,/ }; do
+                            php tests/abi-consumer-revisions.php --type="$format"
+                            php tests/package-versions.php --type="$format"
+                        done
                         python3 tests/payload-profile.py
                         python3 tests/openssl-variants.py
                         python3 tests/pinned-library-sources.py
@@ -64,7 +69,7 @@ jobs:
                         python3 tests/migration-upgrade-harness.py
                         python3 tests/migration-baseline.py
                         python3 tests/forgejo-publication.py
-                        python3 tests/abi-dump-cache.py
+                        python3 tests/library-sonames.py
                         python3 tests/shared-library-plan.py
                         python3 tests/source-state.py
                         python3 tests/source-plan-identities.py

@@ -9,12 +9,10 @@ import os
 from pathlib import Path
 import platform
 import re
-import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 
 
 PROFILES = {"rpm": "/etc/pki/tls", "deb": "/etc/ssl"}
@@ -114,12 +112,6 @@ def runtime_paths(entry):
     return result
 
 
-def entry_paths(entry):
-    result = runtime_paths(entry)
-    result.update(relative(name) for name in mapping(entry.get("abi_dump", {}), "abi_dump").values())
-    return result
-
-
 def openssl_entry(root):
     manifest = read(Path(root) / MANIFEST)
     if manifest.get("schema") != 1 or manifest.get("linkage") != "shared" or manifest.get("libc") != "glibc":
@@ -129,7 +121,7 @@ def openssl_entry(root):
     entry = manifest.get("libraries", {}).get("openssl")
     if not isinstance(entry, dict) or not entry.get("source_hash") or not entry.get("elf"):
         raise RuntimeError("The common SDK has no recorded OpenSSL build")
-    for name in entry_paths(entry):
+    for name in runtime_paths(entry):
         path = rooted(root, name)
         if not path.exists():
             raise RuntimeError("Missing OpenSSL SDK file: " + name)
@@ -183,32 +175,26 @@ def valid_overlay(directory, expected=None):
         if (receipt.get("schema") != 1 or receipt.get("library") != "openssl"
                 or receipt.get("profile") not in PROFILES or receipt.get("openssldir") != PROFILES[receipt["profile"]]
                 or expected is not None and receipt.get("input_fingerprint") != expected
-                or receipt.get("abi", {}).get("types_verified") is not True):
+                or receipt.get("sonames", library_names(receipt["entry"])) != library_names(receipt["entry"])):
             return None
         if not isinstance(receipt.get("files"), dict) or not receipt["files"]:
             return None
+        legacy = set(mapping(receipt["entry"].get("abi_dump", {}), "abi_dump").values()) - runtime_paths(receipt["entry"])
+        receipt["files"] = {name: record for name, record in receipt["files"].items() if name not in legacy}
+        receipt["entry"] = {key: value for key, value in receipt["entry"].items() if not key.startswith("abi_")}
+        receipt.pop("abi", None)
+        receipt["sonames"] = library_names(receipt["entry"])
         for name, record in receipt["files"].items():
             if file_record(rooted(directory / "files", name)) != record:
                 return None
-        if not entry_paths(receipt["entry"]) <= receipt["files"].keys():
+        if not runtime_paths(receipt["entry"]) <= receipt["files"].keys():
             return None
         return receipt
     except (OSError, ValueError, KeyError, RuntimeError):
         return None
 
 
-def runtime_overlay(receipt):
-    receipt = copy.deepcopy(receipt)
-    abi_paths = set(mapping(receipt['entry'].get('abi_dump', {}), 'abi_dump').values())
-    if abi_paths & runtime_paths(receipt['entry']):
-        raise RuntimeError('OpenSSL overlay ABI cache overlaps runtime ownership')
-    receipt['files'] = {name: record for name, record in receipt['files'].items() if name not in abi_paths}
-    for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
-        receipt['entry'].pop(field, None)
-    return receipt
-
-
-def export_overlay(sdk, entry, destination, profile, key, abi, identity=None):
+def export_overlay(sdk, entry, destination, profile, key, identity=None):
     with tempfile.TemporaryDirectory(prefix=".openssl-overlay-", dir=destination.parent) as temporary:
         stage = Path(temporary)
         files = runtime_paths(entry)
@@ -221,15 +207,13 @@ def export_overlay(sdk, entry, destination, profile, key, abi, identity=None):
             source = rooted(sdk, name)
             copy_file(source, rooted(stage / "files", name))
             records[name] = file_record(source)
-        exported = copy.deepcopy(entry)
-        exported.pop("package_versions", None)
-        for field in ("abi_dump", "abi_dump_hashes", "abi_empty"):
-            exported.pop(field, None)
+        exported = {key: copy.deepcopy(value) for key, value in entry.items()
+                    if key != "package_versions" and not key.startswith("abi_")}
         receipt = {"schema": 1, "library": "openssl", "profile": profile,
                    "openssldir": PROFILES[profile], "input_fingerprint": key, "compiled_input_fingerprint": key,
                    "source_hash": entry["source_hash"], "version": entry["version"],
                    "runtime_libdir": entry["runtime_libdir"], "architecture": read(sdk / MANIFEST)["architecture"], "files": records,
-                   "headers_sha256": header_digest(sdk), "common_identity": identity or common_identity(sdk, entry), "entry": exported, "abi": abi}
+                   "headers_sha256": header_digest(sdk), "common_identity": identity or common_identity(sdk, entry), "entry": exported, "sonames": library_names(entry)}
         write(stage / "overlay.json", receipt)
         stage.chmod(0o755)
         if destination.exists():
@@ -238,48 +222,14 @@ def export_overlay(sdk, entry, destination, profile, key, abi, identity=None):
         return receipt
 
 
-def public_symbols(path):
-    result = subprocess.check_output(["readelf", "--wide", "--dyn-syms", str(path)], text=True, env=dict(os.environ, LC_ALL="C"))
-    symbols = []
-    for line in result.splitlines():
-        fields = line.split()
-        if len(fields) >= 8 and fields[0].rstrip(":").isdigit() and fields[6] != "UND" and fields[4] in ("GLOBAL", "WEAK") and fields[5] in ("DEFAULT", "PROTECTED"):
-            symbols.append([fields[3], fields[4], fields[5], fields[7]])
-    return sorted(symbols)
+def library_names(entry):
+    return sorted({elf.get("soname") or Path(name).name for name, elf in entry.get("elf", {}).items()
+                   if elf.get("soname") or re.search(r"\.so(?:\.|$)", Path(name).name)})
 
 
-def abi_inventory(sdk, entry, output):
-    sonames = {}
-    symbols = {}
-    dumps = {}
-    for name, elf in sorted(entry["elf"].items()):
-        soname = elf.get("soname")
-        if not soname:
-            continue
-        if soname in sonames and sonames[soname] != name:
-            raise RuntimeError("Duplicate OpenSSL SONAME: " + soname)
-        sonames[soname] = name
-        symbols[soname] = public_symbols(rooted(sdk, name))
-        dump = output / (soname + ".xml")
-        dump.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["abidw", "--no-corpus-path", "--no-show-locs", "--debug-info-dir", str(sdk / "debug"),
-                        "--debug-info-dir", str(sdk / "usr/lib/debug"), "--out-file", str(dump), str(rooted(sdk, name))], check=True)
-        corpus = ET.parse(dump).getroot()
-        if corpus.tag != "abi-corpus" or not any(list(item) for item in corpus.findall("abi-instr")):
-            raise RuntimeError("OpenSSL ABI corpus has no type information: " + soname)
-        dumps[soname] = dump
-    if len(sonames) != 2 or not any(re.fullmatch(r"libcrypto\.so\.[0-9]+", name) for name in sonames) or not any(re.fullmatch(r"libssl\.so\.[0-9]+", name) for name in sonames):
-        raise RuntimeError("Unexpected OpenSSL SONAME set: " + ",".join(sonames))
-    return {"sonames": sorted(sonames), "symbols_sha256": digest(symbols), "types_verified": True}, dumps
-
-
-def compare_abi(common, variant, common_dumps, variant_dumps):
-    if common != variant:
-        raise RuntimeError("OpenSSL profile changed public SONAMEs or symbols")
-    for name in common_dumps:
-        result = subprocess.run(["abidiff", "--no-default-suppression", str(common_dumps[name]), str(variant_dumps[name])], capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError("OpenSSL profile changed public type ABI: " + name + "\n" + (result.stdout + result.stderr)[-5000:])
+def compare_names(common, variant):
+    if library_names(common) != library_names(variant):
+        raise RuntimeError("OpenSSL profiles have different shared-library names or SONAMEs")
 
 
 def compiled_plugin_directories(sdk, version, runtime):
@@ -320,7 +270,7 @@ def copy_sdk(sdk, target, manifest):
             break
         wanted = expanded
     for name in wanted:
-        paths = entry_paths(manifest["libraries"][name]) | set(ownership["libraries"][name]["files"])
+        paths = runtime_paths(manifest["libraries"][name]) | set(ownership["libraries"][name]["files"])
         for relative_name in paths:
             copy_file(rooted(sdk, relative_name), rooted(target, relative_name))
     for directory in ["include/openssl", "lib/pkgconfig", "lib/cmake/OpenSSL"]:
@@ -384,16 +334,8 @@ def produce(root, sdk, environment, output, profile):
         probe_directory(target, PROFILES[profile])
         if header_digest(target) != header_digest(sdk):
             raise RuntimeError("OpenSSL profiles have different public headers")
-        common_abi, common_dumps = abi_inventory(sdk, manifest["libraries"]["openssl"], work / "abi-common")
-        variant_abi, variant_dumps = abi_inventory(target, entry, work / "abi-variant")
-        compare_abi(common_abi, variant_abi, common_dumps, variant_dumps)
-        # Reuse the common typed ABI metadata because the path-only profiles have identical ABI.
-        for field in ("abi_epoch", "abi_capability", "abi_capabilities", "abi_dump", "abi_dump_hashes", "abi_empty"):
-            if field in manifest["libraries"]["openssl"]:
-                entry[field] = copy.deepcopy(manifest["libraries"]["openssl"][field])
-        for name in mapping(entry.get("abi_dump", {}), "abi_dump").values():
-            copy_file(rooted(sdk, name), rooted(target, name))
-        return export_overlay(target, entry, output, profile, fingerprint(root, sdk, environment, manifest["libraries"]["openssl"], profile), variant_abi, common_identity(sdk, manifest["libraries"]["openssl"]))
+        compare_names(manifest["libraries"]["openssl"], entry)
+        return export_overlay(target, entry, output, profile, fingerprint(root, sdk, environment, manifest["libraries"]["openssl"], profile), common_identity(sdk, manifest["libraries"]["openssl"]))
 
 
 def elf_identity(path, scratch):
@@ -401,8 +343,7 @@ def elf_identity(path, scratch):
     text = scratch / "text-section"
     subprocess.run(["objcopy", "--dump-section", ".text=" + str(text), str(path), os.devnull], check=True, capture_output=True)
     return {"text_sha256": file_hash(text), "needed": sorted(re.findall(r"\(NEEDED\).*?\[([^]]+)\]", dynamic)),
-            "soname": re.findall(r"\(SONAME\).*?\[([^]]+)\]", dynamic),
-            "symbols_sha256": digest(public_symbols(path))}
+            "soname": re.findall(r"\(SONAME\).*?\[([^]]+)\]", dynamic)}
 
 
 def relocated_environment(previous, current):
@@ -427,7 +368,6 @@ def relocate(root, sdk, environment, compiled_environment, source, output):
     receipts = {}
     with tempfile.TemporaryDirectory(prefix=".openssl-relocate-", dir=output.parent) as temporary:
         work = Path(temporary)
-        common_abi, common_dumps = abi_inventory(sdk, common, work / "abi-common")
         for profile in PROFILES:
             original = valid_overlay(source / profile)
             if original is None or original["profile"] != profile:
@@ -469,31 +409,23 @@ def relocate(root, sdk, environment, compiled_environment, source, output):
             entry["runtime_assets"] = {name: new_runtime + value[len(old_runtime):] if value.startswith(old_runtime + "/") else value
                                        for name, value in runtime_assets(entry).items()}
             entry["file_hashes"] = {name: file_hash(rooted(target, name)) for name in entry.get("files", [])}
-            for field in ("abi_epoch", "abi_capability", "abi_capabilities", "abi_dump", "abi_dump_hashes", "abi_empty"):
-                if field in common:
-                    entry[field] = copy.deepcopy(common[field])
-                else:
-                    entry.pop(field, None)
-            for name in mapping(entry.get("abi_dump", {}), "abi_dump").values():
-                copy_file(rooted(sdk, name), rooted(target, name))
             target_manifest = dict(manifest, libraries={"openssl": entry})
             write(target / MANIFEST, target_manifest)
             copy_file(sdk / "bin/openssl", target / "bin/openssl")
-            for name in entry_paths(manifest["libraries"].get("zlib", {})):
+            for name in runtime_paths(manifest["libraries"].get("zlib", {})):
                 copy_file(rooted(sdk, name), rooted(target, name))
             probe_directory(target, PROFILES[profile])
             private_directories = compiled_plugin_directories(target, common['version'], old_runtime)
-            abi, dumps = abi_inventory(target, entry, work / ("abi-" + profile))
-            compare_abi(common_abi, abi, common_dumps, dumps)
+            compare_names(common, entry)
             deployment_key = fingerprint(root, sdk, environment, common, profile)
-            receipt = export_overlay(target, entry, output / profile, profile, deployment_key, abi, common_identity(sdk, common))
+            receipt = export_overlay(target, entry, output / profile, profile, deployment_key, common_identity(sdk, common))
             old_root = str(Path(old_runtime).parent)
             new_root = str(Path(new_runtime).parent)
             receipt["compiled_input_fingerprint"] = original.get("compiled_input_fingerprint", original["input_fingerprint"])
             receipt["deployment_fingerprint"] = deployment_key
             receipt["relocation"] = {"schema": 1, "source_receipt_sha256": file_hash(source / profile / "overlay.json"),
                                      "source_runtime_libdir": old_runtime, "target_runtime_libdir": new_runtime,
-                                     "typed_abi_revalidated": True, "elf_identity": proof,
+                                     "elf_identity": proof,
                                      "compiled_engine_directory": private_directories.get("engine"),
                                      "compiled_module_directory": private_directories["module"],
                                      "required_layout_alias": {"path": new_root, "target": old_root} if profile == "rpm" else {"path": old_root, "target": new_root}}
@@ -528,20 +460,14 @@ def build(root, sdk, environment, output):
     probe_directory(sdk, PROFILES["rpm"])
     keys = {profile: fingerprint(root, sdk, environment, entry, profile) for profile in PROFILES}
     receipts = {profile: valid_overlay(output / profile, key) for profile, key in keys.items()}
-    for profile, receipt in receipts.items():
-        if receipt is not None and any(field in receipt['entry'] for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty')):
-            receipts[profile] = receipt = runtime_overlay(receipt)
-            write(output / profile / 'overlay.json', receipt)
     rebuilt = []
     if receipts["rpm"] is None or receipts["rpm"]["files"] != {name: file_record(rooted(sdk, name)) for name in receipts["rpm"]["files"]}:
-        with tempfile.TemporaryDirectory(prefix=".openssl-abi-", dir=output.parent) as temporary:
-            abi, _ = abi_inventory(sdk, entry, Path(temporary))
-            receipts["rpm"] = export_overlay(sdk, entry, output / "rpm", "rpm", keys["rpm"], abi)
+        receipts["rpm"] = export_overlay(sdk, entry, output / "rpm", "rpm", keys["rpm"])
     if receipts["deb"] is None:
         receipts["deb"] = produce(root, sdk, environment, output / "deb", "deb")
         rebuilt.append("deb")
-    if receipts["rpm"]["abi"] != receipts["deb"]["abi"] or receipts["rpm"]["headers_sha256"] != receipts["deb"]["headers_sha256"]:
-        raise RuntimeError("Cached OpenSSL variants disagree on public headers or ABI")
+    if receipts["rpm"]["sonames"] != receipts["deb"]["sonames"] or receipts["rpm"]["headers_sha256"] != receipts["deb"]["headers_sha256"]:
+        raise RuntimeError("Cached OpenSSL variants disagree on headers or shared-library names")
     index = {"schema": 1, "library": "openssl", "architecture": manifest["architecture"], "source_hash": entry["source_hash"],
              "version": entry["version"], "profiles": {name: {"input_fingerprint": value["input_fingerprint"],
                  "receipt_sha256": file_hash(output / name / "overlay.json")} for name, value in receipts.items()}}
@@ -553,43 +479,37 @@ def apply(sdk, variants, profile):
     manifest, old = openssl_entry(sdk)
     receipt = valid_overlay(variants / profile)
     if receipt is None or receipt["profile"] != profile:
-        raise RuntimeError("OpenSSL variant is missing or failed integrity/ABI validation")
+        raise RuntimeError("OpenSSL variant is missing or failed integrity validation")
     index = read(variants / "variants.json")
     if index.get("profiles", {}).get(profile, {}).get("receipt_sha256") != file_hash(variants / profile / "overlay.json"):
         raise RuntimeError("OpenSSL variant receipt does not match the sealed profile index")
-    receipt = runtime_overlay(receipt)
+    compare_names(old, receipt["entry"])
     if (receipt["source_hash"] != old["source_hash"] or receipt["version"] != old["version"]
             or receipt["runtime_libdir"] != manifest["runtime_libdir"] or receipt.get("architecture") != manifest["architecture"]
             or receipt["headers_sha256"] != header_digest(sdk) or receipt.get("common_identity") != common_identity(sdk, old)):
         raise RuntimeError("OpenSSL overlay does not match this common SDK")
     if runtime_paths(receipt["entry"]) != runtime_paths(old):
         raise RuntimeError("OpenSSL profile changed the common runtime/asset ownership set")
-    allowed = entry_paths(old) | {"debug/" + name + ".debug" for name in entry_paths(old)}
+    allowed = runtime_paths(old) | {"debug/" + name + ".debug" for name in runtime_paths(old)}
     if not receipt["files"].keys() <= allowed:
         raise RuntimeError("OpenSSL profile contains undeclared runtime files")
-    other_owners = {name for identifier, entry in manifest["libraries"].items() if identifier != "openssl" for name in entry_paths(entry)}
+    other_owners = {name for identifier, entry in manifest["libraries"].items() if identifier != "openssl" for name in runtime_paths(entry)}
     if set(receipt["files"]) & other_owners:
         raise RuntimeError("OpenSSL variant would overwrite another library's files")
-    old_paths = entry_paths(old)
-    retained_abi = set(mapping(old.get('abi_dump', {}), 'abi_dump').values()) if not receipt['entry'].get('abi_dump') else set()
+    old_paths = runtime_paths(old)
     for name in list(old_paths):
         debug = "debug/" + name + ".debug"
         if rooted(sdk, debug).is_file():
             old_paths.add(debug)
-    for name in sorted(old_paths - receipt["files"].keys() - retained_abi):
+    for name in sorted(old_paths - receipt["files"].keys()):
         path = rooted(sdk, name)
         if path.is_symlink() or path.is_file():
             path.unlink()
     for name in sorted(receipt["files"]):
         copy_file(rooted(variants / profile / "files", name), rooted(sdk, name))
     entry = copy.deepcopy(receipt["entry"])
-    for field in ("abi_epoch", "abi_capability", "abi_capabilities", "abi_comparison", "package_versions"):
-        if field in old:
-            entry[field] = copy.deepcopy(old[field])
-    if retained_abi:
-        for field in ('abi_dump', 'abi_dump_hashes', 'abi_empty'):
-            if field in old:
-                entry[field] = copy.deepcopy(old[field])
+    if "package_versions" in old:
+        entry["package_versions"] = copy.deepcopy(old["package_versions"])
     manifest["libraries"]["openssl"] = entry
     manifest["build_identity"] = digest({key: value for key, value in manifest.items() if key != "build_identity"})
     write(sdk / MANIFEST, manifest)
@@ -633,6 +553,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, ValueError, KeyError, subprocess.CalledProcessError, ET.ParseError) as error:
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         print("openssl-variants: " + str(error), file=sys.stderr)
         sys.exit(1)

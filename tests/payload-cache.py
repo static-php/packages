@@ -42,7 +42,7 @@ class PayloadCache(unittest.TestCase):
         self.compiler.write_text('unchanged ELF8 compiler')
         self.manifest = {'schema': 1, 'linkage': 'shared', 'architecture': 'x86_64', 'libc': 'glibc',
                          'runtime_libdir': '/usr/lib/php-zts/lib',
-                         'libraries': {'fixture': {'version': '1', 'source_hash': 'old', 'abi_epoch': 1,
+                         'libraries': {'fixture': {'version': '1', 'source_hash': 'old',
                                       'files': ['lib/libfixture.so.1'],
                                       'elf': {'lib/libfixture.so.1': {'soname': 'libfixture.so.1'}}}}}
 
@@ -58,11 +58,23 @@ class PayloadCache(unittest.TestCase):
         self.manifest['libraries']['fixture']['version'] = '2'
         self.manifest['libraries']['fixture']['source_hash'] = 'new'
         self.assertEqual(self.state()['key'], previous['key'])
-        self.manifest['libraries']['fixture']['abi_epoch'] = 2
+        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         current = self.state()
         self.assertNotEqual(current['key'], previous['key'])
         self.assertEqual(current['seed-key'], previous['seed-key'])
         self.assertFalse(cache.compatible(previous['library_abi'], current['library_abi']))
+
+    def test_library_compatibility_uses_only_exact_runtime_names(self):
+        current = cache.abi(self.manifest)
+        self.assertEqual(current, {'fixture': {'sonames': ['libfixture.so.1']}})
+        self.assertTrue(cache.compatible({'fixture': {'sonames': ['libfixture.so.1'], 'epoch': 99}}, current))
+        for names in [[], ['libfixture.so.2'], ['librenamed.so.1'], ['libfixture.so.1', 'libextra.so.1']]:
+            with self.subTest(names=names):
+                self.assertFalse(cache.compatible(current, {'fixture': {'sonames': names}}))
+        self.manifest['libraries']['fixture']['elf'] = {'lib/plugin.so': {}, 'bin/helper': {}}
+        self.assertEqual(cache.abi(self.manifest)['fixture'], {'sonames': ['plugin.so']})
+        self.manifest['libraries']['consumer'] = {'elf': {}, 'depends': ['plugin.so']}
+        self.assertEqual(cache.library_graph(self.manifest), {'fixture': [], 'consumer': ['fixture']})
 
     def test_extension_source_update_keeps_core_seed_only(self):
         previous = self.state()
@@ -400,7 +412,7 @@ class PayloadCache(unittest.TestCase):
         archive = self.root / 'cache.tar.zst'
         cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
                                         seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        self.manifest['libraries']['fixture']['abi_epoch'] = 2
+        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         current = self.state()
         sdk = self.root / 'sdk'
         self.fixture(sdk, 2)
@@ -422,7 +434,7 @@ class PayloadCache(unittest.TestCase):
         self.assertTrue(receipt['abi_rebuild_required'])
         self.assertEqual(receipt['abi_rebuild_libraries'], ['fixture'])
         self.assertIn('modules/imagick-zts-86.so', cache.read(args.payload / receipt['cached_metadata_path'])['files'])
-        self.assertEqual(cache.read(args.payload / 'shared-libraries.json')['libraries']['fixture']['abi_epoch'], 2)
+        self.assertEqual(cache.abi(cache.read(args.payload / 'shared-libraries.json'))['fixture'], {'sonames': ['libfixture.so.2']})
         args.payload = self.root / 'derived-abi'
         args.compile_packages = ''
         args.allow_all_components = True
@@ -432,12 +444,12 @@ class PayloadCache(unittest.TestCase):
         source.write_text('extern int exported_function(void); int main(void) { return exported_function() == 1 ? 0 : 1; }\n')
         subprocess.run(['gcc', '-g', str(source), '-L' + str(old / 'lib'), '-l:libfixture.so.1',
                         '-Wl,-rpath,' + str(old / 'lib'), '-o', str(old / 'bin/php')], check=True)
-        self.manifest['libraries']['fixture']['abi_epoch'] = 1
+        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.1'
         for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', 'x86_64']), ('seal', [])]:
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(old), *extras], check=True, stdout=subprocess.DEVNULL)
         cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
                                         seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        self.manifest['libraries']['fixture']['abi_epoch'] = 2
+        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         args.payload = self.root / 'unsafe-core'
         with self.assertRaisesRegex(RuntimeError, 'outside the selected packages: bin/php'):
             cache.restore(args)
@@ -451,7 +463,7 @@ class PayloadCache(unittest.TestCase):
         archive = self.root / 'cache.tar.zst'
         cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
                                         seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        self.manifest['libraries']['fixture']['abi_epoch'] = 2
+        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         current = self.state()
         sdk = self.root / 'sdk'
         self.fixture(sdk, 2)

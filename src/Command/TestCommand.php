@@ -87,7 +87,7 @@ class TestCommand extends BaseCommand
             foreach ($pkgs as $file) {
                 preg_match_all('/\b' . preg_quote($libraryPrefix, '/') . '[a-z0-9+.-]+/', $this->packageMeta($type, $file)['deps'], $required);
                 foreach ($required[0] as $name) {
-                    if (!str_contains($name, '-abi-') && !in_array($name, $names, true)) {
+                    if (!in_array($name, $names, true)) {
                         $missingLibraries[$name] = true;
                     }
                 }

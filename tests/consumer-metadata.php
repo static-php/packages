@@ -66,7 +66,7 @@ try {
         preg_match_all('/\(NEEDED\).*\[([^\]]+)\]/', consumerCommand(['readelf', '--wide', '--dynamic', BUILD_ROOT_PATH . '/' . $relative]), $needed);
         file_put_contents(BUILD_ROOT_PATH . '/licenses/' . $id, 'MIT fixture');
         $manifest['libraries'][$id] = ['version' => '1.0', 'source_hash' => str_repeat('a', 64), 'license' => 'MIT', 'license_files' => ['licenses/' . $id],
-            'files' => [$relative], 'depends' => [], 'dlopen_dependencies' => $id === 'top' ? ['dynamic'] : [], 'abi_epoch' => 1,
+            'files' => [$relative], 'depends' => [], 'dlopen_dependencies' => $id === 'top' ? ['dynamic'] : [],
             'elf' => [$relative => ['soname' => 'libfixture-' . $id . '.so.1', 'needed' => $needed[1], 'runpath' => [$libdir]]]];
     }
     file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
@@ -102,7 +102,10 @@ try {
     };
     $configMethod = new ReflectionMethod(CreatePackages::class, 'packageConfig');
     $build = new ReflectionMethod(CreatePackages::class, 'createPackageWithFpm');
-    foreach (['rpm', 'deb', 'apk'] as $type) {
+    $options = getopt('', ['type:']);
+    $types = isset($options['type']) ? [$options['type']] : ['rpm', 'deb', 'apk'];
+    consumerCheck(array_diff($types, ['rpm', 'deb', 'apk']) === [], 'Unknown package type');
+    foreach ($types as $type) {
         (new ReflectionProperty(CreatePackages::class, 'packageType'))->setValue(null, $type);
         $config = $configMethod->invoke(null, $package, false);
         $name = $type === 'deb' ? 'php-zts-fixture-module' : $package->getName();
@@ -128,7 +131,7 @@ try {
         $embedded = json_decode($content, true, flags: JSON_THROW_ON_ERROR);
         consumerCheck($embedded['name'] === $name && $embedded['libraries'] === ['base', 'dynamic', 'top'], 'Actual native archive lost consumer metadata');
     }
-    echo "Passed native RPM/DEB/APK embedded consumer metadata, normalized names, linked libphp/transitive/dlopen dependencies, empty consumers and debug exclusion.\n";
+    echo 'Passed native ' . strtoupper(implode('/', $types)) . " embedded consumer metadata, normalized names, linked libphp/transitive/dlopen dependencies, empty consumers and debug exclusion.\n";
 } finally {
     consumerRemove($root);
 }

@@ -134,11 +134,20 @@ class PublicationBaselines(unittest.TestCase):
             planner['baseline'](self.baseline_args())
         lookup.assert_not_called()
 
-    def test_owner_abi_divergence_survives_outer_mirror_merge(self):
+    def test_owner_soname_divergence_survives_outer_mirror_merge(self):
         value = planner['empty_manifest']()
-        value['divergent_libraries'] = ['openssl']
+        value['libraries'] = {'fixture': {'version': '2', 'elf': {'lib/libfixture.so.2': {'soname': 'libfixture.so.2'}}}}
+        value['stream_libraries'] = {'8.4': {'fixture': {'version': '1', 'elf': {'lib/libfixture.so.1': {'soname': 'libfixture.so.1'}}}}}
         _, divergent = planner['merge_baselines']([(value, self.root)], 'rpm', self.root)
-        self.assertEqual(divergent, {'openssl'})
+        self.assertEqual(divergent, {'fixture'})
+
+    def test_retired_divergence_flags_cannot_trigger_soname_rebuilds(self):
+        value = planner['empty_manifest']()
+        value['libraries'] = {'fixture': {'version': '1', 'elf': {'lib/libfixture.so.1': {'soname': 'libfixture.so.1'}}}}
+        value['divergent_libraries'] = ['fixture']
+        value['stream_libraries'] = {'8.4': value['libraries'], '8.5': value['libraries']}
+        _, divergent = planner['merge_baselines']([(value, self.root)], 'rpm', self.root)
+        self.assertEqual(divergent, set())
 
     def test_snapshot_origin_does_not_change_semantic_fingerprint(self):
         value = planner['empty_manifest']()
@@ -158,9 +167,7 @@ class PublicationBaselines(unittest.TestCase):
 
     def test_debian_library_resume_uses_php_independent_candidate_identity(self):
         previous = planner['empty_manifest']()
-        expected = {'version': '3.6.0', 'source_hash': 'sealed-source', 'abi_epoch': 1,
-                    'abi_capability': 'php-zts-lib-openssl-abi-1', 'abi_dump': {},
-                    'abi_dump_hashes': {}, 'abi_empty': []}
+        expected = {'version': '3.6.0', 'source_hash': 'sealed-source', 'elf': {}}
         current = planner['empty_manifest']()
         current['libraries']['openssl'] = dict(expected, elf={}, files=[], published_version='3.6.0-1')
         baseline = self.root / 'resumed-baseline.json'
@@ -182,8 +189,7 @@ class PublicationBaselines(unittest.TestCase):
             return True
         args = SimpleNamespace(plan=str(plan_path), baseline_manifest=str(baseline),
                                artifacts=str(artifacts), type='deb', output=str(self.root / 'resume.json'))
-        with patch.dict(plan_globals, {'extract_metadata': extract, 'package_provides': lambda *args: {expected['abi_capability']},
-                                      'native_compare': lambda *args: 0}), patch.object(plan_globals['runpy'], 'run_path', side_effect=modules):
+        with patch.dict(plan_globals, {'extract_metadata': extract, 'native_compare': lambda *args: 0}), patch.object(plan_globals['runpy'], 'run_path', side_effect=modules):
             planner['cohort'](args)
         self.assertEqual(len(json.loads(Path(args.output).read_text())['files']), 1)
 

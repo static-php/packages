@@ -31,7 +31,7 @@ RUN dnf -y install epel-release dnf-plugins-core && \
         git jq gzip which sudo xz tar zstd curl \
         python3 python3-requests \
         bison flex autoconf automake gettext-devel libtool pkgconfig \
-        gcc gcc-c++ glibc-devel zlib-devel nasm gperf patchelf libabigail
+        gcc gcc-c++ glibc-devel zlib-devel nasm gperf patchelf
 
 RUN if [[ "${ALMA_VERSION}" == "8" || "${ALMA_VERSION}" == "9" ]]; then \
         dnf -y install '@ruby:3.3' rubygems ruby-devel; \

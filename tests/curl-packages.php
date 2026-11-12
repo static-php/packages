@@ -131,7 +131,7 @@ try {
     $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => 'x86_64', 'libc' => 'glibc', 'runtime_libdir' => $libdir, 'libraries' => ['curl' => [
         'version' => '8.21.0', 'source_hash' => str_repeat('c', 64), 'license' => 'curl',
         'license_files' => ['license/curl'], 'files' => ['lib/libcurl.so.4'],
-        'runtime_assets' => (object) [], 'dlopen_dependencies' => [], 'depends' => [], 'abi_epoch' => 1,
+        'runtime_assets' => (object) [], 'dlopen_dependencies' => [], 'depends' => [],
         'elf' => ['lib/libcurl.so.4' => ['soname' => 'libcurl.so.4', 'needed' => [], 'runpath' => [$libdir]]],
     ]]];
     file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
@@ -142,7 +142,7 @@ try {
     (new ReflectionProperty(CreatePackages::class, 'packageType'))->setValue(null, $type);
     $packageConfig = new ReflectionMethod(CreatePackages::class, 'packageConfig');
     $curlConfig = $packageConfig->invoke(null, $curl, false);
-    check(in_array('php-zts-lib-curl-abi-1', $curlConfig['depends'], true), 'cURL module lacks its private-library ABI requirement');
+    check(!preg_match('/php-zts-lib-[a-z0-9-]+-abi-[0-9]+/', json_encode($curlConfig['depends'])), 'cURL module retains a synthetic library ABI dependency');
     check(count(array_filter($curlConfig['depends'], static fn (string $dependency): bool => str_starts_with($dependency, 'php-zts-lib-curl ') || str_starts_with($dependency, 'php-zts-lib-curl>='))) === 1, 'cURL module lacks its private-library version floor');
     check(!str_contains(json_encode($packageConfig->invoke(null, new cli(), false)), 'php-zts-lib-curl'), 'CLI acquires cURL library dependencies');
     echo "Passed {$type} cURL shared selection for PHP 8.2–8.6, weak SAPI recommendations, Swoole dependency/loading order, INI ownership and ELF library dependencies.\n";
@@ -169,7 +169,7 @@ try {
         } else {
             $header = command(['tar', '-xOf', '-', '.PKGINFO'], command(['gzip', '-dc', $artifacts[0]]));
         }
-        check(str_contains($header, 'php-zts-lib-curl-abi-1') && str_contains($header, 'php-zts-lib-curl') && str_contains($header, $floor), 'Native cURL package lacks private library dependencies');
+        check(str_contains($header, 'php-zts-lib-curl') && str_contains($header, $floor), 'Native cURL package lacks private library dependencies');
         check(!str_contains($header, 'libcurl.so.4'), 'Native cURL package requires a system libcurl SONAME');
         check(str_contains($header, $prefix . '-cli'), 'Native cURL package lacks the PHP CLI dependency');
         echo "Passed {$type} native cURL package dependency metadata.\n";

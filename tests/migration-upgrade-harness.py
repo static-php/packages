@@ -29,16 +29,16 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
-    def test_published_upgrade_inventory_rejects_unrelated_bumps_and_keeps_native_abi_consumers(self):
+    def test_published_upgrade_inventory_rejects_unrelated_bumps_and_keeps_native_library_consumers(self):
         inputs = runpy.run_path(str(Path(__file__).with_name('published-upgrade-inputs.py')))
         globals_ = inputs['prepare'].__globals__
         old = [{'name': name, 'version': version, 'requires': depends} for name, version, depends in [
             ('php-zts-cli', '8.4.27-5', ['php-zts-lib-openssl']),
-            ('php-zts-mysqlnd', '8.4.27-2', ['php-zts-lib-openssl-abi-1']),
+            ('php-zts-mysqlnd', '8.4.27-2', ['php-zts-lib-openssl']),
             ('php-zts-lib-openssl', '3.6.5-1', []),
             ('php-zts-imagick', '3.8.1-3', ['php-zts-lib-imagemagick']),
             ('php-zts-apcu', '5.1.28-1', [])]]
-        old[2]['provides'] = ['php-zts-lib-openssl-abi-1']
+        old[2]['provides'] = ['php-zts-lib-openssl']
         new = json.loads(json.dumps(old))
         for package in new:
             package['version'] = {'php-zts-cli': '8.4.27-6', 'php-zts-mysqlnd': '8.4.27-3',
@@ -452,9 +452,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
     def test_scoped_library_profiles_keep_other_instrumentation_out(self):
         baseline = {'packages': [
             {'name': 'php-zts-cli'},
-            {'name': 'php-zts-lib-base', 'provides': ['php-zts-lib-base-abi-1']},
-            {'name': 'php-zts-xdebug', 'requires': ['php-zts-lib-base-abi-1']},
-            {'name': 'php-zts-pcov', 'requires': ['php-zts-lib-base-abi-1']},
+            {'name': 'php-zts-lib-base', 'provides': ['php-zts-lib-base']},
+            {'name': 'php-zts-xdebug', 'requires': ['php-zts-lib-base']},
+            {'name': 'php-zts-pcov', 'requires': ['php-zts-lib-base']},
         ]}
         selected = harness['library_old_profile'](baseline, ['php-zts-lib-base'],
                                                  ['php-zts-cli', 'php-zts-xdebug'], expand_consumers=False)
@@ -802,9 +802,9 @@ class MigrationUpgradeHarness(unittest.TestCase):
     def test_library_old_profile_adds_optional_provider_and_its_real_consumers_only(self):
         baseline = {'packages': [
             {'name': 'php-zts-cli', 'requires': [], 'provides': ['php-zts']},
-            {'name': 'php-zts-lib-gearman', 'requires': [], 'provides': ['php-zts-lib-gearman-abi-1']},
-            {'name': 'php-zts-lib-wrapper', 'requires': ['php-zts-lib-gearman-abi-1'], 'provides': ['php-zts-lib-wrapper-abi-1']},
-            {'name': 'php-zts-gearman', 'requires': ['php-zts-cli', 'php-zts-lib-wrapper-abi-1'], 'provides': []},
+            {'name': 'php-zts-lib-gearman', 'requires': [], 'provides': ['php-zts-lib-gearman']},
+            {'name': 'php-zts-lib-wrapper', 'requires': ['php-zts-lib-gearman'], 'provides': ['php-zts-lib-wrapper']},
+            {'name': 'php-zts-gearman', 'requires': ['php-zts-cli', 'php-zts-lib-wrapper'], 'provides': []},
             {'name': 'php-zts-imagick', 'requires': ['php-zts-cli'], 'provides': []},
         ]}
         self.assertEqual(harness['library_old_profile'](baseline, ['php-zts-lib-gearman'], ['php-zts-cli']),

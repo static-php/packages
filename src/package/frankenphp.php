@@ -132,6 +132,7 @@ class frankenphp implements package
 
         $fpmArgs = [
             'fpm',
+            '--force',
             '-s', 'dir',
             '-t', 'rpm',
             '--no-rpm-autoreqprov',
@@ -229,6 +230,7 @@ class frankenphp implements package
                 $dbgPackageFile = DIST_RPM_PATH . "/{$name}-debuginfo-{$rpmVersion}-{$rpmRelease}.{$architecture}.rpm";
                 $dbgArgs = [
                     'fpm',
+                    '--force',
                     '-s', 'dir',
                     '-t', 'rpm',
                     '--rpm-compression', 'gzip',
@@ -294,6 +296,7 @@ class frankenphp implements package
 
         $fpmArgs = [
             'fpm',
+            '--force',
             '-s', 'dir',
             '-t', 'deb',
             '--deb-compression', 'xz',
@@ -415,6 +418,7 @@ class frankenphp implements package
                 $dbgPackageFile = DIST_DEB_PATH . "/{$dbgDebName}_{$debVersion}-{$debIteration}_{$debArch}.deb";
                 $dbgArgs = [
                     'fpm',
+                    '--force',
                     '-s', 'dir',
                     '-t', 'deb',
                     '--deb-compression', 'gz',

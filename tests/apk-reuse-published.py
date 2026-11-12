@@ -60,13 +60,33 @@ class ReusePublished(unittest.TestCase):
         self.baseline()
         self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
 
-    def test_changed_payload_dependencies_or_scripts_advance_only_once(self):
+    def test_changed_payload_dependencies_or_scripts_keep_published_revision(self):
         archive(self.old, revision=3)
         self.baseline()
         for changes in [{'payload': b'fixed ELF'}, {'dependency': 'musl>=1.2'}, {'script': b'fixed script'}]:
             with self.subTest(changes=changes):
                 archive(self.new, **changes)
-                self.assertEqual(self.select(), {'revision': 4})
+                self.assertEqual(self.select(), {'revision': 3})
+
+    def test_higher_candidate_revision_is_preserved_for_changed_or_identical_payloads(self):
+        archive(self.old, revision=3)
+        self.baseline()
+        for payload in (b'working ELF', b'fixed ELF'):
+            with self.subTest(payload=payload):
+                archive(self.new, revision=5, payload=payload)
+                self.assertEqual(self.select(), {'revision': 5})
+
+    def test_newer_debug_revision_prevents_reuse_without_bumping_runtime(self):
+        archive(self.old, revision=3)
+        archive(self.new)
+        self.baseline()
+        debug = self.root / 'debug.apk'
+        archive(debug, revision=5, debug=True)
+        data = json.loads(self.manifest.read_text())
+        data['packages'].append({'name': 'php-zts-cli-debuginfo', 'architecture': 'x86_64',
+            'version': '8.3.36-r5', 'path': debug.name, 'sha256': HELPER['sha256'](debug)})
+        self.manifest.write_text(json.dumps(data))
+        self.assertEqual(HELPER['select'](self.new, [self.manifest], with_debug=True), {'revision': 3})
 
     def test_debug_reuses_matching_exact_runtime_identity(self):
         archive(self.old, revision=3, debug=True)
@@ -76,20 +96,20 @@ class ReusePublished(unittest.TestCase):
         archive(self.new, revision=4, debug=True)
         self.assertEqual(self.select(), {'revision': 4})
 
-    def test_invalid_old_archive_is_replaced_even_when_its_payload_matches(self):
+    def test_invalid_old_archive_is_not_reused_or_bumped(self):
         archive(self.old, revision=3)
         archive(self.new)
         self.baseline()
         self.verification.return_value.returncode = 1
-        self.assertEqual(self.select(), {'revision': 4})
+        self.assertEqual(self.select(), {'revision': 3})
 
-    def test_malformed_old_archive_cannot_veto_a_valid_candidate(self):
+    def test_malformed_old_archive_does_not_raise_candidate_revision(self):
         self.old.write_bytes(b'broken old gzip/tar')
         archive(self.new)
         self.baseline()
-        self.assertEqual(self.select(), {'revision': 4})
+        self.assertEqual(self.select(), {'revision': 3})
 
-    def test_missing_old_debug_archive_advances_just_its_runtime_pair(self):
+    def test_missing_old_debug_archive_blocks_reuse_without_bumping_runtime(self):
         archive(self.old, revision=3)
         archive(self.new)
         self.baseline()
@@ -102,13 +122,13 @@ class ReusePublished(unittest.TestCase):
             raise RuntimeError('Old archive unavailable')
         with patch.object(HELPER['select'].__globals__['runpy'], 'run_path',
                           return_value={'download_package': missing, 'BaselineDownloadError': RuntimeError}):
-            self.assertEqual(HELPER['select'](self.new, [self.manifest], with_debug=True), {'revision': 4})
+            self.assertEqual(HELPER['select'](self.new, [self.manifest], with_debug=True), {'revision': 3})
 
     def test_missing_old_runtime_uses_published_version_without_requiring_old_installation(self):
         archive(self.new)
         self.manifest.write_text(json.dumps({'type': 'apk', 'architecture': 'x86_64',
             'consumer_versions': {'8.3': {'php-zts-cli': '8.3.36-r3'}}}))
-        self.assertEqual(self.select(), {'revision': 4})
+        self.assertEqual(self.select(), {'revision': 3})
 
     def test_metadata_does_not_force_bump_when_verified_archive_is_available(self):
         archive(self.old, revision=3)
@@ -119,7 +139,7 @@ class ReusePublished(unittest.TestCase):
         self.manifest.write_text(json.dumps(data))
         self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
 
-    def test_retry_inventory_does_not_bump_cli_but_changed_migration_constraints_do(self):
+    def test_retry_inventory_is_ignored_and_changed_constraints_disable_reuse(self):
         rules = {'schema': 1, 'formats': {'apk': {'php-zts-amqp': '2.2.0.0_p83-r1'}}}
         archive(self.old, revision=3, cutoffs=dict(rules, candidate_archives={'old': 'hash'}, published_versions={'old': 'version'}))
         archive(self.new, cutoffs=dict(rules, candidate_archives={}, published_versions={'new': 'different inventory'}))
@@ -127,7 +147,7 @@ class ReusePublished(unittest.TestCase):
         self.assertEqual(self.select(), {'revision': 3, 'reuse': str(self.old)})
         rules['formats']['apk']['php-zts-amqp'] = '2.2.0.0_p83-r2'
         archive(self.new, cutoffs=rules)
-        self.assertEqual(self.select(), {'revision': 4})
+        self.assertEqual(self.select(), {'revision': 3})
 
     def test_tampered_baseline_archive_is_rejected(self):
         archive(self.old, revision=3)

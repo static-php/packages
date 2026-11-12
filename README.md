@@ -17,8 +17,7 @@ Refresh the package index before installing or upgrading. The script does not in
 PHP. PHP 8.6 must be selected explicitly because it is a prerelease stream.
 
 Existing users keep their repository configuration and migrate through ordinary
-`apt upgrade`, `dnf upgrade` or `apk upgrade`. See
-[shared library packaging and migration](docs/shared-libraries.md) for details.
+`apt upgrade`, `dnf upgrade` or `apk upgrade`.
 
 ## Usage for developers
 

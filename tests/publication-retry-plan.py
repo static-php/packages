@@ -16,19 +16,14 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
 namespace = planner['prepare'].__globals__
-ABI = b'<abi-corpus architecture="elf-amd-x86_64"/>'
 SONAME = 'libfixture.so.1'
-ABI_PATH = 'abi/' + SONAME + '.xml'
 
 
 def library(release=None, archive=None):
-    value = {'version': '1.0', 'source_hash': 'unchanged-source', 'abi_epoch': 1,
-             'abi_capability': 'php-zts-lib-fixture-abi-1',
+    value = {'version': '1.0', 'source_hash': 'unchanged-source',
              'files': ['lib/' + SONAME],
              'elf': {'lib/' + SONAME: {'soname': SONAME, 'needed': []}},
-             'depends': [], 'abi_dump': {SONAME: ABI_PATH},
-             'abi_dump_hashes': {SONAME: hashlib.sha256(ABI).hexdigest()},
-             'abi_empty': []}
+             'depends': []}
     if release is not None:
         value['published_version'] = '0:1.0-' + str(release)
     if archive is not None:
@@ -55,10 +50,6 @@ class PublicationRetryPlan(unittest.TestCase):
         directory = self.root / name
         directory.mkdir()
         (directory / 'shared-libraries.json').write_text(json.dumps(value))
-        if value.get('libraries'):
-            path = directory / ABI_PATH
-            path.parent.mkdir(parents=True)
-            path.write_bytes(ABI)
         for relative, contents in (archives or {}).items():
             path = directory / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,7 +62,8 @@ class PublicationRetryPlan(unittest.TestCase):
         merged, divergent = planner['merge_baselines'](values, 'rpm', destination)
         return merged, divergent, destination
 
-    def prepare(self, previous=None, peer=None, request=None, libraries=None, current_value=None):
+    def prepare(self, previous=None, peer=None, request=None, libraries=None, current_value=None,
+                mode='incremental', rebuilt=None, bump=False):
         current = self.snapshot('payload', manifest(current_value))
         baseline = previous or self.snapshot('baseline', manifest(library(1)))
         requested = self.root / 'request.json'
@@ -79,13 +71,11 @@ class PublicationRetryPlan(unittest.TestCase):
         args = argparse.Namespace(type='rpm', manifest=str(current / 'shared-libraries.json'),
                                   root=str(current), baseline=str(baseline),
                                   peer_baseline=str(peer) if peer else None,
-                                  mode='incremental', request=str(requested), libraries=libraries,
-                                  rebuilt_libraries=None, php_versions=None, packages=None,
+                                  mode=mode, request=str(requested), libraries=libraries, bump=bump,
+                                  rebuilt_libraries=rebuilt, php_versions=None, packages=None,
                                   manifest_output=str(self.root / 'annotated.json'),
                                   output=str(self.root / 'plan.json'))
-        with patch.dict(namespace, {'dump_abi': Mock(),
-                                    'abi_difference': Mock(return_value='compatible')}):
-            planner['prepare'](args)
+        planner['prepare'](args)
         return json.loads(Path(args.output).read_text())
 
     def test_automatic_metadata_requests_only_select_the_target_sdk(self):
@@ -116,16 +106,25 @@ class PublicationRetryPlan(unittest.TestCase):
         self.assertEqual(retry['published_version'], '0:1.0-2')
         self.assertEqual(retry['published_archive_sha256'], hashlib.sha256(newer).hexdigest())
 
+    def test_full_bump_repackages_instead_of_reusing_publication_retries(self):
+        older, newer = b'old archive', b'new archive'
+        first = self.snapshot('owner82', manifest(library(1, older)), {'archives/fixture-1.rpm': older})
+        second = self.snapshot('owner83', manifest(library(2, newer)), {'archives/fixture-2.rpm': newer})
+        plan = self.prepare(first, second, mode='full', rebuilt='', bump=True)
+        self.assertEqual(plan['libraries'], ['fixture'])
+        self.assertEqual(plan['publication_retries'], {})
+        self.assertTrue(all(request['full'] for request in plan['php_requests'].values()))
+
     def abi_rollout(self, changed_code=False):
         old, new = b'old ABI archive', b'already validated new ABI archive'
         first = self.snapshot('owner82', manifest(library(1, old)), {'archives/fixture-1.rpm': old})
         published = library(2, new)
-        published.update(abi_epoch=2, abi_capability='php-zts-lib-fixture-abi-2')
+        published.update(files=['lib/libfixture.so.2'], elf={'lib/libfixture.so.2': {'soname': 'libfixture.so.2', 'needed': []}})
         second = self.snapshot('owner83', manifest(published), {'archives/fixture-2.rpm': new})
         current = library()
-        current.update(abi_epoch=2, abi_capability='php-zts-lib-fixture-abi-2')
+        current.update(files=['lib/libfixture.so.2'], elf=copy.deepcopy(published['elf']))
         if changed_code:
-            current['elf']['lib/' + SONAME]['sha256'] = 'changed-runtime-code'
+            current['elf']['lib/libfixture.so.2']['sha256'] = 'changed-runtime-code'
         return self.prepare(first, second, libraries='fixture', current_value=current)
 
     def test_partial_abi_rollout_reuses_the_exact_validated_provider_archive(self):
@@ -133,7 +132,7 @@ class PublicationRetryPlan(unittest.TestCase):
             plan = self.abi_rollout()
         self.assertTrue(plan['abi_break'])
         self.assertEqual(plan['abi_rebuild_roots'], ['fixture'])
-        self.assertEqual(plan['expected_libraries']['fixture']['abi_epoch'], 2)
+        self.assertEqual(planner['library_names'](plan['expected_libraries']['fixture']), ['libfixture.so.2'])
         self.assertEqual(plan['publication_retries']['fixture']['published_version'], '0:1.0-2')
         self.assertEqual(plan['publication_retries']['fixture']['published_archive_sha256'],
                          hashlib.sha256(b'already validated new ABI archive').hexdigest())
@@ -270,7 +269,7 @@ class PublicationRetryPlan(unittest.TestCase):
         payload = self.snapshot('payload', manifest())
         plan = self.root / 'plan.json'
         retry = {key: previous_library[key] for key in ['published_version', 'published_archive',
-                 'published_archive_sha256', 'version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']}
+                 'published_archive_sha256', 'version', 'source_hash', 'elf']}
         plan.write_text(json.dumps({'schema': 1, 'type': 'rpm', 'libraries': ['fixture'],
                                    'publication_retries': {'fixture': retry}}))
         args = argparse.Namespace(plan=str(plan), manifest=str(payload / 'shared-libraries.json'),

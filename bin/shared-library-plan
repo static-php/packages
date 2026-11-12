@@ -27,7 +27,8 @@ from urllib.parse import quote
 STREAMS = ['8.2', '8.3', '8.4', '8.5', '8.6']
 METADATA = 'usr/share/php-zts/libraries'
 ROOT = Path(__file__).resolve().parent
-ABI_DUMP_FLAGS = ('--no-corpus-path', '--no-show-locs')
+RETIRED_ABI_FIELDS = ('abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_reference_version', 'abi_comparison',
+                      'abi_epoch', 'abi_capability', 'abi_capabilities')
 
 
 def progress(message):
@@ -110,9 +111,6 @@ def validate_manifest(value, complete=True, allow_pending=False):
             library['package_versions'] = {}
         elif not isinstance(versions, dict):
             raise RuntimeError('Invalid library package versions for ' + identifier)
-        epoch = library.get('abi_epoch', 1)
-        if type(epoch) is not int or epoch < 1:
-            raise RuntimeError('Invalid ABI epoch for ' + identifier)
         files = library.get('files', [])
         for path in files:
             relative_path(path)
@@ -146,6 +144,8 @@ def fingerprint(value, inputs=()):
     for library in stable['libraries'].values():
         library.pop('generated_at', None)
         library.pop('published_debug_archive', None)
+        for field in RETIRED_ABI_FIELDS:
+            library.pop(field, None)
     extra = {}
     for name in sorted(inputs):
         path = Path(name)
@@ -189,446 +189,34 @@ def run(command):
     return result
 
 
-def defined_public_symbols(path):
-    result = run(['readelf', '--wide', '--dyn-syms', str(path)])
-    if result.returncode != 0 or "Symbol table '.dynsym'" not in result.stdout:
-        raise RuntimeError('Cannot audit public ELF symbols: ' + str(path))
-    public = []
-    for line in result.stdout.splitlines():
-        if not re.match(r'^\s*\d+:', line):
-            continue
-        symbol = re.fullmatch(r'\s*\d+:\s+\S+\s+\S+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*', line)
-        if symbol is None:
-            raise RuntimeError('Cannot parse public ELF symbol: ' + line)
-        kind, binding, visibility, index, name = symbol.groups()
-        if index == 'UND' or binding == 'LOCAL' or visibility not in ['DEFAULT', 'PROTECTED']:
-            continue
-        if kind in ['NOTYPE', 'FUNC'] and name in ['_init', '_fini']:
-            continue
-        public.append(name)
-    return public
+def library_names(library):
+    return sorted({elf.get('soname') or PurePosixPath(path).name
+                   for path, elf in library['elf'].items()
+                   if elf.get('soname') or re.search(r'\.so(?:\.|$)', PurePosixPath(path).name)})
 
 
-def abi_debug_names(source):
-    reader = shutil.which('readelf')
-    if not reader:
-        return None
-    result = subprocess.run([reader, '--wide', '--string-dump=.gnu_debuglink', '--string-dump=.gnu_debugaltlink',
-                             '--string-dump=.debug_sup', '--notes', str(source)], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, encoding='utf-8', errors='replace')
-    if result.returncode != 0:
-        return None
-    names = {source.name + '.debug'}
-    for line in result.stdout.splitlines():
-        match = re.match(r'\s*\[\s*[0-9a-fA-F]+\]\s+(.+?)\s*$', line)
-        if match:
-            names.add(PurePosixPath(match[1]).name)
-        build_id = re.search(r'Build ID:\s*([0-9a-fA-F]+)', line)
-        if build_id:
-            names.add(build_id[1][2:] + '.debug')
-    return names
-
-
-def abi_dump_inputs(root, path, flags=None, context=None, debug_scope='elf'):
-    source = rooted(root, path)
-    executable = shutil.which('abidw')
-    if not source.is_file() or not executable or not Path(executable).is_file():
-        return None
-    context = context if context is not None else {}
-    tools = context.get('tools')
-    if tools is not None:
-        for actual, previous in context.get('tool_stamps', {}).items():
-            try:
-                stat = Path(actual).stat()
-            except OSError:
-                tools = None
-                break
-            if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != previous:
-                tools = None
-                break
-        if context.get('tool_executable') != str(Path(executable).resolve()):
-            tools = None
-    if tools is None:
-        version = run([executable, '--version'])
-        dependencies = run(['ldd', executable])
-        if version.returncode != 0 or dependencies.returncode != 0:
-            return None
-        files = {'abidw': file_sha256(executable)}
-        paths = {str(Path(executable).resolve())}
-        for line in dependencies.stdout.splitlines():
-            matches = re.findall(r'(?:=>\s*)?(/[^\s()]+)', line)
-            for dependency in matches:
-                if not Path(dependency).is_file():
-                    return None
-                files[Path(dependency).name] = file_sha256(dependency)
-                paths.add(str(Path(dependency).resolve()))
-        tools = {'version': version.stdout.strip(), 'files': files}
-        context['tools'] = tools
-        context['tool_executable'] = str(Path(executable).resolve())
-        context['tool_stamps'] = {}
-        for actual in paths:
-            stat = Path(actual).stat()
-            context['tool_stamps'][actual] = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    debug = {}
-    hashes = context.setdefault('debug_hashes', {})
-    directories = [Path(root) / 'usr/lib/debug', Path(root) / 'debug', source.parent / '.debug']
-    candidates = []
-    for directory in directories:
-        if not directory.exists():
-            continue
-        if os.path.commonpath([str(directory.resolve()), str(Path(root).resolve())]) != str(Path(root).resolve()):
-            return None
-        if not directory.is_dir():
-            return None
-        candidates.extend(candidate for candidate in directory.rglob('*') if not candidate.is_dir())
-    if debug_scope == 'elf':
-        names = abi_debug_names(source)
-        reader = shutil.which('readelf')
-        if names is None or reader is None:
-            return None
-        candidates.extend(source.parent / name for name in names if (source.parent / name).is_file())
-        selected = set()
-        while True:
-            additions = {candidate for candidate in candidates if candidate.name in names or candidate.suffix in ['.dwo', '.dwp']} - selected
-            if not additions:
-                break
-            for candidate in additions:
-                extra = abi_debug_names(candidate)
-                if extra is None:
-                    return None
-                names.update(extra)
-            selected.update(additions)
-        candidates = selected
-    for candidate in sorted(set(candidates)):
-        relative = str(candidate.relative_to(root))
-        actual = rooted(root, relative)
-        if not actual.is_file():
-            return None
-        stat = actual.stat()
-        stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        cached = hashes.get(relative)
-        if cached is None or cached[0] != stamp:
-            cached = (stamp, file_sha256(actual))
-            hashes[relative] = cached
-        debug[relative] = cached[1]
-    result = {'schema': 1, 'source': {'path': str(relative_path(path)), 'sha256': file_sha256(source)},
-            'debug': debug, 'tools': tools, 'flags': list(ABI_DUMP_FLAGS if flags is None else flags),
-            'debug_directories': ['usr/lib/debug', 'debug']}
-    if debug_scope == 'elf':
-        result.update(debug_scope='elf', reader_sha256=file_sha256(reader))
-    return result
-
-
-def validate_abi_dump(output, source):
-    stack = []
-    typed = False
-    source_exports = False
-    for event, element in ET.iterparse(output, events=('start', 'end')):
-        if event == 'start':
-            if not stack and element.tag != 'abi-corpus':
-                raise RuntimeError('Invalid ABI dump: ' + str(output))
-            stack.append(element)
-            if len(stack) == 3 and stack[1].tag == 'abi-instr':
-                typed = True
-            continue
-        if (len(stack) == 3 and stack[1].tag in ('elf-function-symbols', 'elf-variable-symbols')
-                and element.tag == 'elf-symbol' and (element.get('name') not in ('_init', '_fini')
-                or element.get('type') not in ('func-type', 'no-type'))):
-            source_exports = True
-        stack.pop()
-        if stack:
-            stack[-1].remove(element)
-        element.clear()
-    if typed:
-        return False
-    exported = defined_public_symbols(source)
-    if exported or source_exports:
-        raise RuntimeError('ABI dump has no type information: ' + str(output))
-    return True
-
-
-def abi_dump_receipt(output, inputs):
-    return {'schema': 1, 'inputs': inputs, 'inputs_sha256': digest(inputs), 'output_sha256': file_sha256(output)}
-
-
-def write_abi_dump_receipt(output, inputs):
-    target = output.with_suffix(output.suffix + '.inputs.json')
-    descriptor, temporary = tempfile.mkstemp(prefix='.' + target.name + '-', dir=target.parent)
-    os.close(descriptor)
-    try:
-        write_json(temporary, abi_dump_receipt(output, inputs))
-        os.replace(temporary, target)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
-def adopt_abi_dump(root, path, output, captured_inputs, expected_sha256):
-    current = abi_dump_inputs(root, path, debug_scope=captured_inputs.get('debug_scope', 'tree'))
-    if current is None or current != captured_inputs or file_sha256(output) != expected_sha256:
-        raise RuntimeError('Completed ABI dump differs from captured input proof')
-    validate_abi_dump(output, rooted(root, path))
-    reusable_inputs = abi_dump_inputs(root, path)
-    if reusable_inputs is None:
-        raise RuntimeError('Completed ABI dump has no reusable input proof')
-    write_abi_dump_receipt(output, reusable_inputs)
-
-
-def dump_abi(root, identifier, library, context=None):
-    dumps = {}
-    empty = []
-    for name, path in sorted(soname_files(library).items()):
-        started = time.monotonic()
-        progress('Checking ABI dump for {} ({})'.format(identifier, name))
-        relative = '{}/abi/{}/{}.xml'.format(METADATA, identifier, name)
-        output = rooted(root, relative)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        receipt = output.with_suffix(output.suffix + '.inputs.json')
-        inputs = abi_dump_inputs(root, path, context=context)
-        reusable = False
-        if inputs is not None and output.is_file() and receipt.is_file():
-            try:
-                proof = read_json(receipt)
-                reusable = (proof.get('schema') == 1 and proof.get('inputs') == inputs
-                            and proof.get('inputs_sha256') == digest(inputs)
-                            and proof.get('output_sha256') == file_sha256(output))
-                if reusable:
-                    is_empty = validate_abi_dump(output, rooted(root, path))
-            except (ValueError, OSError, RuntimeError, ET.ParseError):
-                reusable = False
-        if reusable:
-            dumps[name] = relative
-            if is_empty:
-                empty.append(name)
-            progress('Reused ABI dump for {} ({}) in {:.1f}s'.format(identifier, name, time.monotonic() - started))
-            continue
-        receipt.unlink(missing_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix='.' + output.name + '-', dir=output.parent)
-        os.close(descriptor)
-        temporary = Path(temporary)
-        try:
-            progress('Generating ABI dump for {} ({})'.format(identifier, name))
-            result = run(['abidw', *ABI_DUMP_FLAGS,
-                      '--debug-info-dir', str(Path(root) / 'usr/lib/debug'),
-                      '--debug-info-dir', str(Path(root) / 'debug'),
-                      '--out-file', str(temporary), str(rooted(root, path))])
-            if result.returncode != 0 or not temporary.is_file():
-                raise RuntimeError('Cannot generate debug ABI for {} ({}): {}'.format(identifier, name, result.stderr.strip()))
-            is_empty = validate_abi_dump(temporary, rooted(root, path))
-            if inputs is not None and abi_dump_inputs(root, path, context=context) != inputs:
-                raise RuntimeError('ABI input changed while generating dump: ' + name)
-            os.replace(temporary, output)
-            if inputs is not None:
-                write_abi_dump_receipt(output, inputs)
-            progress('Generated ABI dump for {} ({}) in {:.1f}s'.format(identifier, name, time.monotonic() - started))
-        finally:
-            temporary.unlink(missing_ok=True)
-        if is_empty:
-            empty.append(name)
-        dumps[name] = relative
-    if not dumps:
-        raise RuntimeError('Library has no SONAME-bearing ELF output: ' + identifier)
-    library['abi_dump'] = dumps
-    library['abi_empty'] = empty
-    library['abi_dump_hashes'] = {name: file_sha256(rooted(root, path)) for name, path in dumps.items()}
-
-
-def statx_padding_comparison(previous, current):
-    trees, declarations = [], []
-    try:
-        soname = None
-        for path in [previous, current]:
-            with Path(path).open('rb') as source:
-                _, corpus = next(ET.iterparse(source, events=('start',)))
-                name = corpus.get('soname', '')
-                if not re.fullmatch(r'liburing(?:-ffi)?\.so\.\d+', name) or soname not in (None, name):
-                    return None
-                soname = name
-            tree = ET.parse(path)
-            matches = [entry for entry in tree.iter('class-decl') if entry.get('name') == 'statx'
-                       and entry.get('is-struct') == 'yes' and entry.get('size-in-bits') == '2048']
-            if len(matches) != 1:
-                return None
-            trees.append(tree)
-            declarations.append(matches[0])
-        members = declarations[0].findall('data-member')
-        padding = max(members, key=lambda entry: int(entry.attrib['layout-offset-in-bits']))
-        variable = padding.find('var-decl')
-        if variable is None or not re.fullmatch(r'__pad\d+', variable.get('name', '')):
-            return None
-        types = {entry.get('id'): entry for entry in trees[0].iter() if entry.get('id')}
-        array = types[variable.attrib['type-id']]
-        start = int(padding.attrib['layout-offset-in-bits'])
-        # Linux statx keeps a 256-byte buffer with reserved tail space after its original 144-byte fields.
-        if array.tag != 'array-type-def' or start < 1152 or start + int(array.attrib['size-in-bits']) != 2048:
-            return None
-        for declaration in declarations:
-            for member in declaration.findall('data-member'):
-                if int(member.attrib['layout-offset-in-bits']) >= start:
-                    declaration.remove(member)
-    except (OSError, ET.ParseError, KeyError, ValueError, StopIteration):
-        return None
-    with tempfile.TemporaryDirectory(prefix='spp-statx-abi-') as temporary:
-        paths = [Path(temporary) / name for name in ['previous.xml', 'current.xml']]
-        for tree, path in zip(trees, paths):
-            tree.write(path, encoding='utf-8')
-        return run(['abidiff', '--no-default-suppression', '--no-added-syms', *map(str, paths)])
-
-
-def abi_difference(previous, current):
-    result = run(['abidiff', '--no-default-suppression', str(previous), str(current)])
-    if result.returncode == 0:
-        return 'compatible'
-    if result.returncode & 3 or result.returncode < 0 or result.returncode > 15:
-        raise RuntimeError('ABI comparison failed: ' + (result.stderr or result.stdout).strip())
-    if result.returncode == 12:
-        return 'breaking'
-    if result.returncode == 4:
-        additive = run(['abidiff', '--no-default-suppression', '--no-added-syms', str(previous), str(current)])
-        if additive.returncode == 0:
-            return 'compatible'
-        if additive.returncode == 4:
-            padding = statx_padding_comparison(previous, current)
-            if padding is not None and padding.returncode == 0:
-                progress('Compatible liburing statx additions within reserved tail padding')
-                return 'compatible'
-        raise RuntimeError('Ambiguous ABI changes require review: ' + result.stdout.strip())
-    raise RuntimeError('Unrecognized abidiff result: ' + str(result.returncode))
-
-
-def cached_abi(root, library):
-    names = set(soname_files(library))
-    dumps = library.get('abi_dump', {})
-    hashes = library.get('abi_dump_hashes', {})
-    empty = library.get('abi_empty')
-    return ('abi_dump' in library and 'abi_dump_hashes' in library and set(dumps) == names and set(hashes) == names
-            and isinstance(empty, list) and set(empty) <= names
-            and all(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value) for value in hashes.values())
-            and all(rooted(root, path).is_file() for path in dumps.values()))
-
-
-def abi_baseline(library):
-    if library is None:
-        return None
-    names = set(soname_files(library))
-    hashes = library.get('abi_dump_hashes', {})
-    if set(hashes) != names:
-        return None
-    return digest({'sonames': sorted(names), 'hashes': hashes, 'epoch': library.get('abi_epoch', 1)})
-
-
-def needs_abi_check(previous, current):
-    previous_version = (previous or {}).get('version') or current.get('abi_reference_version')
-    versions = [re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', str(version))
-                for version in [previous_version, current.get('version')]]
-    return not all(versions) or versions[0].groups()[:2] != versions[1].groups()[:2]
-
-
-def compare(old, new, old_root, new_root, rebuilt_libraries=None):
+def compare(old, new, rebuilt_libraries=None):
     if not old['libraries'] and old.get('metadata_scope') != []:
-        raise RuntimeError('No published shared-library ABI baseline')
+        raise RuntimeError('No published shared-library SONAME baseline')
     for key in ['architecture', 'libc', 'runtime_libdir']:
         if old['libraries'] and old.get(key) and new.get(key) != old[key]:
-            raise RuntimeError('ABI baseline {} differs from candidate'.format(key))
+            raise RuntimeError('Library baseline {} differs from candidate'.format(key))
     annotated = copy.deepcopy(new)
     changes = {}
-    abi_context = {}
-    unchanged, compared, reused, skipped = 0, 0, 0, 0
     for identifier, library in sorted(annotated['libraries'].items()):
-        previous = old['libraries'].get(identifier)
-        rebuilt = rebuilt_libraries is None or identifier in rebuilt_libraries
-        analyze = rebuilt and needs_abi_check(previous, library)
-        if rebuilt and not analyze:
-            if not library.get('abi_dump') and previous and previous.get('abi_dump'):
-                for relative in previous['abi_dump'].values():
-                    source, destination = rooted(old_root, relative), rooted(new_root, relative)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    if source.resolve() != destination.resolve():
-                        shutil.copy2(source, destination)
-                for field in ['abi_dump', 'abi_dump_hashes', 'abi_empty', 'abi_reference_version']:
-                    if field in previous:
-                        library[field] = copy.deepcopy(previous[field])
-            epoch = (previous or library).get('abi_epoch', 1)
-            library['abi_epoch'] = epoch
-            library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
-            library['abi_capabilities'] = [library['abi_capability']]
-            if library.get('abi_dump'):
-                library.setdefault('abi_reference_version', (previous or library).get('abi_reference_version', (previous or library).get('version')))
-            library.pop('abi_comparison', None)
-            changes[identifier] = {'status': 'compatible', 'abi_epoch': epoch,
-                                   'abi_capability': library['abi_capability'], 'check': 'skipped-patch-or-same-version'}
-            skipped += 1
-            progress('Skipped ABI checks for {}: {} -> {} (same major/minor)'.format(
-                identifier, (previous or {}).get('version', library.get('abi_reference_version')), library['version']))
-            continue
-        if analyze:
-            dump_abi(new_root, identifier, library, abi_context)
-            library['abi_reference_version'] = library['version']
-        elif not cached_abi(new_root, library):
-            raise RuntimeError('Unchanged library has no classified cached ABI: ' + identifier)
-        else:
-            reused += 1
+        for field in RETIRED_ABI_FIELDS:
+            library.pop(field, None)
         if old.get('metadata_scope') is not None and identifier not in old['metadata_scope']:
-            if analyze:
-                raise RuntimeError('Rebuilt library requires a complete published ABI baseline: ' + identifier)
-            changes[identifier] = {'status': 'unchanged', 'abi_epoch': library.get('abi_epoch', 1),
-                                   'abi_capability': library.get('abi_capability')}
+            if rebuilt_libraries is None or identifier in rebuilt_libraries:
+                raise RuntimeError('Rebuilt library requires a published SONAME baseline: ' + identifier)
+            changes[identifier] = {'status': 'unchanged'}
             continue
-        status = 'added' if previous is None else 'compatible'
-        baseline = abi_baseline(previous)
-        cached = library.get('abi_comparison', {})
-        reuse_comparison = (not analyze and previous and baseline is not None
-                            and cached.get('baseline') == baseline
-                            and cached.get('candidate') == library['abi_dump_hashes']
-                            and cached.get('status') in ('compatible', 'breaking'))
-        if reuse_comparison:
-            status = cached['status']
-        elif previous:
-            old_names = soname_files(previous)
-            new_names = soname_files(library)
-            if old_names.keys() - new_names.keys():
-                status = 'breaking'
-            for name in sorted(old_names.keys() & new_names.keys()):
-                if not analyze:
-                    if previous.get('abi_dump_hashes', {}).get(name) == library['abi_dump_hashes'][name]:
-                        unchanged += 1
-                        continue
-                    if name in previous.get('abi_empty', []):
-                        continue
-                    if name in library['abi_empty']:
-                        status = 'breaking'
-                        continue
-                    raise RuntimeError('Published ABI baseline changed for unchanged library; rebuild ' + identifier)
-                old_dump = previous.get('abi_dump', {}).get(name)
-                if not old_dump:
-                    raise RuntimeError('Published library has no debug ABI: {} ({})'.format(identifier, name))
-                old_path = rooted(old_root, old_dump)
-                if not old_path.is_file():
-                    raise RuntimeError('Published ABI data is missing: ' + str(old_path))
-                if file_sha256(old_path) == library.get('abi_dump_hashes', {}).get(name):
-                    difference = 'compatible'
-                    unchanged += 1
-                elif 'abi_empty' in previous and name in previous['abi_empty']:
-                    difference = 'compatible'
-                elif 'abi_empty' in previous and name in library['abi_empty']:
-                    difference = 'breaking'
-                else:
-                    difference = abi_difference(old_path, rooted(new_root, library['abi_dump'][name]))
-                    compared += 1
-                if difference == 'breaking':
-                    status = 'breaking'
-        epoch = previous.get('abi_epoch', 1) if previous else 1
-        if status == 'breaking':
-            epoch += 1
-        library['abi_epoch'] = epoch
-        library['abi_capability'] = 'php-zts-lib-{}-abi-{}'.format(identifier, epoch)
-        library['abi_capabilities'] = [library['abi_capability']]
-        library['abi_comparison'] = {'baseline': baseline, 'candidate': library.get('abi_dump_hashes', {}), 'status': status}
-        changes[identifier] = {'status': status, 'abi_epoch': epoch, 'abi_capability': library['abi_capability']}
+        previous = old['libraries'].get(identifier)
+        status = ('added' if previous is None else
+                  'compatible' if library_names(previous) == library_names(library) else 'breaking')
+        changes[identifier] = {'status': status}
     for identifier in sorted(old['libraries'].keys() - annotated['libraries'].keys()):
         changes[identifier] = {'status': 'removed'}
-    progress('ABI comparison complete: {} unchanged shared objects reused, {} compared'.format(unchanged, compared))
-    if rebuilt_libraries is not None:
-        progress('Cached ABI results reused for {} unchanged libraries; {} libraries analyzed; {} patch/same-version rebuilds skipped'.format(reused, len(annotated['libraries']) - reused - skipped, skipped))
     return annotated, {'schema': 1, 'baseline_fingerprint': fingerprint(old), 'candidate_fingerprint': fingerprint(annotated),
                        'libraries': changes}
 
@@ -698,14 +286,14 @@ def empty_manifest():
     return {'schema': 1, 'linkage': 'shared', 'libraries': {}}
 
 
-def merge_baselines(baselines, kind, destination, abi_libraries=None, independent_streams=False):
+def merge_baselines(baselines, kind, destination, independent_streams=False):
     merged = empty_manifest()
     scopes = {tuple(value['metadata_scope']) if value.get('metadata_scope') is not None else None for value, _ in baselines}
     if len(scopes) > 1:
         raise RuntimeError('Cannot merge baselines with different library metadata scopes')
     if scopes and None not in scopes:
         merged['metadata_scope'] = list(next(iter(scopes)))
-    divergent = set().union(*(set(value.get('divergent_libraries', [])) for value, _ in baselines))
+    divergent = set()
     drift = set().union(*(set(value.get('publication_drift', [])) for value, _ in baselines))
     for value, _ in baselines:
         for key in ['architecture', 'libc', 'runtime_libdir', 'build_identity', 'toolchain']:
@@ -718,7 +306,7 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None, independen
         candidates = [(value['libraries'].get(identifier), root) for value, root in baselines]
         available = [(library, root) for library, root in candidates if library is not None]
         selected, source = available[0]
-        identity_fields = ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']
+        identity_fields = ['version', 'source_hash', 'elf']
         if not independent_streams:
             identity_fields.append('published_version')
         identities = {digest({key: library.get(key) for key in identity_fields}) if library is not None else 'missing'
@@ -727,38 +315,25 @@ def merge_baselines(baselines, kind, destination, abi_libraries=None, independen
             drift.add(identifier)
         if any(library.get('published_debug_required') and not library.get('published_debug_archive') for library, _ in available):
             drift.add(identifier)
-        abi_identities = {(library.get('abi_epoch', 1), library.get('abi_capability')) for library, _ in available}
-        if len(abi_identities) > 1:
+        names = {tuple(library_names(library)) for library, _ in available}
+        names.update(tuple(library_names(libraries[identifier])) for value, _ in baselines
+                     for libraries in value.get('stream_libraries', {}).values() if identifier in libraries)
+        if len(names) > 1:
             divergent.add(identifier)
         for candidate, candidate_root in available[1:]:
             left, right = candidate.get('published_version'), selected.get('published_version')
             if not left or not right:
-                if digest(candidate) != digest(selected):
+                if fingerprint({'libraries': {identifier: candidate}}) != fingerprint({'libraries': {identifier: selected}}):
                     raise RuntimeError('Cannot reconcile hosts without native package versions: ' + identifier)
             else:
                 ordering = native_compare(kind, left, right)
-                if ordering == 0 and (candidate.get('source_hash'), candidate.get('abi_epoch')) != (selected.get('source_hash'), selected.get('abi_epoch')):
-                    raise RuntimeError('Published hosts have conflicting ABI metadata for the same package version: ' + identifier)
+                if ordering == 0 and (candidate.get('source_hash'), library_names(candidate)) != (selected.get('source_hash'), library_names(selected)):
+                    raise RuntimeError('Published hosts have conflicting library metadata for the same package version: ' + identifier)
                 if ordering == 0 and candidate.get('published_archive_sha256') and selected.get('published_archive_sha256') and candidate['published_archive_sha256'] != selected['published_archive_sha256']:
                     raise RuntimeError('Published hosts have conflicting archive bytes for the same package version: ' + identifier)
                 if ordering > 0 or ordering == 0 and candidate.get('published_debug_archive') and not selected.get('published_debug_archive'):
                     selected, source = candidate, candidate_root
-        if selected.get('abi_epoch', 1) < max(library.get('abi_epoch', 1) for library, _ in available):
-            raise RuntimeError('Published ABI generation moved backwards: ' + identifier)
         merged['libraries'][identifier] = copy.deepcopy(selected)
-        for soname, relative in selected.get('abi_dump', {}).items() if abi_libraries is None or identifier in abi_libraries else ():
-            original = rooted(source, relative)
-            if not original.is_file() and selected.get('published_archive'):
-                archive = rooted(source, selected['published_archive'])
-                if file_sha256(archive) != selected.get('published_archive_sha256'):
-                    raise RuntimeError('Captured ABI baseline archive checksum mismatch: ' + identifier)
-                extract_metadata(archive, kind, Path(source), {identifier})
-                for name, path in selected.get('abi_dump', {}).items():
-                    if file_sha256(rooted(source, path)) != selected.get('abi_dump_hashes', {}).get(name):
-                        raise RuntimeError('Captured ABI baseline checksum mismatch: ' + identifier)
-            output = rooted(destination, relative)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(original, output)
         if selected.get('published_archive'):
             relative = selected['published_archive']
             output = rooted(destination, relative)
@@ -850,17 +425,12 @@ def prepare(args):
     mode = 'incremental' if specified else args.mode
     forced_revision = bool(getattr(args, 'bump', False) or getattr(args, 'iteration', None)
                            or os.environ.get('BUMP') == 'true' or os.environ.get('ITERATION'))
-    with tempfile.TemporaryDirectory(prefix='shared-library-abi-baseline-') as temporary:
-        candidates = current['libraries'].keys() if getattr(args, 'rebuilt_libraries', None) is None else rebuilt
-        checked = {name for name in candidates if name in current['libraries']
-                   and (not current['libraries'][name].get('abi_dump')
-                        or any(needs_abi_check(value['libraries'].get(name), current['libraries'][name]) for value, _ in baselines))}
-        old, divergent = merge_baselines(baselines, args.type, temporary,
-                                         checked)
+    with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
+        old, divergent = merge_baselines(baselines, args.type, temporary)
         consumer_scope = bool(args.packages and old.get('metadata_scope') == [] and not rebuilt)
         if old.get('metadata_scope') is not None and not consumer_scope and (not specified or (set(specified) | rebuilt) - set(old['metadata_scope'])):
             raise RuntimeError('Scoped baselines must cover the selected and rebuilt libraries')
-        annotated, comparison = compare(old, current, temporary, args.root,
+        annotated, comparison = compare(old, current,
                                        rebuilt_libraries=None if getattr(args, 'rebuilt_libraries', None) is None else rebuilt)
     for identifier, library in annotated['libraries'].items():
         published = old['libraries'].get(identifier, {}).get('published_version')
@@ -888,7 +458,9 @@ def prepare(args):
         if args.packages:
             selected = set(publication_changes)
         else:
-            if getattr(args, 'rebuilt_libraries', None) is not None:
+            if mode == 'full' and forced_revision:
+                selected = set(current['libraries'])
+            elif getattr(args, 'rebuilt_libraries', None) is not None:
                 selected = set(publication_changes)
             else:
                 selected = set(current['libraries']) if mode == 'full' or request.get('library_build_inputs') else set(sources) | set(request.get('libraries', [])) | rebuilt
@@ -939,7 +511,7 @@ def prepare(args):
     comparison['candidate_fingerprint'] = fingerprint(annotated)
     retry_libraries = set(old.get('publication_drift', [])) | (set(sources) - set(content_sources))
     if forced_revision:
-        retry_libraries.difference_update(specified)
+        retry_libraries.difference_update(selected)
     plan = {'schema': 1, 'type': args.type, 'libraries': selected, 'removed_libraries': sorted(set(old['libraries']) - set(current['libraries'])),
             'abi_break': breaking, 'abi_rebuild_roots': sorted(abi_roots), 'baseline_fingerprint': fingerprint(baselines[0][0]),
             'baseline_fingerprints': sorted(set(fingerprint(value) for value, _ in baselines)),
@@ -952,14 +524,14 @@ def prepare(args):
             'abi_consumer_requests': abi_requests,
             'abi_core_rebuild_streams': sorted(stream for stream, entry in abi_requests.items()
                                              if entry['full'] or set(entry['packages']).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'})),
-            'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_capability', 'abi_dump', 'abi_dump_hashes', 'abi_empty']} for identifier in selected},
+            'expected_libraries': {identifier: {key: annotated['libraries'][identifier].get(key) for key in ['version', 'source_hash', 'elf']} for identifier in selected},
             'published_versions': {identifier: old['libraries'][identifier]['published_version'] for identifier in selected if identifier in old['libraries'] and old['libraries'][identifier].get('published_version')},
-            'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']}
+            'publication_retries': {identifier: {key: old['libraries'][identifier].get(key) for key in ['published_version', 'published_archive', 'published_archive_sha256', 'published_archive_filename', 'version', 'source_hash', 'elf']}
                                     for identifier in retry_libraries if identifier in selected and identifier not in content_sources and identifier not in rebuilt
                                     and identifier not in metadata_libraries
                                     and (identifier not in abi_roots or (not forced_revision
                                          and all(annotated['libraries'][identifier].get(key) == old['libraries'][identifier].get(key)
-                                                 for key in ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes'])))
+                                                 for key in ['version', 'source_hash', 'elf'])))
                                     and old['libraries'].get(identifier, {}).get('published_archive')},
             'library_package_requests': sorted(metadata_libraries.intersection(selected)),
             'published_consumers': {stream: {name: version for name, version in versions.items()
@@ -972,12 +544,7 @@ def prepare(args):
     write_json(args.output, plan)
 
 
-def selected_metadata(name, prefix, abi_libraries):
-    parts = PurePosixPath(name).relative_to(prefix).parts
-    return abi_libraries is None or parts[0] != 'abi' or len(parts) > 1 and parts[1] in abi_libraries
-
-
-def metadata_entries(archive, prefix=METADATA, abi_libraries=None):
+def metadata_entries(archive, prefix=METADATA):
     with tarfile.open(fileobj=archive, mode='r|*', ignore_zeros=True) as data:
         for member in data:
             name = member.name[2:] if member.name.startswith('./') else member.name
@@ -985,11 +552,11 @@ def metadata_entries(archive, prefix=METADATA, abi_libraries=None):
             if not name.startswith(prefix + '/'):
                 continue
             relative_path(name)
-            if member.isfile() and selected_metadata(name, prefix, abi_libraries):
+            if member.isfile() and PurePosixPath(name).parent == PurePosixPath(prefix) and name.endswith('.json'):
                 yield name, data.extractfile(member).read()
 
 
-def cpio_entries(data, prefix=METADATA, abi_libraries=None):
+def cpio_entries(data, prefix=METADATA):
     offset = 0
     while offset + 110 <= len(data):
         header = data[offset:offset + 110]
@@ -1008,18 +575,18 @@ def cpio_entries(data, prefix=METADATA, abi_libraries=None):
         if name.startswith(prefix + '/'):
             relative_path(name)
             mode = int(header[14:22], 16)
-            if mode & 0o170000 == 0o100000 and selected_metadata(name, prefix, abi_libraries):
+            if mode & 0o170000 == 0o100000 and PurePosixPath(name).parent == PurePosixPath(prefix) and name.endswith('.json'):
                 yield name, data[start:start + size]
         offset = (start + size + 3) & ~3
 
 
-def extract_metadata(path, kind, destination, abi_libraries=None):
+def extract_metadata(path, kind, destination):
     if kind == 'rpm':
-        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]), abi_libraries=abi_libraries)
+        entries = cpio_entries(subprocess.check_output(['rpm2cpio', str(path)]))
     elif kind == 'deb':
-        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])), abi_libraries=abi_libraries)
+        entries = metadata_entries(io.BytesIO(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)])))
     else:
-        entries = metadata_entries(gzip.GzipFile(filename=str(path)), abi_libraries=abi_libraries)
+        entries = metadata_entries(gzip.GzipFile(filename=str(path)))
     found = False
     for name, content in entries:
         output = rooted(destination, name)
@@ -1157,7 +724,7 @@ def stage_publication_retries(args):
     identifiers = []
     for identifier, retry in sorted(plan.get('publication_retries', {}).items()):
         library = value['libraries'].get(identifier)
-        if not library or any(library.get(key) != retry.get(key) for key in ['version', 'source_hash', 'abi_epoch', 'abi_dump_hashes']):
+        if not library or any(library.get(key) != retry.get(key) for key in ['version', 'source_hash', 'elf']):
             raise RuntimeError('Publication retry no longer matches the SDK: ' + identifier)
         selected = None
         selected_metadata = None
@@ -1214,21 +781,6 @@ def stage_publication_retries(args):
     write_json(args.output, {'schema': 1, 'copied_archives': copied, 'retry_libraries': identifiers,
                             'layout_required': layout_required,
                             'remaining_libraries': sorted(set(plan.get('libraries', [])) - set(identifiers))})
-
-
-def package_provides(path, kind):
-    if kind == 'rpm':
-        output = subprocess.check_output(['rpm', '-qp', '--nosignature', '--qf', '[%{PROVIDENAME}\n]', str(path)], universal_newlines=True)
-        return set(output.splitlines())
-    if kind == 'deb':
-        output = subprocess.check_output(['dpkg-deb', '-f', str(path), 'Provides'], universal_newlines=True)
-        return {part.strip().split(' ', 1)[0] for part in output.split(',') if part.strip()}
-    with gzip.GzipFile(filename=str(path)) as stream, tarfile.open(fileobj=stream, mode='r|', ignore_zeros=True) as archive:
-        for member in archive:
-            if member.name in ['.PKGINFO', './.PKGINFO']:
-                fields = archive.extractfile(member).read().decode()
-                return set(re.findall(r'^provides\s*=\s*([^\s=]+)', fields, re.M))
-    raise RuntimeError('APK archive has no .PKGINFO metadata: ' + str(path))
 
 
 def native_compare(kind, left, right):
@@ -1358,7 +910,6 @@ def baseline_single(args):
     if consumer_stream:
         target_streams = {consumer_stream}
     scan_consumers = not getattr(args, 'skip_consumers', False)
-    abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
     scope = getattr(args, 'libraries', None)
     names_requested = None if scope is None else {'php-zts-runtime-layout', *('php-zts-lib-' + name for name in scope.split(',') if name)}
     with tempfile.TemporaryDirectory(prefix='shared-library-baseline-') as temporary:
@@ -1412,7 +963,7 @@ def baseline_single(args):
                     if layout_metadata is None:
                         raise RuntimeError('Published runtime layout has no metadata')
                     layout_metadata.update(package_version=package['evr'], archive=package['archive'], archive_sha256=package['archive_sha256'], complete=True)
-                elif not extract_metadata(path, 'rpm', destination, abi_libraries):
+                elif not extract_metadata(path, 'rpm', destination):
                     raise RuntimeError('Published library has no ABI metadata: ' + package['name'])
             for stream, versions in consumer_versions.items() if scan_consumers else ():
                 shared = any(package['name'] == 'php-zts-cli' and package['evr'] == versions.get('php-zts-cli')
@@ -1527,7 +1078,7 @@ def baseline_single(args):
                         if layout_metadata is None:
                             raise RuntimeError('Published runtime layout has no metadata')
                         layout_metadata.update(package_version=item['version'], archive=item['archive'], archive_sha256=item['archive_sha256'], complete=True)
-                    elif not extract_metadata(path, args.type, destination, abi_libraries):
+                    elif not extract_metadata(path, args.type, destination):
                         raise RuntimeError('Published library has no ABI metadata: ' + name)
                     selected[name] = item
     aggregate = empty_manifest()
@@ -1569,11 +1120,8 @@ def baseline_single(args):
             library['published_debug_required'] = package.get('debug_required', False)
             if package.get('debug_archive'):
                 library['published_debug_archive'] = package['debug_archive']
-            if abi_libraries is None or identifier in abi_libraries:
-                hashes = {name: file_sha256(rooted(destination, relative)) for name, relative in library.get('abi_dump', {}).items()}
-                if library.get('abi_dump_hashes', hashes) != hashes:
-                    raise RuntimeError('Published ABI data checksum mismatch: ' + identifier)
-                library['abi_dump_hashes'] = hashes
+            for field in RETIRED_ABI_FIELDS:
+                library.pop(field, None)
     validate_manifest(aggregate, False)
     write_json(destination / 'shared-libraries.json', aggregate)
 
@@ -1637,8 +1185,7 @@ def baseline(args):
                 value['stream_libraries'] = {owner[0] + '.' + owner[1:]: copy.deepcopy(value['libraries'])}
             baselines.append((value, source_args.output))
             captured.append(source)
-        abi_libraries = None if getattr(args, 'abi_libraries', None) is None else set(filter(None, args.abi_libraries.split(',')))
-        merged, divergent = merge_baselines(baselines, args.type, destination, abi_libraries, independent_streams=args.type != 'rpm')
+        merged, divergent = merge_baselines(baselines, args.type, destination, independent_streams=args.type != 'rpm')
         merged['architecture'] = 'aarch64' if args.arch in ['arm64', 'aarch64'] else 'x86_64'
         merged['divergent_libraries'] = sorted(divergent)
         merged['baseline_origins'] = captured
@@ -1859,14 +1406,6 @@ def cohort(args):
                     floor = data.get('package_versions', {}).get(args.type)
                     if not floor or native_compare(args.type, candidate_version, floor) != 0:
                         raise RuntimeError('Candidate library has no matching native package-version floor: ' + name)
-                    if expected['abi_capability'] not in package_provides(path, args.type):
-                        raise RuntimeError('Candidate library does not provide its private ABI capability: ' + name)
-                    for abi in data.get('abi_dump', {}).values():
-                        if not rooted(temporary, abi).is_file():
-                            raise RuntimeError('Candidate library is missing persisted ABI data: ' + abi)
-                    hashes = {soname: file_sha256(rooted(temporary, abi)) for soname, abi in data.get('abi_dump', {}).items()}
-                    if data.get('abi_dump_hashes', hashes) != hashes:
-                        raise RuntimeError('Candidate library ABI data checksum mismatch: ' + name)
         if stream in consumer_members and not name.startswith('php-zts-lib-'):
             consumer_members[stream].add(name)
         if name == 'php-zts-cli' and stream:
@@ -1897,8 +1436,6 @@ def main():
     command = commands.add_parser('compare')
     command.add_argument('--old', required=True)
     command.add_argument('--new', required=True)
-    command.add_argument('--old-root', required=True)
-    command.add_argument('--new-root', required=True)
     command.add_argument('--manifest-output', required=True)
     command.add_argument('--output')
     command = commands.add_parser('closure')
@@ -1918,7 +1455,6 @@ def main():
     command.add_argument('--consumer-stream', choices=STREAMS)
     command.add_argument('--php-versions')
     command.add_argument('--skip-consumers', action='store_true')
-    command.add_argument('--abi-libraries')
     command.add_argument('--libraries', help='Download metadata only for these libraries and the runtime layout')
     command.add_argument('--output', required=True)
     command = commands.add_parser('migration-cutoffs')
@@ -1940,7 +1476,6 @@ def main():
     command = commands.add_parser('prepare')
     command.add_argument('--type', required=True, choices=['rpm', 'deb', 'apk'])
     command.add_argument('--manifest', required=True)
-    command.add_argument('--root', required=True)
     command.add_argument('--baseline', required=True)
     command.add_argument('--peer-baseline')
     command.add_argument('--mode', choices=['full', 'incremental'], default='full')
@@ -1966,7 +1501,7 @@ def main():
     elif args.command == 'changes':
         write_json(args.output, {'schema': 1, 'libraries': source_changes(manifest(args.old), manifest(args.new))})
     elif args.command == 'compare':
-        updated, result = compare(manifest(args.old, False), manifest(args.new), args.old_root, args.new_root)
+        updated, result = compare(manifest(args.old, False), manifest(args.new))
         write_json(args.manifest_output, updated)
         write_json(args.output, result)
     elif args.command == 'closure':
