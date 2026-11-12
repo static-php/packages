@@ -11,9 +11,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import yaml
-
-
 ROOT = Path(__file__).resolve().parents[1]
 HELPERS = ROOT / '.github/actions/shared-libraries'
 sys.path.insert(0, str(HELPERS))
@@ -161,7 +158,9 @@ class Repackage(unittest.TestCase):
                     repackage.payload()
 
     def test_workflow_skips_all_producer_and_cache_save_steps_for_repackaging(self):
-        workflow = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
+        workflow = json.loads(subprocess.check_output(['php', '-r',
+            r'require $argv[1]; echo json_encode(\Symfony\Component\Yaml\Yaml::parseFile($argv[2]), JSON_THROW_ON_ERROR);',
+            str(ROOT / 'vendor/autoload.php'), str(ROOT / '.github/workflows/build-rpm-modular-packages.yml')], text=True))
         for job, names in {'build-libs': ['Download pinned source snapshot', 'Compute source and toolchain fingerprint',
                 'Restore buildroot cache', 'Build changed shared libraries', 'Record target and buildroot'],
                 'build-payload': ['Download pinned source snapshot', 'Download exact common SDK',
