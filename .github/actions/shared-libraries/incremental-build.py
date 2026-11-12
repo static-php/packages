@@ -371,6 +371,8 @@ def dependency_signature(name, manifest, actual):
 
 
 def execute(root, buildroot, plan, package_type, command=None):
+    if (buildroot / 'build-payload.json').is_file():
+        helper_module('glibc.py', 'glibc').clean_sdk(buildroot)
     cache_path = root / "downloads/.cache.json"
     original = cache_path.read_bytes()
     manifest = read(buildroot / "shared-libraries.json", {})

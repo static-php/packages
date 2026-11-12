@@ -42,6 +42,23 @@ def copy_tree(source, destination):
     run(['cp', '-a', '--reflink=auto', str(source) + '/.', destination])
 
 
+def clean_sdk(sdk):
+    record = read(sdk / 'build-payload.json')
+    if record.get('kind') != 'sdk':
+        raise RuntimeError('Expected a recorded library SDK')
+    php_file = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))['php_file']
+    retained = set(record['files']) | set(record.get('packaging_assets', {}))
+    for path in sdk.rglob('*'):
+        name = str(path.relative_to(sdk))
+        if name not in retained and php_file(name) and (path.is_file() or path.is_symlink()):
+            path.unlink()
+    skipped = sdk / 'skipped-shared-extensions.json'
+    if record.get('skipped_shared_extensions') is None:
+        skipped.unlink(missing_ok=True)
+    else:
+        write(skipped, record['skipped_shared_extensions'])
+
+
 def project_libraries(source, destination, libraries):
     graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
     libraries = set(libraries)
@@ -559,6 +576,9 @@ def payload():
             environment = dict(os.environ, SPP_PACKAGING_SELECTION=os.environ.get('PACKAGES', '') if os.environ.get('PUBLISH') == 'false' else '')
             bind_library_sources(ROOT / 'buildroot', ROOT / 'downloads')
             run(['php', 'bin/spp', 'build', *flags], env=environment)
+            if not sdk_moved:
+                clean_sdk(ROOT / 'buildroot')
+                run(['php', 'bin/build-payload', 'verify', '--root', ROOT / 'buildroot'])
             compiled_source = os.environ['SOURCE_RUN_ID']
         elif not restored:
             raise RuntimeError('No sealed PHP payload available for packaging')

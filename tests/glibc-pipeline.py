@@ -32,6 +32,28 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_sdk_cleanup_removes_only_unrecorded_php_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            sdk = Path(temporary)
+            retained = ['lib/libfixture.so.1', 'lib/libphp-owned.so', 'include/php/owned.h']
+            stale = ['bin/php', 'bin/frankenphp', 'lib/frankenphp', 'lib/libphp-zts-86.so',
+                     'modules/curl-zts-86.so', 'include/php/leftover.h']
+            for name in retained + stale + ['lib/unexpected.so', 'payload/runtime/lib/libfixture.so.1']:
+                path = sdk / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'unchanged')
+            glibc.write(sdk / 'build-payload.json', {'kind': 'sdk', 'files': {name: {} for name in retained[:2]},
+                'packaging_assets': {retained[2]: {}}, 'skipped_shared_extensions': None})
+            glibc.write(sdk / 'skipped-shared-extensions.json', {'skipped': ['old-php-extension']})
+            recorded = (sdk / 'build-payload.json').read_bytes()
+            glibc.clean_sdk(sdk)
+            self.assertTrue(all((sdk / name).read_bytes() == b'unchanged' for name in retained))
+            self.assertTrue((sdk / 'lib/unexpected.so').is_file())
+            self.assertTrue((sdk / 'payload/runtime/lib/libfixture.so.1').is_file())
+            self.assertFalse(any((sdk / name).exists() for name in stale))
+            self.assertFalse((sdk / 'skipped-shared-extensions.json').exists())
+            self.assertEqual((sdk / 'build-payload.json').read_bytes(), recorded)
+
     def test_library_publication_reads_each_selected_owner_after_partial_rollout(self):
         with patch.dict(os.environ, LIBRARIES='openssl', PUBLISH='true', PHP_VERSIONS='8.4,8.6', MATRIX_ARCH='arm64'), \
                 patch.object(glibc, 'run') as run:
@@ -493,11 +515,15 @@ class Pipeline(unittest.TestCase):
                 (stage / kind / 'baseline').mkdir()
                 (stage / kind / 'baseline/shared-libraries.json').write_text('{}')
             glibc.write(stage / 'consumer-source-versions.json', {'candidates': [{'name': 'php-zts-imagick'}]})
+            glibc.write(root / 'buildroot/build-payload.json', {'kind': 'sdk', 'files': {}})
             calls = []
             def record(arguments, **kwargs):
                 calls.append([str(value) for value in arguments])
                 if arguments[:3] == ['php', 'bin/spp', 'build']:
-                    (root / 'build/8.6').mkdir(parents=True)
+                    (root / 'build/8.6/bin').mkdir(parents=True)
+                    (root / 'build/8.6/bin/php').write_bytes(b'consumer')
+                    (root / 'buildroot/bin').mkdir()
+                    (root / 'buildroot/bin/php').write_bytes(b'consumer')
             environment = {'PHPV': '8.6', 'COMPILE': 'true', 'COMPILE_PACKAGES': 'imagick', 'PACKAGES': 'imagick',
                            'SOURCE_RUN_ID': '42', 'TARGET': 'alma8-x86_64', 'IMAGE': 'producer', 'TYPE': 'rpm', 'MATRIX_ARCH': 'x86_64'}
             with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', record), \
@@ -508,6 +534,9 @@ class Pipeline(unittest.TestCase):
                     glibc.payload()
                     build = next(call for call in calls if call[:3] == ['php', 'bin/spp', 'build'])
                     self.assertFalse(any(value.startswith('--packages=') for value in build))
+                    self.assertFalse((root / 'buildroot/bin/php').exists())
+                    self.assertEqual((root / 'build/8.6/bin/php').read_bytes(), b'consumer')
+                    self.assertIn(['php', 'bin/build-payload', 'verify', '--root', str(root / 'buildroot')], calls)
                     preflight = next(call for call in calls if len(call) > 1 and call[1].endswith('/source-versions.py'))
                     self.assertEqual(preflight[preflight.index('--packages') + 1], 'imagick')
                     os.environ['COMPILE'] = 'false'

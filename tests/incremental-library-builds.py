@@ -208,6 +208,19 @@ class IncrementalLibraryTests(unittest.TestCase):
         self.assertFalse(result["built"])
         self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
 
+    def test_restored_sdk_discards_php_outputs_before_a_library_build(self):
+        leftover = self.sdk / 'bin/php'
+        leftover.parent.mkdir(parents=True)
+        leftover.write_bytes(b'previous inline PHP build')
+        incremental.write(self.sdk / 'build-payload.json', {'kind': 'sdk', 'files': {}})
+        code = 'from pathlib import Path; assert not Path("buildroot/bin/php").exists(); raise SystemExit(7)'
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            incremental.execute(self.root, self.sdk, self.plan(sources=self.changed('base'), libraries='base'),
+                                'rpm', [sys.executable, '-c', code])
+        self.assertEqual(error.exception.returncode, 7)
+        self.assertFalse(leftover.exists())
+        self.assertEqual((self.sdk / 'lib/libbase.so.1').read_bytes(), b'compiled base')
+
     def test_manual_scope_repairs_invalid_dependency_and_pending_consumer(self):
         self.assertEqual(self.plan(libraries="consumer", invalid=["base"])["selected"], ["base"])
         manifest = dict(self.manifest, pending_rebuilds={"consumer": {"libbase.so.1": "base"}})

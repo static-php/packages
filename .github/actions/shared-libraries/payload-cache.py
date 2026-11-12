@@ -45,6 +45,7 @@ def identity(path):
 
 def php_file(name):
     return (name.startswith(('modules/', 'include/php/', 'lib/php/build/', 'packaging/'))
+            or name == 'lib/frankenphp'
             or bool(re.fullmatch(r'bin/(?:php(?:-cgi|-fpm|dbg|-config|ize)?|frankenphp)', name))
             or bool(re.fullmatch(r'lib/libphp[^/]*\.(?:so(?:\.[^/]*)?|a|la)', name)))
 
