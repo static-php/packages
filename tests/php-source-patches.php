@@ -47,9 +47,10 @@ function removePreflight(string $path): void
 
 $options = getopt('', ['downloads:', 'versions:']);
 $downloads = $options['downloads'] ?? dirname(__DIR__) . '/downloads';
-$versions = explode(',', $options['versions'] ?? '8.5.9,8.6.0beta1,8.6.0RC2');
+$versions = explode(',', $options['versions'] ?? '8.5.9,8.6.0beta1,8.6.0RC2,8.6.0RC5');
 $patch = dirname(__DIR__) . '/config/patches/php86-performance-prs.patch';
-preg_match_all('/^diff --git a\/(\S+) b\//m', file_get_contents($patch), $paths);
+$runtimePatch = dirname(__DIR__) . '/config/patches/php86-dtoa-runtime-trunc.patch';
+preg_match_all('/^diff --git a\/(\S+) b\//m', file_get_contents($patch) . file_get_contents($runtimePatch), $paths);
 $temporary = trim(runPreflight(['mktemp', '-d', '/tmp/php-zts-source-patches-XXXXXX']));
 try {
     foreach ($versions as $version) {
@@ -80,16 +81,27 @@ try {
         $target = new PatchPreflightTarget($source);
         $hook = new Php86Performance();
         $applied = $hook->patchBeforeBuildconf($target);
+        $runtimeApplied = $hook->patchDtoaBeforeBuildconf($target);
         $eligible = str_starts_with($version, '8.6.') && version_compare($version, '8.6.0RC2', '>=');
+        $runtimeEligible = str_starts_with($version, '8.6.') && version_compare($version, '8.6.0RC5', '>=');
+        if ($runtimeApplied !== $runtimeEligible
+            || (hash_file('sha256', $source . '/Zend/zend_strtod.c') !== $before['Zend/zend_strtod.c']) !== $runtimeEligible) {
+            throw new RuntimeException("Unexpected PHP runtime float-formatting patch behavior for {$version}");
+        }
         if ($applied !== $eligible || ($hashes() !== $before) !== $eligible) {
             throw new RuntimeException("Unexpected PHP performance patch behavior for {$version}");
         }
         if ($eligible) {
             $after = $hashes();
-            if (!$hook->patchBeforeBuildconf($target) || $hashes() !== $after) {
+            if (!$hook->patchBeforeBuildconf($target)
+                || $hook->patchDtoaBeforeBuildconf($target) !== $runtimeEligible
+                || $hashes() !== $after) {
                 throw new RuntimeException("PHP {$version} performance patch is not idempotent");
             }
             runPreflight(['patch', '--dry-run', '-p1', '-s', '-f', '-R', '-i', $patch, '-d', $source]);
+            if ($runtimeEligible) {
+                runPreflight(['patch', '--dry-run', '-p1', '-s', '-f', '-R', '-i', $runtimePatch, '-d', $source]);
+            }
         }
         echo 'Passed PHP ' . $version . ': ' . ($eligible ? 'performance patch applies and is idempotent' : 'unsupported performance patch leaves source unchanged') . ".\n";
     }

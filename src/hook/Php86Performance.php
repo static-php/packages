@@ -23,4 +23,16 @@ class Php86Performance
 
         return SourcePatcher::patchFile(dirname(__DIR__, 2) . '/config/patches/php86-performance-prs.patch', $package->getSourceDir());
     }
+
+    #[BeforeStage('php', [PhpTarget::class, 'buildconfForUnix'], 'php')]
+    #[PatchDescription('Select SSE4.1 float formatting at runtime on baseline x86-64')]
+    public function patchDtoaBeforeBuildconf(TargetPackage $package): bool
+    {
+        $version = PhpTarget::getPHPVersion($package->getSourceDir());
+        if (!str_starts_with($version, '8.6.') || version_compare($version, '8.6.0RC5', '<')) {
+            return false;
+        }
+
+        return SourcePatcher::patchFile(dirname(__DIR__, 2) . '/config/patches/php86-dtoa-runtime-trunc.patch', $package->getSourceDir());
+    }
 }
