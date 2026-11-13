@@ -17,24 +17,6 @@ from workflow import stable_artifact
 STREAMS = ("8.2", "8.3", "8.4", "8.5", "8.6")
 TOOLS = {"php-src", "php-micro", "cmake", "ninja", "pkg-config", "pkgconf", "re2c", "bison", "go", "rust", "zig", "gcc", "composer"}
 CORE_EXTENSIONS = set('calendar,ctype,dom,exif,filter,iconv,libxml,mbregex,mbstring,opcache,openssl,password-argon2,pcntl,phar,posix,readline,session,simplexml,sockets,sodium,tokenizer,xml,xmlreader,xmlwriter,zlib'.split(','))
-MODULE_ONLY_EXTENSIONS = {'mysqli', 'mysqlnd', 'shmop', 'soap', 'sqlite3', 'xsl', 'xhprof'}
-SPC = "vendor/crazywhalecc/static-php-cli/"
-COMPILE_PATTERNS = (
-    "spc.registry.yml", "Dockerfile.rhel", "Dockerfile.alpine", "bin/spp",
-    "src/artifact/**/*.php", "src/Command/BuildCommand.php", "src/Command/BaseCommand.php",
-    "src/CraftConfig.php", "src/util/TwigRenderer.php", "src/util/SpcAutoload.php", "src/step/RunSPC.php",
-    "src/hook/**/*.php", "config/templates/craft.yml.twig", "config/patches/*.patch",
-    SPC + "src/StaticPHP/Package/Package*.php", SPC + "src/StaticPHP/Package/PhpExtensionPackage.php",
-    SPC + "src/StaticPHP/Package/TargetPackage.php", SPC + "src/StaticPHP/Runtime/**/*.php",
-    SPC + "src/StaticPHP/Toolchain/**/*.php", SPC + "src/StaticPHP/Registry/**/*.php",
-    SPC + "src/StaticPHP/Util/SourcePatcher.php", SPC + "src/StaticPHP/Util/Pgo/**/*.php",
-    SPC + "src/StaticPHP/Util/PkgConfigUtil.php", SPC + "src/StaticPHP/Util/SPCConfigUtil.php",
-    SPC + "src/StaticPHP/Util/GlobalEnvManager.php", SPC + "src/StaticPHP/Util/GlobalPathTrait.php",
-    SPC + "src/StaticPHP/Util/SharedLibraryUtil.php", SPC + "src/StaticPHP/Util/System/**/*.php",
-    SPC + "src/globals/functions*.php",
-    SPC + "src/Package/Target/php.php", SPC + "src/Package/Target/php/unix.php",
-    SPC + "src/Package/Target/php/pgo.php",
-)
 PACKAGE_PATTERNS = (
     "src/package/**/*.php", "src/ini/**/*", "src/extension.php", "src/package.php",
     "src/step/CreatePackages.php", "src/util/SharedLibraries.php", "src/util/BuildPayload.php",
@@ -53,34 +35,6 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def referenced_patches(root, files):
-    result = {}
-    directories = [root / 'config/patches', root / (SPC + 'src/globals/patch'), root / (SPC + 'patches')]
-    for relative in files:
-        path = root / relative
-        if path.suffix != '.php':
-            continue
-        for literal in re.findall(r"['\"]([^'\"\n]+\.patch)['\"]", path.read_text()):
-            literal = re.sub(r'\{?\$[A-Za-z_][A-Za-z0-9_]*\}?', '*', literal)
-            candidates = [path.parent / literal, root / literal.lstrip('/')]
-            candidates += [directory / literal.lstrip('/') for directory in directories]
-            for candidate in candidates:
-                for patch in candidate.parent.glob(candidate.name):
-                    if patch.is_file() and patch.resolve().is_relative_to(root.resolve()):
-                        result[str(patch.relative_to(root))] = hashlib.sha256(patch.read_bytes()).hexdigest()
-    return result
-
-
-def dependency_identity(root):
-    lock = root / "composer.lock"
-    if not lock.is_file():
-        return {}
-    data = json.loads(lock.read_text())
-    return {package["name"]: {key: package.get(key) for key in ("version", "source", "dist")}
-            for package in data.get("packages", [])
-            if package.get("name") in {"twig/twig", "symfony/process", "symfony/yaml"}}
-
-
 def core_components(root):
     path = root / 'config/templates/craft.yml.twig'
     if not path.is_file():
@@ -93,152 +47,6 @@ def core_components(root):
         raise RuntimeError('Cannot resolve compiled-in extension selection for source planning')
     return CORE_EXTENSIONS
 
-
-def extension_definitions(root):
-    result = {}
-    for directory in [SPC + 'config/pkg/ext', 'config/pkg/ext']:
-        for suffix in ['yml', 'yaml', 'json']:
-            for path in sorted((root / directory).glob('*.' + suffix)):
-                text = path.read_text()
-                if suffix == 'json':
-                    blocks = {name.removeprefix('ext-'): json.dumps(value, sort_keys=True)
-                              for name, value in json.loads(text).items() if name.startswith('ext-')}
-                else:
-                    matches = list(re.finditer(r'^ext-([A-Za-z0-9_-]+):[^\n]*\n', text, re.M))
-                    blocks = {match[1]: text[match.start():matches[index + 1].start() if index + 1 < len(matches) else len(text)]
-                              for index, match in enumerate(matches)}
-                for name, block in blocks.items():
-                    addon = re.search(r'''arg-type["']?\s*:\s*["']?none\b''', block)
-                    display = re.search(r'''display-name["']?\s*:\s*["']?([A-Za-z0-9_-]+)''', block)
-                    result[name] = {'path': str(path.relative_to(root)), 'text': block,
-                                    'hash': hashlib.sha256(block.encode()).hexdigest(),
-                                    'build_with_php': bool(re.search(r'(?:build-with-php["\']?\s*:\s*)true\b', block, re.I)),
-                                    'external': bool(re.search(r'(?:^\s+source:\s*$|["\']source["\']\s*:)', block, re.M)),
-                                    'parent': display[1] if addon and display and display[1] != name else None}
-    return result
-
-
-def shared_components(root):
-    definitions = extension_definitions(root)
-    template = root / 'config/templates/craft.yml.twig'
-    if template.is_file():
-        match = re.search(r"set\s+base_shared_str\s*=\s*['\"]([^'\"]*)['\"]", template.read_text())
-        if match:
-            return {definitions.get(name.strip(), {}).get('parent') or name.strip() for name in match[1].split(',') if name.strip()}
-    return {entry.get('parent') or name for name, entry in definitions.items()} - core_components(root) or MODULE_ONLY_EXTENSIONS
-
-
-def module_only_components(root):
-    definitions = extension_definitions(root)
-    configured = {name for name, entry in definitions.items() if entry['build_with_php']} if definitions else MODULE_ONLY_EXTENSIONS
-    return configured & shared_components(root)
-
-
-def switch_cases(text):
-    switch = re.search(r'\bswitch\s*\(.*?\)\s*\{', text, re.S)
-    if switch is None:
-        return {}
-    opening, position, depth, quote = switch.end() - 1, switch.end(), 1, None
-    while position < len(text) and depth:
-        character = text[position]
-        if quote:
-            if character == '\\':
-                position += 2
-                continue
-            if character == quote:
-                quote = None
-        elif character in "'\"":
-            quote = character
-        elif text.startswith('//', position):
-            position = text.find('\n', position)
-            if position < 0:
-                break
-            continue
-        elif text.startswith('/*', position):
-            end = text.find('*/', position + 2)
-            if end < 0:
-                break
-            position = end + 2
-            continue
-        elif character == '{':
-            depth += 1
-        elif character == '}':
-            depth -= 1
-        position += 1
-    if depth:
-        raise RuntimeError('Cannot resolve extension preparation switch for source planning')
-    closing = position - 1
-    body = text[opening + 1:closing]
-    labels = list(re.finditer(r'''^[ \t]*case\s+['"]([A-Za-z0-9_-]+)['"]\s*:[ \t]*$''', body, re.M))
-    if (re.search(r'^[ \t]*default\s*:', body, re.M)
-            or len(labels) != len(re.findall(r'^[ \t]*case\b', body, re.M))):
-        raise RuntimeError('Cannot resolve extension-specific source preparation branches')
-    result, grouped = {}, []
-    for index, label in enumerate(labels):
-        grouped.append(label[1])
-        branch = body[label.end():labels[index + 1].start() if index + 1 < len(labels) else len(body)]
-        if not branch.strip():
-            continue
-        for name in grouped:
-            prefix = re.sub(r'''^[ \t]*#\[BeforeStage\(['"]ext-([^'"]+)['"][^\n]*\n''',
-                            lambda match: match[0] if match[1] == name else '', text[:opening + 1], flags=re.M)
-            result[name] = prefix + '\ncase ' + repr(name) + ':' + branch + text[closing:]
-        grouped = []
-    return result
-
-
-def scoped_hook_inputs(root):
-    result = {}
-    for path in root.glob('src/hook/*.php'):
-        relative, text = str(path.relative_to(root)), path.read_text()
-        if path.name == 'BuildSelectedPhpModules.php':
-            actors = module_only_components(root)
-        elif path.name == 'ReuseConsumerExtensions.php':
-            actors = shared_components(root)
-        elif path.name == 'PrepareReusedExtensionSources.php':
-            cases = switch_cases(text)
-            if not cases:
-                raise RuntimeError('Cannot resolve extension preparation actors for source planning')
-            result[relative] = {name: hashlib.sha256(value.encode()).hexdigest() for name, value in cases.items()}
-            continue
-        elif path.name == 'FrankenPhp86.php':
-            actors = {'frankenphp'}
-        elif path.name in {'Rar.php', 'Ev.php', 'Ds.php'}:
-            actors = {path.stem.lower()}
-        else:
-            actors = set(re.findall(r'''\#\[(?:Extension|BeforeStage)\(['"](?:ext-)?([A-Za-z0-9_-]+)['"]''', text))
-            actors.discard('php')
-        if actors:
-            result[relative] = {name: hashlib.sha256(text.encode()).hexdigest() for name in actors}
-    return result
-
-
-def identity(root):
-    files = file_identity(root, COMPILE_PATTERNS)
-    if 'bin/spp' in files:
-        # Packaging destinations do not change the compiler inputs of existing payloads.
-        launcher = (root / 'bin/spp').read_bytes().replace(
-            b"define('DIST_PATH', getenv('SPP_DIST_PATH') ?: BASE_PATH . '/dist');",
-            b"const DIST_PATH = BASE_PATH . '/dist';")
-        files['bin/spp'] = hashlib.sha256(launcher).hexdigest()
-    base_command = 'src/Command/BaseCommand.php'
-    if base_command in files:
-        source = (root / base_command).read_bytes().replace(
-            b"define('BUILD_ROOT_PATH', $this->getName() === 'package' && $input->getOption('buildroot') !== null ? $input->getOption('buildroot') : BASE_PATH . '/build/' . $phpVersion);",
-            b"define('BUILD_ROOT_PATH', BASE_PATH . '/build/' . $phpVersion);")
-        files[base_command] = hashlib.sha256(source).hexdigest()
-    scoped = scoped_hook_inputs(root)
-    files = {name: value for name, value in files.items()
-             if name not in scoped
-             and not name.startswith("config/patches/franken")}
-    for path in root.glob(SPC + 'src/Package/Extension/**/*.php'):
-        if path.stem.replace('_', '-') in core_components(root):
-            files[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
-    for name, entry in extension_definitions(root).items():
-        if name.replace('_', '-') in core_components(root):
-            files[entry['path'] + '#' + name] = entry['hash']
-    files.update(referenced_patches(root, files))
-    return digest({"schema": 2, "files": files, "dependencies": dependency_identity(root)})
 
 
 def package_identity(root):
@@ -272,58 +80,6 @@ def variant_identities(root):
             body.append(node)
     engine = recipe_schema if recipe_schema is not None else digest(ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False))
     return {profile: digest({'engine': engine, 'openssldir': directory}) for profile, directory in profiles.items()}
-
-
-def component_identities(root):
-    paths = {}
-    for pattern, prefix in [("config/pkg/ext/ext-*.yml", "ext-"), (SPC + "src/Package/Extension/**/*.php", "")]:
-        for path in root.glob(pattern):
-            if path.is_file():
-                name = path.relative_to(root / (SPC + "src/Package/Extension")).parts[0] if prefix == "" else path.stem
-                name = name.removesuffix(".php").removeprefix(prefix)
-                paths.setdefault(name, {})[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
-    for name, patterns in {"rar": ["src/hook/Rar.php"], "frankenphp": ["src/hook/FrankenPhp86.php", "config/patches/franken*.patch", SPC + "src/Package/Target/php/frankenphp.php"]}.items():
-        paths.setdefault(name, {}).update(file_identity(root, patterns))
-    definitions = extension_definitions(root)
-    for name, entry in definitions.items():
-        key = entry['path'] + '#' + name if entry['path'].startswith(SPC) else entry['path']
-        paths.setdefault(entry.get('parent') or name, {}).setdefault(key, entry['hash'])
-    for name, entry in definitions.items():
-        if entry.get('parent') and name in paths:
-            paths.setdefault(entry['parent'], {}).update(paths.pop(name))
-    for relative, actors in scoped_hook_inputs(root).items():
-        for name, value in actors.items():
-            paths.setdefault(name, {})[relative] = value
-    for relative, actors in [('src/util/ModuleOnlyBuild.php', module_only_components(root)),
-                             ('src/util/ConsumerSnapshot.php', shared_components(root) | {'frankenphp'})]:
-        if (root / relative).is_file():
-            value = hashlib.sha256((root / relative).read_bytes()).hexdigest()
-            for name in actors:
-                paths.setdefault(name, {})[relative] = value
-    repair = file_identity(root, ['.github/actions/shared-libraries/rehydrate-php-extensions.py'])
-    active = active_components(root)
-    selected = set().union(*active.values()) if active is not None else None
-    result = {}
-    for name, files in paths.items():
-        if (not files or name.replace('_', '-') in core_components(root)
-                or selected is not None and name.replace('_', '-') not in selected):
-            continue
-        values = {}
-        for stream in STREAMS:
-            inputs = dict(files, **referenced_patches(root, files))
-            bundled = not definitions.get(name, {}).get('external', True)
-            if name == 'zip':
-                bundled = tuple(map(int, stream.split('.'))) >= (8, 5)
-            if bundled:
-                inputs.update(repair)
-            values[stream] = digest(inputs)
-        result[name] = next(iter(values.values())) if len(set(values.values())) == 1 else {'streams': values}
-    return result
-
-
-def resolved_components(components, stream):
-    return {name: value['streams'][stream] if isinstance(value, dict) and 'streams' in value else value
-            for name, value in components.items()}
 
 
 def active_components(root):
@@ -415,12 +171,6 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
     requests, package_requests = {}, {}
     package_change = package_configuration is not None and previous_meta.get("shared_package_configuration") != package_configuration
     for stream in STREAMS:
-        recipe_packages = []
-        if components is not None:
-            old_components = resolved_components(previous_meta.get('shared_components', {}), stream)
-            current_components = resolved_components(components, stream)
-            recipe_packages = [name for name in old_components.keys() | current_components.keys()
-                               if old_components.get(name) != current_components.get(name)]
         previous_artifacts = stream_artifacts(previous, previous_meta, stream)
         current_artifacts = stream_artifacts(current, current_meta, stream)
         stream_changes = {name for name in previous_artifacts.keys() | current_artifacts.keys()
@@ -430,7 +180,6 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
                        or previous_meta.get("php_versions", {}).get(stream) != current_meta.get("php_versions", {}).get(stream)
                        or previous_meta.get("php_source_hashes", {}).get(stream, {}) != current_meta.get("php_source_hashes", {}).get(stream, {}))
         stream_packages = {name for name in stream_changes if component_used(name, stream, artifact=True, active=active)}
-        stream_packages.update(name for name in recipe_packages if component_used(name, stream, active=active))
         if stream_full or stream_packages:
             requests[stream] = {"full": bool(stream_full), "packages": [] if stream_full else sorted(stream_packages)}
         if package_change or package_only:
@@ -438,13 +187,10 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
     component_inputs = {}
     for stream in STREAMS:
         component_sources = stream_artifacts(current, current_meta, stream)
-        recipes = {name: value for name, value in resolved_components(components or {}, stream).items()
-                   if component_used(name, stream, active=active)}
-        values = dict(recipes)
-        values.update({name: digest({"recipe": recipes.get(name), "source": value}) for name, value in component_sources.items()
-                       if component_used(name, stream, artifact=True, active=active) and name.replace('_', '-') not in compiled_in})
+        values = {name: digest(value) for name, value in component_sources.items()
+                  if component_used(name, stream, artifact=True, active=active) and name.replace('_', '-') not in compiled_in}
         component_inputs[stream] = values
-    base_inputs = {stream: digest({"configuration": configuration, "php": current_meta.get("php_versions", {}).get(stream),
+    base_inputs = {stream: digest({"php": current_meta.get("php_versions", {}).get(stream),
                                   "php_source": current_meta.get("php_source_hashes", {}).get(stream),
                                   'core_artifacts': {name: value for name, value in stream_artifacts(current, current_meta, stream).items() if name.replace('_', '-') in compiled_in}}) for stream in STREAMS}
     library_package_change = (library_package_configuration is not None
@@ -463,7 +209,7 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
                 packages = sorted(set(old.get('packages', [])) | set(new.get('packages', [])))
                 format_requests[kind] = {stream: {'full': False, 'packages': packages} for stream in STREAMS}
     return {"schema": 1, "requests": requests, "package_requests": package_requests,
-            'source_comparison_available': bool(previous_meta.get('shared_configuration')), 'force_full': bool(force),
+            'source_comparison_available': bool(previous_meta.get('php_versions')), 'force_full': bool(force),
             'format_package_requests': format_requests,
             'library_package_requests': package_libraries, 'variant_package_requests': variant_requests,
             'library_package_baseline': previous_meta.get('shared_library_package_configuration'),
@@ -514,7 +260,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--force-full", action="store_true")
-    parser.add_argument('--reconcile', action='store_true', help='Reconcile current checkout recipes with an immutable pinned source snapshot')
+    parser.add_argument('--reconcile', action='store_true', help='Preserve the immutable pinned source update selection')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     root = args.root.resolve()
@@ -522,9 +268,9 @@ def main():
     metadata = read("downloads/.spc-meta.json")
     metadata["php_source_hashes"] = php_archive_inputs(root, metadata, verify=args.reconcile)
     metadata['extension_sources'] = extension_source_inputs(root)
-    configuration = identity(root)
+    configuration = ""
     packaging = package_identity(root)
-    components = component_identities(root)
+    components = {}
     library_packaging = library_package_identity(root)
     variants = variant_identities(root)
     inventory = json.loads(subprocess.check_output(["php", str(Path(__file__).with_name("inventory.php")), str(root)], cwd=root, universal_newlines=True))
@@ -552,9 +298,7 @@ def main():
                    force=args.force_full, configuration=configuration, library_ids=library_ids, build_inputs=inventory,
                    components=components, compiled_in=core_components(root), active=active_components(root), automatic=True)
     request["build_inputs"] = inventory
-    metadata["shared_configuration"] = configuration
     metadata["shared_package_configuration"] = packaging
-    metadata["shared_components"] = components
     metadata['shared_library_package_configuration'] = library_packaging
     metadata['shared_variant_configuration'] = variants
     metadata['shared_format_package_configuration'] = format_package_identities(root)

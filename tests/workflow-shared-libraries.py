@@ -126,7 +126,7 @@ class SourcePlanTests(unittest.TestCase):
             root = Path(temporary)
             (root / 'downloads').mkdir()
             (root / '.download-state').mkdir()
-            metadata = dict(self.metadata, shared_configuration=source.identity(root))
+            metadata = dict(self.metadata, shared_configuration='source-only')
             for name in ['downloads/.spc-meta.json', '.download-state/meta.prev.json']:
                 (root / name).write_text(json.dumps(metadata))
             for name, hash_value in [('.download-state/lock.prev.json', 'old'), ('downloads/.cache.json', 'new')]:
@@ -149,20 +149,11 @@ class SourcePlanTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('original')
-                previous = dict(self.metadata, shared_configuration=source.identity(root))
+                previous = dict(self.metadata, shared_configuration='source-only')
                 path.write_text('changed')
-                result = source.plan({}, {}, previous, previous, configuration=source.identity(root))
+                result = source.plan({}, {}, previous, previous, configuration='source-only')
                 self.assertEqual(result['requests'], {})
 
-    def test_configuration_identity_ignores_generated_build_outputs_and_logs(self):
-        with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
-            root = Path(temporary)
-            original = source.identity(root)
-            for name in ['buildroot/lib/libz.so', 'build/8.6/bin/php', 'log/build.log', 'downloads/archive.tar.gz']:
-                path = root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('generated')
-            self.assertEqual(original, source.identity(root))
 
 
 class MatrixTests(unittest.TestCase):
