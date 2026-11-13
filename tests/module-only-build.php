@@ -34,7 +34,7 @@ $directory = trim((new Process(['mktemp', '-d', sys_get_temp_dir() . '/spp-modul
 try {
     $source = $directory . '/producer/source/php-src';
     $root = $directory . '/producer/buildroot';
-    foreach (['main/php_config.h', 'Zend/zend_config.h', 'main/php_version.h'] as $header) {
+    foreach (['main/php_config.h', 'Zend/zend_config.h', 'main/php_version.h', 'main/build-defs.h'] as $header) {
         moduleWrite($root . '/include/php/' . $header, "/* same verified PHP header */\n");
         moduleWrite($source . '/' . $header, "/* same verified PHP header */\n");
     }
@@ -51,7 +51,7 @@ all: libphp.la sapi/cli/php
 libphp.la sapi/cli/php:
 	@echo CORE_TARGET_INVOKED >&2; exit 97
 ext/xsl/php_xsl.lo: @SOURCE@/ext/xsl/php_xsl.c
-	cc -fPIC -g -c $< -o $@
+	cc -I$(top_srcdir)/main -fPIC -g -c $< -o $@
 ext/xsl/xsl.la: $(shared_objects_xsl) $(XSL_SHARED_DEPENDENCIES)
 	mkdir -p ext/xsl/.libs
 	cc -shared -o ext/xsl/.libs/xsl-zts-86.so $(shared_objects_xsl)
@@ -63,7 +63,7 @@ MAKE;
     $currentRoot = $directory . '/consumer/buildroot';
     mkdir(dirname($currentRoot), 0755, true);
     (new Process(['cp', '-a', $root, $currentRoot]))->mustRun();
-    moduleWrite($restored . '/ext/xsl/php_xsl.c', "int selected_module(void) { return 43; }\n");
+    moduleWrite($restored . '/ext/xsl/php_xsl.c', "#include <build-defs.h>\nint selected_module(void) { return 43; }\n");
     ModuleOnlyBuild::restore($restored, $currentRoot, 'xsl');
     $arguments = ModuleOnlyBuild::command($restored, 'xsl', 2);
     if (end($arguments) !== 'ext/xsl/xsl.la' || !in_array($restored . '/ext/xsl/php_xsl.c', $arguments, true)

@@ -105,6 +105,9 @@ final class ModuleOnlyBuild
                 throw new RuntimeException('Cannot restore configured module build input: ' . $relative);
             }
         }
+        if (!copy($root . '/include/php/main/build-defs.h', $source . '/main/build-defs.h')) {
+            throw new RuntimeException('Cannot restore PHP module build definitions');
+        }
         $moduleDirectory = $source . '/ext/' . $name;
         $link = $manifest['modules'][$name]['source_link'];
         if ($link !== null && !file_exists($moduleDirectory) && !is_link($moduleDirectory)) {
