@@ -677,5 +677,20 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertNotIn('date -u +%G-%V', workflow)
 
 
+
+class IndependentFormatWorkflows(unittest.TestCase):
+    def test_producer_has_no_native_package_or_publication_jobs(self):
+        producer = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
+        packaging = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())
+        self.assertNotIn('package', producer['jobs'])
+        self.assertNotIn('publish', producer['jobs'])
+        dispatch = producer['jobs']['package-formats']['steps'][0]['run']
+        self.assertIn('gh workflow run package-glibc.yml', dispatch)
+        self.assertIn('format="$format"', dispatch)
+        self.assertEqual(packaging['on' if 'on' in packaging else True]['workflow_dispatch']['inputs']['format']['options'], ['rpm', 'deb'])
+        sdk = next(step for step in packaging['jobs']['libraries']['steps'] if step.get('name') == 'Download SDK only for selected library packages')
+        self.assertEqual(sdk['if'], 'matrix.libraries-required')
+        self.assertNotIn('concurrency', packaging)
+
 if __name__ == '__main__':
     unittest.main()

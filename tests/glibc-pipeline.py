@@ -161,6 +161,11 @@ class Pipeline(unittest.TestCase):
             self.assertNotIn('error', glibc.read(snapshots / '8.5.json'))
             self.assertIn('HTTP 522', glibc.read(snapshots / '8.6.json')['error'])
             self.assertIn('HTTP 522', glibc.read(stage / 'common/deb/native-inventories/8.6.json')['error'])
+            captured.clear()
+            with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path', return_value=freezer), \
+                    patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='x86_64', PHP_VERSIONS='8.5,8.6'):
+                glibc.capture_native_inventories()
+            self.assertEqual(captured, [('rpm', '8.6'), ('deb', '8.6')])
 
     def test_abi_consumer_scope_uses_actual_stream_inventory_and_preserves_explicit_requests(self):
         plan = {'type': 'apk', 'php_requests': {'8.6': {'full': False, 'packages': ['cli', 'mysqlnd_parsec', 'swoole'],
