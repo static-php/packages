@@ -172,6 +172,7 @@ def record_publication(source, kind, target, stream):
         value['baseline'].pop('metadata_scope', None)
     planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
     freezer = runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+    compare = lru_cache(maxsize=None)(planner['native_compare'])
     freezer['published_inventory'].__globals__['fetch'] = lru_cache(maxsize=None)(freezer['fetch'])
     for selected in STREAMS if kind == 'rpm' else (stream,):
         args = SimpleNamespace(type=kind, arch=arch, php=selected, el='el8', base_url=None)
@@ -181,7 +182,7 @@ def record_publication(source, kind, target, stream):
     for archive_path in sorted((Path('dist') / kind).glob('*.' + kind)):
         package_name, version, package_arch = planner['archive_identity'](archive_path, kind)
         package = next((item for item in inventory if item['name'] == package_name
-                        and planner['native_compare'](kind, (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version'], version) == 0), None)
+                        and compare(kind, (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version'], version) == 0), None)
         if package is None:
             raise RuntimeError('Published package missing from native repository index: ' + package_name)
         checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
@@ -224,7 +225,7 @@ def record_publication(source, kind, target, stream):
         latest = {}
         version_of = lambda item: (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version']
         for item in consumers:
-            if item['name'] not in latest or planner['native_compare'](kind, version_of(item), version_of(latest[item['name']])) > 0:
+            if item['name'] not in latest or version_of(item) != version_of(latest[item['name']]) and compare(kind, version_of(item), version_of(latest[item['name']])) > 0:
                 latest[item['name']] = item
         baseline.setdefault('consumers', {})[selected] = sorted(latest)
         baseline.setdefault('consumer_versions', {})[selected] = {name: version_of(item) for name, item in latest.items()}
@@ -240,13 +241,13 @@ def record_publication(source, kind, target, stream):
     for identifier, entry in baseline['libraries'].items():
         if not entry.get('download_url'):
             match = next((item for item in inventory if item['name'] == 'php-zts-lib-' + identifier
-                          and planner['native_compare'](kind, item['version'], entry.get('published_version', '')) == 0), None)
+                          and compare(kind, item['version'], entry.get('published_version', '')) == 0), None)
             if match:
                 entry['download_url'] = match['publication_url']
     layout = baseline.get('runtime_layout')
     if layout and not layout.get('download_url'):
         match = next((item for item in inventory if item['name'] == 'php-zts-runtime-layout'
-                      and planner['native_compare'](kind, item['version'], layout['package_version']) == 0), None)
+                      and compare(kind, item['version'], layout['package_version']) == 0), None)
         if match:
             layout['download_url'] = match['publication_url']
     value['publication_run_id'] = os.environ.get('GITHUB_RUN_ID')

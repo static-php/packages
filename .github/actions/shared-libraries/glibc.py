@@ -21,6 +21,7 @@ FORMATS = ('rpm', 'deb')
 STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 
 
+@lru_cache(maxsize=1)
 def repository_state():
     spec = importlib.util.spec_from_file_location('repository_state', Path(__file__).with_name('repository-state.py'))
     module = importlib.util.module_from_spec(spec)

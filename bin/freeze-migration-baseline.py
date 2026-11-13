@@ -5,6 +5,7 @@ import argparse
 import ast
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import gzip
 import hashlib
 import http.client
@@ -314,10 +315,14 @@ def published_inventory(args):
     return base, inventory, metadata, keys
 
 
+@lru_cache(maxsize=1)
+def repository_state():
+    return runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/glibc.py'))['repository_state']()
+
+
 def snapshot_inventory(args, refresh=False):
     if not refresh:
-        state = runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/glibc.py'))['repository_state']()
-        cached = state.snapshot(args.type, args.arch, args.php)
+        cached = repository_state().snapshot(args.type, args.arch, args.php)
         if cached is not None:
             return cached
     base, inventory, metadata, keys = published_inventory(args)
