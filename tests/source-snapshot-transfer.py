@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +19,31 @@ spec.loader.exec_module(snapshot)
 
 
 class SourceTransfer(unittest.TestCase):
+    def test_recorded_source_metadata_uses_the_action_token_without_a_gh_binary(self):
+        spec = importlib.util.spec_from_file_location('source_artifact', ROOT / '.github/actions/shared-libraries/artifact-json.py')
+        artifact = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(artifact)
+        records = {'.cache.json': {'ext-fixture': {'source': {'hash': 'source-hash'}}},
+                   '.spc-meta.json': {'php_versions': {'8.6': '8.6.0RC7'}}}
+        compressed = io.BytesIO()
+        with tarfile.open(fileobj=compressed, mode='w:gz') as bundle:
+            for name, value in records.items():
+                data = json.dumps(value).encode()
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                bundle.addfile(entry, io.BytesIO(data))
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, mode='w') as archive:
+            archive.writestr('downloads-inputs.tar.gz', compressed.getvalue())
+        responses = [SimpleNamespace(status_code=200, json=lambda: {'artifacts': [
+            {'id': 123, 'name': 'downloads-inputs', 'expired': False}]}),
+            SimpleNamespace(status_code=302, headers={'Location': 'https://artifact.invalid/inputs'})]
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'fixture-token', 'GH_TOKEN': ''}), \
+                patch.object(artifact, 'request', side_effect=responses), \
+                patch.object(artifact, 'RemoteZip', return_value=io.BytesIO(content.getvalue())), \
+                patch.object(artifact.subprocess, 'check_output', side_effect=AssertionError('gh is unavailable')):
+            self.assertEqual(artifact.source_metadata('42'), records)
+
     def test_inputs_keep_verified_php_and_package_assets_without_library_sources(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

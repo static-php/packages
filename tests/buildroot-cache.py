@@ -210,6 +210,17 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(result['seed-hit'], 'false')
         self.assertFalse(self.path.exists())
 
+    def test_selected_php_sources_can_restore_the_current_slot_for_source_verification(self):
+        key = 'php-payload-glibc-aarch64-84-' + 'a' * 32
+        self.store(key=key, seed='old-php-inputs')
+        self.path.unlink()
+        selected = cache.ReleaseCache(self.backend, key.replace('a' * 32, 'b' * 32), self.path,
+                                      seed_key='new-php-inputs', reuse_current=True)
+        self.assertEqual(selected.restore()['seed-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'compiled library payload')
+        with self.assertRaisesRegex(cache.CacheError, 'No exact'):
+            selected.restore(required=True)
+
     def test_library_seed_cannot_cross_architectures_or_producers(self):
         self.store()
         self.path.unlink()

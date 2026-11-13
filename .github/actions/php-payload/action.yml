@@ -22,6 +22,7 @@ runs:
                 key: ${{ steps.payload-cache-key.outputs.cache-key }}
                 seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
                 path: php-payload-cache.tar.zst
+                reuse-current-slot: ${{ env.COMPILE_PACKAGES != '' && env.ABI_CORE_REBUILD != 'true' }}
         -   name: Build and seal common PHP payload
             shell: bash
             run: bash .github/actions/shared-libraries/run.sh glibc-payload

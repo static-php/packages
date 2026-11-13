@@ -21,7 +21,7 @@ STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 
 
 def run(arguments, **kwargs):
-    subprocess.run([str(value) for value in arguments], check=True, **kwargs)
+    return subprocess.run([str(value) for value in arguments], check=True, **kwargs)
 
 
 def read(path):
@@ -586,27 +586,38 @@ def payload():
                 args += ['--package-selection', os.environ['PACKAGES']]
             allow_all_components = compile_requested and not compile_packages
             if compile_requested and compile_packages:
-                args += ['--compile-packages', compile_packages]
+                args += ['--compile-packages', compile_packages, '--reuse-core-sources']
+                if os.environ.get('REQUESTED_PACKAGES') == '':
+                    args += ['--allow-all-components']
             elif allow_all_components:
                 args += ['--allow-all-components']
             if compile_requested and os.environ.get('ABI_REBUILD_LIBRARIES'):
                 args += ['--abi-rebuild-libraries', os.environ['ABI_REBUILD_LIBRARIES']]
-            run(args)
-            seed = read(ROOT / 'buildroot/consumer-cache-seed.json')
-            compile_packages = ','.join(seed['rebuild_packages'])
-            compile_requested = bool(compile_packages)
-            compiled_source = seed['compiled_source_run_id']
-            restored = True
-            if not seed['changed_components'] and not seed.get('runtime_rebuild_packages') and not seed.get('abi_rebuild_required') and (not compile_requested or seed.get('cache_exact') or not compile_packages):
-                if root.exists():
-                    raise RuntimeError('Package-only restore would replace an existing PHP output directory')
-                root.parent.mkdir(parents=True, exist_ok=True)
-                (ROOT / 'buildroot').rename(root)
+            result = run(args, stdout=subprocess.PIPE, text=True)
+            print(result.stdout, end='', flush=True)
+            restored_result = json.loads(result.stdout.strip().splitlines()[-1])
+            if restored_result.get('core_source_changed'):
                 saved_sdk.rename(ROOT / 'buildroot')
                 sdk_moved = False
-                compile_requested = False
+                compile_packages = ''
+            else:
+                seed = read(ROOT / 'buildroot/consumer-cache-seed.json')
+                compile_packages = ','.join(seed['rebuild_packages'])
+                compile_requested = bool(compile_packages)
+                compiled_source = seed['compiled_source_run_id']
+                restored = True
+                if not seed['changed_components'] and not seed.get('runtime_rebuild_packages') and not seed.get('abi_rebuild_required') and (not compile_requested or seed.get('cache_exact') or not compile_packages):
+                    if root.exists():
+                        raise RuntimeError('Package-only restore would replace an existing PHP output directory')
+                    root.parent.mkdir(parents=True, exist_ok=True)
+                    (ROOT / 'buildroot').rename(root)
+                    saved_sdk.rename(ROOT / 'buildroot')
+                    sdk_moved = False
+                    compile_requested = False
         elif not compile_requested:
             raise RuntimeError('Package-only change requires its sealed PHP cache; no compilation was requested')
+        elif compile_packages:
+            raise RuntimeError('Selected PHP source update requires its sealed core cache; refusing a full rebuild')
         else:
             compile_packages = ''
         if compile_requested:

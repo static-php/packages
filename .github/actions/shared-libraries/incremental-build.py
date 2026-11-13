@@ -482,7 +482,7 @@ def main():
         sources = read(root / "downloads/.cache.json")
         request = read(args.request or root / "downloads/build-plan.json", {})
         state = read(buildroot / STATE)
-        if state is None and os.environ.get("MODE") == "incremental":
+        if os.environ.get("MODE") == "incremental" and (not isinstance(state, dict) or state.get("schema") != 1):
             raise RuntimeError("No recorded library SDK; refusing a full rebuild for an incremental request")
         runtime = read(args.compiler_runtime_scan) if args.compiler_runtime_scan else None
         plan = selection(inventory, sources, manifest, state, args.compatibility,

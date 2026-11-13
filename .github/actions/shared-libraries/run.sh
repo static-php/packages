@@ -19,7 +19,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -v "$HOME/.cache/composer":/composer-cache \
         -e IN_BUILDER=true -e COMPOSER_CACHE_DIR=/composer-cache \
         -e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)" \
-        -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP -e PUBLISH \
+        -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e REQUESTED_PACKAGES -e PHPV -e ITERATION -e BUMP -e PUBLISH \
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \

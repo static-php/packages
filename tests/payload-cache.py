@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,13 +35,15 @@ class PayloadCache(unittest.TestCase):
         (self.root / 'bin/build-payload').symlink_to(ROOT / 'bin/build-payload')
         self.request = {'payload_core_inputs': {'8.6': 'a' * 64}, 'payload_component_inputs': {'8.6': {'imagick': 'old'}}}
         (self.root / 'downloads/.spc-meta.json').write_text(json.dumps({'php_versions': {'8.6': '8.6.0RC4'}}))
+        (self.root / 'downloads/php-8.6.0RC4.tar.xz').write_bytes(b'pinned PHP core source')
         template = self.root / 'config/templates/craft.yml.twig'
         template.parent.mkdir(parents=True)
         template.write_text("{% set base_sapi_str = 'cli,embed' %}\n{% set base_shared_str = 'imagick' %}\n# -O2\n")
         self.save_request()
         self.compiler = self.root / 'compiler'
         self.compiler.write_text('unchanged ELF8 compiler')
-        self.manifest = {'schema': 1, 'linkage': 'shared', 'architecture': 'x86_64', 'libc': 'glibc',
+        self.architecture = {'arm64': 'aarch64', 'amd64': 'x86_64'}.get(platform.machine(), platform.machine())
+        self.manifest = {'schema': 1, 'linkage': 'shared', 'architecture': self.architecture, 'libc': 'glibc',
                          'runtime_libdir': '/usr/lib/php-zts/lib',
                          'libraries': {'fixture': {'version': '1', 'source_hash': 'old',
                                       'files': ['lib/libfixture.so.1'],
@@ -104,6 +107,55 @@ class PayloadCache(unittest.TestCase):
         template.write_text(template.read_text().replace('-O2', '-O3'))
         self.assertNotEqual(self.state()['seed-key'], previous['seed-key'])
 
+    def test_selected_source_update_reuses_core_across_builder_changes(self):
+        old = self.root / 'old'
+        self.fixture(old, 1, php=True)
+        state = self.state()
+        archive = self.root / 'old.tar.zst'
+        cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler,
+                     key=state['key'], seed_key=state['seed-key'], source_run_id='1234', output=archive))
+        sdk = self.root / 'sdk'
+        self.fixture(sdk, 2)
+        self.compiler.write_text('updated compiler and system headers')
+        template = self.root / 'config/templates/craft.yml.twig'
+        template.write_text(template.read_text().replace('-O2', '-O3'))
+        self.request['payload_component_inputs']['8.6']['imagick'] = 'new-source'
+        self.save_request()
+        current = self.state()
+        target = self.root / 'restored'
+        args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=target,
+                                  compatibility=self.compiler, key=current['key'], seed_key=current['seed-key'],
+                                  archive=archive, compile_packages='imagick', reuse_core_sources=True)
+        cache.restore(args)
+        self.assertEqual((target / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
+        self.assertEqual(cache.read(target / 'consumer-cache-seed.json')['rebuild_packages'], ['imagick'])
+        self.assertEqual((target / 'lib/libfixture.so.1').read_bytes(), (sdk / 'lib/libfixture.so.1').read_bytes())
+        current_sources = cache.read(self.root / 'downloads/.cache.json')
+        current_sources['ext-imagick']['source'].update(hash='old', version='metadata-only-update')
+        cache.write(self.root / 'downloads/.cache.json', current_sources)
+        current = self.state()
+        args.key, args.seed_key, args.payload = current['key'], current['seed-key'], self.root / 'metadata-only'
+        cache.restore(args)
+        self.assertEqual(cache.read(args.payload / 'consumer-cache-seed.json')['rebuild_packages'], [])
+        self.assertEqual((args.payload / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
+        (self.root / 'downloads/php-8.6.0RC4.tar.xz').write_bytes(b'changed PHP core source')
+        current = self.state()
+        args.key, args.seed_key, args.payload = current['key'], current['seed-key'], self.root / 'changed-core'
+        cache.restore(args)
+        self.assertFalse(args.payload.exists())
+        self.assertEqual((sdk / 'lib/libfixture.so.1').read_bytes(), (target / 'lib/libfixture.so.1').read_bytes())
+
+    def test_legacy_core_sources_require_the_recorded_source_run(self):
+        current = self.state()['inputs']['core_sources']
+        manifest = {'inputs': {}, 'source_run_id': '1234', 'build_payload': {'source_version': '8.6.0RC4'}}
+        cache.write(self.root / 'stage/php-core-sources-1234.json', {
+            '.cache.json': cache.read(self.root / 'downloads/.cache.json'),
+            '.spc-meta.json': {'php_versions': {'8.6': '8.6.0RC4'}, 'php_source_hashes': {'8.6': current['php_source']}}})
+        self.assertEqual(cache.recorded_core_sources(self.root, manifest, '8.6'), current)
+        manifest['build_payload']['source_version'] = '8.6.0RC5'
+        with self.assertRaisesRegex(RuntimeError, 'does not identify the cached core'):
+            cache.recorded_core_sources(self.root, manifest, '8.6')
+
     def test_streamed_archive_rejects_corruption_and_inventory_changes(self):
         content = b'cached executable'
         manifest = {'files': {'bin/php': {'sha256': hashlib.sha256(content).hexdigest(), 'mode': 0o755}}}
@@ -155,7 +207,7 @@ class PayloadCache(unittest.TestCase):
             header = directory / 'include/php/Zend/zend_modules.h'
             header.parent.mkdir(parents=True)
             header.write_text('#define ZEND_MODULE_API_NO 20260924\n')
-        for command, extras in [('record', ['--config', str(config), '--php-version', '8.6.0RC4', '--arch', 'x86_64']), ('seal', [])]:
+        for command, extras in [('record', ['--config', str(config), '--php-version', '8.6.0RC4', '--arch', self.architecture]), ('seal', [])]:
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(directory), *extras], check=True, stdout=subprocess.DEVNULL)
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
@@ -171,7 +223,7 @@ class PayloadCache(unittest.TestCase):
         shutil.copy2(payload / 'modules/imagick-zts-86.so', payload / 'modules/unselected-zts-86.so')
         (payload / 'lib/unneeded.a').write_bytes(b'compiler archive')
         for command in ['record', 'seal']:
-            extra = ['--config', self.root / 'craft.yml', '--php-version', '8.6.0RC4', '--arch', 'x86_64'] if command == 'record' else []
+            extra = ['--config', self.root / 'craft.yml', '--php-version', '8.6.0RC4', '--arch', self.architecture] if command == 'record' else []
             subprocess.run(['php', ROOT / 'bin/build-payload', command, '--root', payload, *extra], check=True, stdout=subprocess.DEVNULL)
         original = (payload / 'build-payload.json').read_bytes()
         cache.write(self.root / 'stage/payload-provenance.json', {'source_run_id': '1234'})
@@ -254,7 +306,7 @@ class PayloadCache(unittest.TestCase):
         config = self.root / 'craft.yml'
         config.write_text(config.read_text().replace('shared-extensions: [imagick]', 'shared-extensions: [' + ','.join(modules) + ']'))
         for command in ['record', 'seal']:
-            extra = ['--config', config, '--php-version', '8.6.0RC4', '--arch', 'x86_64'] if command == 'record' else []
+            extra = ['--config', config, '--php-version', '8.6.0RC4', '--arch', self.architecture] if command == 'record' else []
             subprocess.run(['php', ROOT / 'bin/build-payload', command, '--root', payload, *extra], check=True, stdout=subprocess.DEVNULL)
         original = cache.read(payload / 'build-payload.json')
         selected = {'mysqlnd_parsec', 'pdo_pgsql', 'swoole'}
@@ -374,7 +426,7 @@ class PayloadCache(unittest.TestCase):
         source.write_text('#include <stdexcept>\nextern "C" int addon(int v) { if (v) throw std::runtime_error("test"); return 0; }\n')
         subprocess.run(['g++', '-shared', '-fPIC', '-g', str(source), '-o', str(module)], check=True)
         config = self.root / 'craft.yml'
-        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', 'x86_64']), ('seal', [])]:
+        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', self.architecture]), ('seal', [])]:
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(old), *extras], check=True, stdout=subprocess.DEVNULL)
         state = self.state()
         archive = self.root / 'cache.tar.zst'
@@ -406,7 +458,7 @@ class PayloadCache(unittest.TestCase):
         source.write_text('extern int exported_function(void); int addon(void) { return exported_function(); }\n')
         subprocess.run(['gcc', '-shared', '-fPIC', '-g', str(source), '-L' + str(old / 'lib'),
                         '-l:libfixture.so.1', '-o', str(old / 'modules/imagick-zts-86.so')], check=True)
-        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', 'x86_64']), ('seal', [])]:
+        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', self.architecture]), ('seal', [])]:
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(old), *extras], check=True, stdout=subprocess.DEVNULL)
         state = self.state()
         archive = self.root / 'cache.tar.zst'
@@ -445,7 +497,7 @@ class PayloadCache(unittest.TestCase):
         subprocess.run(['gcc', '-g', str(source), '-L' + str(old / 'lib'), '-l:libfixture.so.1',
                         '-Wl,-rpath,' + str(old / 'lib'), '-o', str(old / 'bin/php')], check=True)
         self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.1'
-        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', 'x86_64']), ('seal', [])]:
+        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', self.architecture]), ('seal', [])]:
             subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(old), *extras], check=True, stdout=subprocess.DEVNULL)
         cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
                                         seed_key=state['seed-key'], source_run_id='1234', output=archive))

@@ -177,7 +177,72 @@ def source_inputs(root, stream):
     components = request['payload_component_inputs'][stream]
     if not re.fullmatch(r'[a-f0-9]{64}', core) or not isinstance(components, dict):
         raise RuntimeError('Invalid recorded PHP source inputs')
-    return {'core': core, 'components': components}
+    return {'core': core, 'components': components,
+            'core_sources': core_sources(module, root, sources, metadata, stream),
+            'component_sources': component_sources(module, sources, metadata, stream, components)}
+
+
+def core_sources(module, root, sources, metadata, stream):
+    compiled = module.core_components(root)
+    artifacts = module.stream_artifacts(sources, metadata, stream)
+    return {'php': metadata.get('php_versions', {}).get(stream),
+            'php_source': metadata.get('php_source_hashes', {}).get(stream),
+            'artifacts': {name: (value.get('source') or {}).get('hash') for name, value in artifacts.items()
+                          if name.replace('_', '-') in compiled}}
+
+
+def component_sources(module, sources, metadata, stream, names):
+    artifacts = module.stream_artifacts(sources, metadata, stream)
+    return {name: (artifacts.get(name, {}).get('source') or {}).get('hash')
+            for name in names if name not in ('go', 'go-xcaddy')}
+
+
+def recorded_source_metadata(root, run_id):
+    run_id = str(run_id)
+    if not run_id.isdigit():
+        raise RuntimeError('Cached PHP core has no recorded source run')
+    path = root / 'stage' / ('php-core-sources-' + run_id + '.json')
+    if path.is_file():
+        records = read(path)
+    else:
+        spec = importlib.util.spec_from_file_location('retained_source_artifact', Path(__file__).with_name('artifact-json.py'))
+        artifact = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(artifact)
+        records = artifact.source_metadata(run_id)
+        write(path, records)
+    return records
+
+
+def recorded_core_sources(root, manifest, stream):
+    existing = manifest['inputs'].get('core_sources')
+    if existing is not None:
+        return existing
+    run_id = manifest.get('compiled_source_runs', {}).get('core', manifest['source_run_id'])
+    records = recorded_source_metadata(root, run_id)
+    spec = importlib.util.spec_from_file_location('retained_source_plan', Path(__file__).with_name('source-plan.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    result = core_sources(module, root, records['.cache.json'], records['.spc-meta.json'], stream)
+    if result['php'] != manifest['build_payload']['source_version'] or not result['php_source']:
+        raise RuntimeError('Recorded PHP source snapshot does not identify the cached core')
+    return result
+
+
+def recorded_component_sources(root, manifest, stream):
+    existing = manifest['inputs'].get('component_sources')
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location('retained_component_sources', Path(__file__).with_name('source-plan.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    runs = manifest.get('compiled_source_runs', {}).get('components', {})
+    result = {}
+    for name in manifest['inputs']['components']:
+        if name in ('go', 'go-xcaddy'):
+            continue
+        records = recorded_source_metadata(root, runs.get(name, manifest['source_run_id']))
+        result.update(component_sources(module, records['.cache.json'], records['.spc-meta.json'], stream, [name]))
+    return result
 
 
 def keys(root, stream, manifest, compiler, runtime=None):
@@ -353,10 +418,23 @@ def restore_payload(args):
         staged = Path(temporary) / 'files'
         staged.mkdir()
         manifest = extract(args.archive, staged)
-        if manifest.get('schema') != 1 or manifest.get('php_stream') != args.stream or manifest.get('seed_key') != args.seed_key:
+        source_reuse = getattr(args, 'reuse_core_sources', False)
+        if (manifest.get('schema') != 1 or manifest.get('php_stream') != args.stream
+                or not source_reuse and manifest.get('seed_key') != args.seed_key):
             raise RuntimeError('PHP cache core/compiler/stream does not match the current request')
         if manifest.get('environment') != state['environment']:
             raise RuntimeError('Cached PHP payload is incompatible with the current SDK environment')
+        same_core = manifest['inputs']['core'] == state['inputs']['core']
+        if source_reuse and not same_core:
+            previous = recorded_core_sources(args.root, manifest, args.stream)
+            current = state['inputs']['core_sources']
+            if not current.get('php_source'):
+                raise RuntimeError('Current PHP core has no verified source archive identity')
+            same_core = previous == current
+            if not same_core:
+                print(json.dumps({'restored': False, 'core_source_changed': True,
+                                  'previous_sources': previous, 'current_sources': current}))
+                return
         incompatible = {name for name, entry in manifest['library_abi'].items()
                         if not compatible({name: entry}, state['library_abi'])}
         allowed_abi = {name.strip() for name in getattr(args, 'abi_rebuild_libraries', '').split(',') if name.strip()}
@@ -371,7 +449,10 @@ def restore_payload(args):
         scanned = {item['file'] for value in previous_runtime.values() for item in value.get('files', [])}
         expected = {name for name in manifest['build_payload']['files']
                     if php_file(name) and name in manifest['files'] and not (staged / name).is_symlink()}
-        if (manifest.get('compiler_runtime') == state['compiler_runtime'] and scanned == expected
+        if source_reuse:
+            scan = {'consumers': previous_runtime}
+            print('Preserved recorded compiler runtime analysis for reused PHP sources', flush=True)
+        elif (manifest.get('compiler_runtime') == state['compiler_runtime'] and scanned == expected
                 and previous_runtime and not any(value.get('embedded_cxx_runtime') for value in previous_runtime.values())):
             scan = {'consumers': previous_runtime}
             print('Reused compiler runtime analysis for verified, unchanged PHP cache bytes', flush=True)
@@ -384,10 +465,13 @@ def restore_payload(args):
         if 'core' in runtime_rebuilds:
             raise RuntimeError('Cached PHP core requires a full rebuild for changed compiler runtime inputs')
         packages.update(runtime_rebuilds)
-        changes = changed_components(manifest['inputs']['components'], state['inputs']['components'])
+        if source_reuse:
+            changes = changed_components(recorded_component_sources(args.root, manifest, args.stream), state['inputs']['component_sources'])
+        else:
+            changes = changed_components(manifest['inputs']['components'], state['inputs']['components'])
         if getattr(args, 'allow_all_components', False):
             packages.update(changes)
-        if manifest['inputs']['core'] != state['inputs']['core'] or changes - packages:
+        if not same_core or changes - packages:
             raise RuntimeError('Cached PHP sources differ outside the requested compile packages')
         cache_exact = manifest.get('key') == args.key
         allowed_packages = set(packages)
@@ -632,6 +716,7 @@ def main():
     restore_parser.add_argument('--archive', type=Path, required=True)
     restore_parser.add_argument('--sdk', type=Path, required=True)
     restore_parser.add_argument('--compile-packages', default='')
+    restore_parser.add_argument('--reuse-core-sources', action='store_true', help='Verify the recorded PHP source snapshot for a selected extension update')
     restore_parser.add_argument('--package-selection', default='', help='Restore only unchanged selected packages and their native test dependencies')
     restore_parser.add_argument('--abi-rebuild-libraries', default='', help='Permit changed SDK ABIs only when every bound PHP consumer is selected for rebuilding')
     restore_parser.add_argument('--allow-all-components', action='store_true', help='Derive affected shared targets from a verified unchanged core seed')
