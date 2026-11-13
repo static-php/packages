@@ -277,6 +277,7 @@ jobs:
                     python3 .github/actions/shared-libraries/workflow.py stage-libraries --source library-stage \
                         --destination "dist/$TYPE" --type "$TYPE" --php-stream "$PHPV" --manifest-output "stage/$TYPE/shared-libraries.json"
             -   name: Prepare native baseline comparison tools
+                if: matrix.type == 'rpm'
                 run: |
                     sudo apt-get update
                     sudo apt-get install -y python3-rpm rpm2cpio zstd

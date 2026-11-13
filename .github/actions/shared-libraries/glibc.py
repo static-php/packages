@@ -193,17 +193,17 @@ def shared_sdk_packaging():
     return 'openssl' not in closure
 
 
-def package_libraries(kind):
+def package_libraries(kind, direct=False):
     directory = format_stage(kind)
     plan = read(directory / 'shared-library-plan.json')
     if (os.environ.get('PUBLISH') == 'false' and os.environ.get('PACKAGES')
             and not read(directory / 'shared-library-plan.json')['libraries']):
         (directory / 'libraries').mkdir(exist_ok=True)
         return
-    selected_sdk = format_sdk(kind)
+    selected_sdk = ROOT / 'buildroot' if direct else format_sdk(kind)
     shared = kind != 'apk' and selected_sdk == ROOT / 'buildroot'
     projected = None
-    if (os.environ.get('PUBLISH') == 'false' and plan['libraries']
+    if (not shared and os.environ.get('PUBLISH') == 'false' and plan['libraries']
             and not any(request.get('full') or request.get('packages') for request in plan['php_requests'].values())
             and len(plan['libraries']) < len(read(selected_sdk / 'shared-libraries.json')['libraries'])):
         destination = STAGE / ('package-sdk-' + kind)
@@ -683,11 +683,16 @@ def format_libraries():
     target = read(STAGE / 'target.json')
     plan = read(directory / 'shared-library-plan.json')
     if plan.get('libraries'):
-        selected_sdk = STAGE / ('sdk-' + kind)
-        (ROOT / 'buildroot').rename(selected_sdk)
-        if 'openssl' in read(selected_sdk / 'shared-libraries.json')['libraries']:
+        graph = runpy.run_path(str(Path(__file__).with_name('payload-cache.py')))
+        manifest = read(ROOT / 'buildroot/shared-libraries.json')
+        closure = graph['dependency_closure'](plan['libraries'], graph['library_graph'](manifest))
+        if 'openssl' not in closure:
+            package_libraries(kind, direct=True)
+        else:
+            selected_sdk = STAGE / ('sdk-' + kind)
+            (ROOT / 'buildroot').rename(selected_sdk)
             run(variants('apply', selected_sdk) + ['--variants', selected_sdk / 'openssl-variants', '--type', kind])
-        package_libraries(kind)
+            package_libraries(kind)
     else:
         (directory / 'libraries').mkdir(exist_ok=True)
     write(directory / 'target.json', target)

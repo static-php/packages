@@ -387,6 +387,24 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(packaging.n_waiting, 0)
                 self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), 1 if kind == 'apk' else 0)
 
+    def test_format_library_selection_without_openssl_uses_common_sdk_in_place(self):
+        for kind in ('rpm', 'deb'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                stage = root / 'stage'
+                glibc.write(stage / 'target.json', {'source_run_id': '42', 'image': 'producer'})
+                glibc.write(stage / kind / 'shared-library-plan.json', {'libraries': ['zlib']})
+                glibc.write(root / 'buildroot/shared-libraries.json', {'libraries': {'zlib': {'elf': {}}}})
+                with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
+                        patch.object(glibc, 'package_libraries') as package, patch.object(glibc, 'run') as run, \
+                        patch.dict(os.environ, TYPE=kind):
+                    glibc.format_libraries()
+                package.assert_called_once_with(kind, direct=True)
+                self.assertTrue((root / 'buildroot').is_dir())
+                self.assertFalse((stage / ('sdk-' + kind)).exists())
+                self.assertEqual(len(run.call_args_list), 1)
+                self.assertIn('receipt', run.call_args.args[0])
+
     def test_php_packaging_preserves_prebuilt_libraries_with_a_subset(self):
         for kind in ('rpm', 'deb'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
