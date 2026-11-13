@@ -126,13 +126,13 @@ class SDKImportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'does not authorize'):
             imp.validate(self.sdk, self.state, 'unproven-new-compiler')
 
-    def test_only_static_cpp_is_selected_under_new_compatibility(self):
+    def test_runtime_migration_does_not_select_unchanged_sources(self):
         receipt = self.approve()
         plan = inc.selection(self.inventory, self.sources, self.manifest, self.state, receipt['deployment_compatibility'],
                              deployment_import=receipt, compiler_runtime=self.runtime)
         self.assertFalse(plan['full'])
-        self.assertEqual(plan['selected'], ['cpp'])
-        self.assertEqual(plan['reused'], ['base'])
+        self.assertEqual(plan['selected'], [])
+        self.assertEqual(plan['reused'], ['base', 'cpp'])
 
     def test_completed_cpp_refresh_preserves_ordinary_record(self):
         receipt = self.approve()
@@ -154,15 +154,15 @@ class SDKImportTests(unittest.TestCase):
         self.assertEqual(next_state['deployment_compatibility'], receipt['deployment_compatibility'])
         imp.validate(self.sdk, next_state, receipt['deployment_compatibility'])
 
-    def test_new_cpp_headers_select_only_cpp_even_during_legacy_backfill(self):
+    def test_new_cpp_headers_do_not_select_unchanged_sources(self):
         runtime = copy.deepcopy(self.runtime)
         runtime['must_rebuild'] = []
         runtime['libraries']['cpp']['embedded_cxx_runtime'] = False
         receipt = self.approve(runtime_scan=runtime)
         runtime['libraries']['cpp']['fingerprint'] = 'new-cpp-headers'
         plan = inc.selection(self.inventory, self.sources, self.manifest, self.state, receipt['deployment_compatibility'], deployment_import=receipt, compiler_runtime=runtime)
-        self.assertEqual(plan['selected'], ['cpp'])
-        self.assertEqual(plan['reused'], ['base'])
+        self.assertEqual(plan['selected'], [])
+        self.assertEqual(plan['reused'], ['base', 'cpp'])
 
     def test_completed_refresh_uses_attested_actual_source_snapshot(self):
         self.state['libraries']['cpp']['sources']['cpp']['source']['frozen_tree_deviation'] = {'tracked_tree_clean': False}

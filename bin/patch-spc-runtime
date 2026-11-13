@@ -1,0 +1,28 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$path = __DIR__ . '/../vendor/crazywhalecc/static-php-cli/src/StaticPHP/Util/SharedLibraryManifest.php';
+$source = file_get_contents($path);
+$method = <<<'PHP'
+    private function compilerRuntimes(bool $allowUpdate = true): void
+    {
+PHP;
+$replacement = $method . <<<'PHP'
+
+        if (isset($this->manifest['libraries']['gcc-runtime'])) {
+            $visited = [];
+            $this->verifyRecord('gcc-runtime', $visited);
+            return;
+        }
+PHP;
+if (str_contains($source, $replacement)) {
+    exit(0);
+}
+if (substr_count($source, $method) !== 1) {
+    throw new RuntimeException('Cannot locate the installed SPC compiler runtime method');
+}
+if (file_put_contents($path, str_replace($method, $replacement, $source)) === false) {
+    throw new RuntimeException('Cannot patch SPC to retain the recorded SDK runtime');
+}

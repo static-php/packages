@@ -197,7 +197,7 @@ class IncrementalLibraryTests(unittest.TestCase):
         inventory = copy.deepcopy(self.inventory)
         inventory["libraries"]["base"]["recipe_hash"] = "new-base-recipe"
         inventory["libraries"]["other"]["recipe_hash"] = "new-other-recipe"
-        self.assertEqual(self.plan(inventory=inventory, libraries="base")["selected"], ["base"])
+        self.assertEqual(self.plan(inventory=inventory, libraries="base")["selected"], [])
 
     def test_manual_unchanged_scope_never_invokes_builder_or_rewrites_sdk(self):
         plan = self.plan(libraries="base,consumer")
@@ -221,8 +221,12 @@ class IncrementalLibraryTests(unittest.TestCase):
         self.assertFalse(leftover.exists())
         self.assertEqual((self.sdk / 'lib/libbase.so.1').read_bytes(), b'compiled base')
 
-    def test_manual_scope_repairs_invalid_dependency_and_pending_consumer(self):
-        self.assertEqual(self.plan(libraries="consumer", invalid=["base"])["selected"], ["base"])
+    def test_damaged_unchanged_library_fails_without_scheduling_compilation(self):
+        with self.assertRaisesRegex(RuntimeError, "checksum mismatch: base"):
+            self.plan(libraries="consumer", invalid=["base"])
+        self.assertEqual(self.plan(sources=self.changed("base"), invalid=["base"])["selected"], ["base"])
+
+    def test_pending_consumer_is_retained(self):
         manifest = dict(self.manifest, pending_rebuilds={"consumer": {"libbase.so.1": "base"}})
         self.assertEqual(self.plan(manifest=manifest, libraries="other")["selected"], ["consumer"])
 
@@ -231,7 +235,7 @@ class IncrementalLibraryTests(unittest.TestCase):
         inventory["libraries"]["new"] = {"artifact": "new", "depends": [], "inputs": ["new"], "recipe_hash": "new-recipe"}
         inventory["libraries"]["consumer"]["depends"].append("new")
         plan = self.plan(inventory=inventory, libraries="consumer")
-        self.assertEqual(plan["selected"], ["consumer", "new"])
+        self.assertEqual(plan["selected"], ["new"])
 
     def test_missing_required_library_catches_up_independently_of_latest_snapshot_delta(self):
         inventory = copy.deepcopy(self.inventory)
@@ -247,10 +251,30 @@ class IncrementalLibraryTests(unittest.TestCase):
         manual = self.plan(inventory=inventory, sources=sources, libraries="base", changed_artifacts=[])
         self.assertEqual(manual["selected"], [])
 
-    def test_recipe_change_selects_only_its_library(self):
+    def test_recipe_changes_do_not_compile_unchanged_sources(self):
         inventory = copy.deepcopy(self.inventory)
         inventory["libraries"]["base"]["recipe_hash"] = "updated-recipe"
-        self.assertEqual(self.plan(inventory=inventory)["selected"], ["base"])
+        self.assertEqual(self.plan(inventory=inventory)["selected"], [])
+
+    def test_build_tool_and_source_metadata_changes_do_not_compile_libraries(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory["libraries"]["base"]["inputs"].append("cmake")
+        current = copy.deepcopy(self.sources)
+        current["cmake"] = {"source": {"hash": "new-build-tool"}}
+        current["base"]["source"].update(version="renamed-version", filename="renamed-archive.tar.gz",
+                                          config={"type": "url", "url": "https://mirror.invalid/base.tar.gz"})
+        self.assertEqual(self.plan(inventory=inventory, sources=current)["selected"], [])
+
+    def test_compiler_image_flags_and_headers_do_not_select_libraries(self):
+        runtime = {"must_rebuild": list(self.graph), "uncertain_stripped_libraries": list(self.graph), "libraries": {}}
+        for requested in ["", "base"]:
+            with self.subTest(requested=requested):
+                plan = self.plan(compatibility="different compiler, image, flags and headers", libraries=requested,
+                                 compiler_runtime=runtime)
+                self.assertFalse(plan["full"])
+                self.assertEqual(plan["selected"], [])
+                self.assertEqual(plan["reused"], sorted(self.graph))
+        self.assertEqual(self.plan(sources=self.changed("base"), compatibility="new-compiler")["selected"], ["base"])
 
     def test_timestamps_and_php_consumer_changes_do_not_select_libraries(self):
         current = copy.deepcopy(self.sources)
@@ -266,10 +290,26 @@ class IncrementalLibraryTests(unittest.TestCase):
         self.assertFalse(result["built"])
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 
-    def test_manual_incompatible_seed_fails_without_full_rebuild(self):
-        with self.assertRaisesRegex(RuntimeError, "compatible recorded buildroot"):
-            self.plan(compatibility="different", libraries="base")
-        self.assertTrue(self.plan(compatibility="different")["full"])
+    def test_library_sdk_reuse_preserves_original_compilation_identity(self):
+        plan = self.plan(compatibility="different", libraries="base")
+        before = (self.sdk / incremental.STATE).read_bytes()
+        result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
+        self.assertFalse(result["built"])
+        self.assertEqual((self.sdk / incremental.STATE).read_bytes(), before)
+
+    def test_only_a_missing_sdk_needs_a_cold_build(self):
+        with self.assertRaisesRegex(RuntimeError, "require a recorded buildroot"):
+            self.plan(state=None, libraries="base")
+        self.assertTrue(self.plan(state=None)["full"])
+
+    def test_incremental_cache_miss_fails_before_invoking_a_builder(self):
+        (self.sdk / incremental.STATE).unlink()
+        arguments = ['incremental-build.py', 'plan', '--root', str(self.root), '--compatibility', 'new-builder',
+                     '--output', str(self.root / 'plan.json')]
+        with mock.patch.object(sys, 'argv', arguments), mock.patch.dict(os.environ, {'MODE': 'incremental'}), \
+                mock.patch.object(subprocess, 'check_output', return_value=json.dumps(self.inventory)):
+            with self.assertRaisesRegex(RuntimeError, 'refusing a full rebuild'):
+                incremental.main()
 
     def test_unknown_manual_library_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "Unknown managed library"):
@@ -366,7 +406,7 @@ else:m.pop('pending_rebuilds',None)
 (r/'counts.json').write_text(json.dumps(counts));(r/'buildroot/shared-libraries.json').write_text(json.dumps(m));(r/'buildroot/.shared-library-ownership.json').write_text(json.dumps(m))
 ''')
         # Start with three actual DSOs, then assert compile counters and unrelated bytes/mtime.
-        seed = self.plan(libraries="base,consumer,other", invalid=list(self.graph))
+        seed = dict(self.plan(), selected=sorted(self.graph), reused=[])
         plan_path = self.root / "plan.json"
         incremental.write(plan_path, seed)
         command = [sys.executable, str(builder), str(self.root), str(plan_path)]

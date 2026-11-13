@@ -195,11 +195,28 @@ class ReleaseCacheTests(unittest.TestCase):
                 self.store(newer, body=b'updated library payload')
                 self.assertEqual(len(self.backend.assets), 2)
 
-    def test_replaced_toolchain_slot_is_a_miss_instead_of_an_invalid_exact_hit(self):
+    def test_replaced_toolchain_restores_the_library_sdk_as_a_seed(self):
         self.store(seed='other-toolchain')
         result = self.restore(self.key.replace('a' * 32, 'b' * 32))
         self.assertEqual(result['cache-hit'], 'false')
+        self.assertEqual(result['seed-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'compiled library payload')
+
+    def test_payload_seed_still_requires_matching_compilation_inputs(self):
+        key = 'php-payload-glibc-aarch64-84-' + 'a' * 32
+        self.store(key=key, seed='old-php-inputs')
+        self.path.unlink()
+        result = self.restore(key=key.replace('a' * 32, 'b' * 32), seed='new-php-inputs')
         self.assertEqual(result['seed-hit'], 'false')
+        self.assertFalse(self.path.exists())
+
+    def test_library_seed_cannot_cross_architectures_or_producers(self):
+        self.store()
+        self.path.unlink()
+        for key in [self.key.replace('x86_64', 'arm64'), self.key.replace('glibc-alma8', 'apk')]:
+            with self.subTest(key=key):
+                self.assertEqual(self.restore(key=key)['seed-hit'], 'false')
+                self.assertFalse(self.path.exists())
 
     def test_exact_hit_is_verified_and_current(self):
         self.store()

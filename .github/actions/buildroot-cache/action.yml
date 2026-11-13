@@ -1,5 +1,5 @@
 name: Buildroot release cache
-description: Restore exact compiled SDKs or compatible seeds from the persistent build cache.
+description: Restore sealed SDKs and PHP payloads from the persistent build cache.
 
 inputs:
     mode:
@@ -11,7 +11,7 @@ inputs:
     seed-key:
         required: false
         default: ''
-        description: Compatible library-build identity used only by library jobs.
+        description: Seed identity; library SDKs reuse the same producer and architecture slot.
     fail-on-cache-miss:
         required: false
         default: 'false'

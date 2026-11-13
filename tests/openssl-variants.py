@@ -101,6 +101,15 @@ class VariantTests(unittest.TestCase):
         for profile in variants.PROFILES:
             self.assertEqual((self.output / profile).stat().st_mode & 0o777, 0o755)
 
+    def test_builder_flags_headers_and_recipe_changes_reuse_recorded_profiles(self):
+        self.build()
+        self.environment["environment"]["SPC_DEFAULT_CFLAGS"] = "-O2"
+        self.environment["implementation"] = {"compiler": "updated"}
+        recipe = self.root / "vendor/crazywhalecc/static-php-cli/src/Package/Library/openssl.php"
+        recipe.write_text("changed build recipe with unchanged source\n")
+        self.assertEqual(self.build()["rebuilt_profiles"], [])
+        self.assertEqual(self.builds, ["deb"])
+
     def test_cached_profiles_do_not_run_abi_tools(self):
         self.build()
         with patch.object(variants, 'assert_el8'), patch.object(variants, 'probe_directory'), \

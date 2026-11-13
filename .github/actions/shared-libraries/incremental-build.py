@@ -87,9 +87,13 @@ def source_inputs(record, sources):
     return {name: sources[name] for name in record.get("inputs", []) if name in sources}
 
 
-def changed_inputs(record, previous, sources, managed_artifacts):
-    tracked = ({record.get("artifact")} | (set(record.get("inputs", [])) - managed_artifacts)) - {None}
-    return any(previous.get("sources", {}).get(name) != sources[name] for name in tracked if name in sources)
+def changed_inputs(record, previous, sources):
+    artifact = record.get("artifact")
+    if not artifact or artifact not in sources:
+        return False
+    current = sources[artifact].get("source", {}).get("hash")
+    recorded = previous.get("sources", {}).get(artifact, {}).get("source", {}).get("hash")
+    return current != recorded
 
 
 def pending_rebuilds(manifest):
@@ -123,12 +127,12 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
     requested = requested_ids(libraries, graph) if manual else set()
     existing = set((manifest or {}).get("libraries", {})) & graph.keys()
     imported = isinstance(deployment_import, dict) and deployment_import.get("deployment_compatibility") == compatibility and deployment_import.get("compilation_compatibility") == (state or {}).get("compatibility")
-    compatible = isinstance(state, dict) and state.get("schema") == 1 and (state.get("compatibility") == compatibility or imported)
-    if not compatible:
+    recorded_sdk = isinstance(state, dict) and state.get("schema") == 1
+    if not recorded_sdk:
         if manual:
-            raise RuntimeError("Selected library builds require a compatible recorded buildroot; create or restore the library SDK first")
+            raise RuntimeError("Selected library builds require a recorded buildroot; create or restore the library SDK first")
         result = {"schema": 1, "compatibility": compatibility, "full": True, "manual": False,
-                "requested": [], "selected": [], "reused": [], "reason": "No compatible recorded library SDK",
+                "requested": [], "selected": [], "reused": [], "reason": "No recorded library SDK",
                 "inventory": inventory, "effective_sources": sources}
         if compiler_runtime is not None:
             result["compiler_runtime_scan"] = compiler_runtime
@@ -136,13 +140,12 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
     recorded = state.get("libraries", {})
     if not existing or not existing <= recorded.keys():
         raise RuntimeError("Restored SDK input state does not cover its managed libraries")
-    managed_artifacts = {record.get("artifact") for record in graph.values()} - {None}
     scope = requested if manual else existing
-    selected = set(pending) | (set(invalid) & (closure(requested, graph) if manual else existing))
+    selected = set(pending)
     for name in scope & existing:
         current = graph[name]
         previous = recorded[name]
-        if any(previous.get(field) != current.get(field) for field in ["artifact", "depends", "inputs", "recipe_hash"]) or changed_inputs(current, previous, sources, managed_artifacts):
+        if changed_inputs(current, previous, sources):
             selected.add(name)
     if manual:
         selected |= closure(requested, graph) - existing
@@ -151,33 +154,17 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
         if not required <= graph.keys():
             raise RuntimeError("Required library inventory contains unknown managed libraries")
         selected |= closure(required, graph) - existing
-    if imported:
-        selected |= {name for name in deployment_import.get("must_rebuild", []) if name in existing
-                     and recorded[name].get("compiled_compatibility") != compatibility}
-    if compiler_runtime is not None:
-        selected |= (set(compiler_runtime.get("must_rebuild", [])) | set(compiler_runtime.get("uncertain_stripped_libraries", []))) & existing
-        for name in existing:
-            current = compiler_runtime.get("libraries", {}).get(name)
-            if current is None:
-                raise RuntimeError("Managed library has no compiler runtime inspection: " + name)
-            previous = recorded[name].get("compiler_runtime")
-            if previous is None:
-                accepted = (deployment_import or {}).get("libraries", {}).get(name, {}).get("compiler_runtime", {})
-                backfill = imported and deployment_import.get("cpp_headers_verified") and accepted.get("fingerprint") == current["fingerprint"]
-                if current["uses_cxx_runtime"] and not backfill:
-                    selected.add(name)
-            elif previous.get("fingerprint") != current["fingerprint"]:
-                selected.add(name)
     while True:
         previous = set(selected)
         dependencies = closure(selected, graph)
         selected |= dependencies - existing
-        selected |= {name for name in dependencies & existing if name in invalid}
         own_artifacts = {graph[name].get("artifact") for name in selected} - {None}
         selected |= {name for name in existing if graph[name].get("artifact") in own_artifacts}
         if selected == previous:
             break
     reused = existing - selected
+    if damaged := set(invalid) & reused:
+        raise RuntimeError("Restored SDK output checksum mismatch: " + ",".join(sorted(damaged)))
     effective = dict(state.get("sources", {}))
     effective.update(sources)
     for name in selected:
@@ -194,7 +181,7 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
     result = {"schema": 1, "compatibility": compatibility, "full": False, "manual": manual,
             "requested": sorted(requested), "selected": sorted(selected), "reused": sorted(reused),
             "rebuilt_libraries": [],
-            "reason": "Explicit library selection" if manual else "Changed library build inputs",
+            "reason": "Explicit library selection" if manual else "Changed library sources",
             "inventory": inventory, "effective_sources": effective, "previous_state": state}
     if imported:
         result["deployment_import"] = deployment_import
@@ -358,7 +345,7 @@ def record_state(plan, manifest):
     relevant = {artifact for record in actual.values()
                 for artifact in [record.get("artifact"), *record.get("inputs", [])]} - {None}
     sources = {name: value for name, value in plan["effective_sources"].items() if name in relevant}
-    compilation = plan.get("previous_state", {}).get("compatibility") if plan.get("deployment_import") else plan["compatibility"]
+    compilation = plan["compatibility"] if plan["full"] else plan["previous_state"].get("compatibility", plan["compatibility"])
     result = {"schema": 1, "compatibility": compilation, "sources": sources, "libraries": actual}
     if plan.get("deployment_import"):
         result["deployment_compatibility"] = plan["compatibility"]
@@ -495,11 +482,11 @@ def main():
         sources = read(root / "downloads/.cache.json")
         request = read(args.request or root / "downloads/build-plan.json", {})
         state = read(buildroot / STATE)
-        importer = helper_module("sdk-import.py", "sdk_import")
-        imported = importer.validate(buildroot, state, args.compatibility) if state is not None else None
-        runtime = read(args.compiler_runtime_scan) if args.compiler_runtime_scan else compiler_runtime_scan(buildroot, manifest)
+        if state is None and os.environ.get("MODE") == "incremental":
+            raise RuntimeError("No recorded library SDK; refusing a full rebuild for an incremental request")
+        runtime = read(args.compiler_runtime_scan) if args.compiler_runtime_scan else None
         plan = selection(inventory, sources, manifest, state, args.compatibility,
-                         args.libraries, invalid_libraries(buildroot, manifest), request.get("libraries", []), imported, runtime)
+                         args.libraries, invalid_libraries(buildroot, manifest), request.get("libraries", []), compiler_runtime=runtime)
         write(args.output, plan)
         print(json.dumps({key: plan[key] for key in ["full", "manual", "requested", "selected", "reused", "reason"]}, sort_keys=True))
     elif args.action == "expand":

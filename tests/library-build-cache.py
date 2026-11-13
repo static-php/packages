@@ -199,7 +199,7 @@ PY''',
                 self.assertLess(names.index('Classify ABI and package shared libraries'), names.index('Pack buildroot'))
                 self.assertLess(names.index('Pack buildroot'), names.index('Save buildroot cache'))
                 build = steps[names.index('Build changed shared libraries')]
-                self.assertNotIn('if', build)
+                self.assertEqual(build.get('if', ''), "inputs.repackage_run_id == ''" if 'rpm' in filename else '')
                 restore = steps[names.index('Restore buildroot cache')]
                 self.assertIn('seed-key', restore['with'])
                 save = steps[names.index('Save buildroot cache')]

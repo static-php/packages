@@ -459,7 +459,11 @@ def build(root, sdk, environment, output):
     output.mkdir(parents=True, exist_ok=True)
     probe_directory(sdk, PROFILES["rpm"])
     keys = {profile: fingerprint(root, sdk, environment, entry, profile) for profile in PROFILES}
-    receipts = {profile: valid_overlay(output / profile, key) for profile, key in keys.items()}
+    receipts = {profile: valid_overlay(output / profile) for profile in PROFILES}
+    identity = common_identity(sdk, entry)
+    for profile, receipt in receipts.items():
+        if receipt is not None and receipt.get("common_identity") != identity:
+            receipts[profile] = None
     rebuilt = []
     if receipts["rpm"] is None or receipts["rpm"]["files"] != {name: file_record(rooted(sdk, name)) for name in receipts["rpm"]["files"]}:
         receipts["rpm"] = export_overlay(sdk, entry, output / "rpm", "rpm", keys["rpm"])

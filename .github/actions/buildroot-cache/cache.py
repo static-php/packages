@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore exact SDKs or compatible seeds from the persistent release cache."""
+"""Restore verified SDKs and sealed PHP payloads from the persistent release cache."""
 
 import hashlib
 import json
@@ -234,8 +234,9 @@ class ReleaseCache:
                     self.validate(value, self.key)
                     self.install(value, temporary)
                     return {"cache-hit": "true", "seed-hit": "false", "cache-current": "true", "restored-key": self.key}
-                if not required and self.seed_key and value.get("compatibility") == self.seed_key:
-                    self.validate(value)
+                library_sdk = self.key.startswith("buildroot-shared-")
+                if not required and self.seed_key and (library_sdk or value.get("compatibility") == self.seed_key):
+                    self.validate(value, compatibility=not library_sdk)
                     self.install(value, temporary)
                     return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
         if required:

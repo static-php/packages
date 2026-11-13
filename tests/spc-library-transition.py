@@ -99,6 +99,40 @@ echo file_get_contents(BUILD_ROOT_PATH . '/shared-libraries.json');
 
 
 class InstallerTransitionTests(unittest.TestCase):
+    def test_recorded_runtime_is_reused_without_comparing_the_current_compiler(self):
+        code = r'''
+require $argv[1] . '/vendor/autoload.php';
+require ROOT_DIR . '/src/bootstrap.php';
+$class = new ReflectionClass(StaticPHP\Util\SharedLibraryManifest::class);
+$sdk = $class->newInstanceWithoutConstructor();
+$file = BUILD_ROOT_PATH . '/lib/libgcc_s.so.1';
+mkdir(dirname($file), 0755, true);
+file_put_contents($file, 'recorded runtime');
+$entry = ['source_hash' => 'original-runtime-source', 'files' => ['lib/libgcc_s.so.1'],
+    'file_hashes' => ['lib/libgcc_s.so.1' => hash_file('sha256', $file)]];
+$class->getProperty('manifest')->setValue($sdk, ['libraries' => ['gcc-runtime' => $entry]]);
+$class->getProperty('ownership')->setValue($sdk, ['libraries' => ['gcc-runtime' => $entry]]);
+putenv('CXX=/must-not-invoke-the-current-compiler');
+$method = $class->getMethod('compilerRuntimes');
+$method->invoke($sdk, false);
+$method->invoke($sdk, true);
+if (file_get_contents($file) !== 'recorded runtime') {
+    throw new RuntimeException('The retained runtime was replaced');
+}
+file_put_contents($file, 'damaged runtime');
+try {
+    $method->invoke($sdk, false);
+    throw new RuntimeException('Damaged runtime was accepted');
+} catch (StaticPHP\Exception\WrongUsageException $error) {
+    if (!str_contains($error->getMessage(), 'changed or missing output')) {
+        throw $error;
+    }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='spc-runtime-reuse-') as temporary:
+            subprocess.run(['php', '-r', code, str(ROOT)], cwd=temporary, check=True,
+                           env={**os.environ, 'BUILD_ROOT_PATH': str(Path(temporary) / 'buildroot')})
+
     def test_native_soname_transition_runs_root_then_consumer_in_separate_installers(self):
         if not all(shutil.which(command) for command in ['php', 'cc', 'g++', 'patchelf', 'readelf']):
             self.skipTest('Native fixture requires PHP, C/C++ compilers, patchelf and readelf')
