@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [ ] Repackage and publish libraries and their PHP consumers together for every
+- [x] Repackage and publish libraries and their PHP consumers together for every
   supported format, stream and architecture. Every package losing synthetic
   `php-zts-lib-*-abi-N` requirements/provides must have a strictly newer native version
   or revision, including CLI, affected SAPIs/extensions and matching debuginfo packages.
@@ -10,9 +10,11 @@
   Set `bump=true` for this repackaging run, leave `iteration` and package/library filters
   empty, and verify the resulting versions and headers before publication.
   `bump=false` preserves revisions. Unchanged binaries can be reused.
+  Primary publication completed in [RPM/DEB run 43204217976](https://github.com/static-php/packages/actions/runs/43204217976)
+  and [APK run 43193640698](https://github.com/static-php/packages/actions/runs/43193640698).
 - [ ] Replace reusable SDK, PHP payload and OpenSSL overlay caches, and verify their
   metadata no longer contains the retired fields below. OpenSSL receipts must contain
-  `sonames`. Publish-only runs do not refresh caches; neither do `publish=false` runs.
+  `sonames`. Publish-only, repackage-only and `publish=false` runs do not refresh caches.
   Retire old build artifacts that could republish packages with synthetic dependencies.
 
 ## Remove once published metadata and caches are clean
