@@ -89,6 +89,13 @@ jobs:
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
+            -   name: Restore Composer downloads
+                if: matrix.libraries-required
+                uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('composer.lock') }}
+                    restore-keys: composer-
             -   name: Download recorded SDK metadata
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
@@ -111,9 +118,12 @@ jobs:
                     PACKAGING_IMAGE: ${{ matrix.package-image }}
                     ACTOR: ${{ github.actor }}
                 run: |
+                    mkdir -p "$HOME/.cache/composer"
                     printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
                     zstd -dc buildroot.tar.zst | tar -xpf -
+                    mkdir -p "$HOME/.cache/composer"
                     docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
+                        -v "$HOME/.cache/composer":/composer-cache -e COMPOSER_CACHE_DIR=/composer-cache \
                         -e IMAGE -e TYPE -e TARGET -e MATRIX_ARCH -e SOURCE_RUN_ID -e PUBLISH -e BUMP -e ITERATION \
                         -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
                         "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-libraries
@@ -204,6 +214,13 @@ jobs:
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
+            -   name: Restore Composer downloads
+                if: matrix.library-only != true
+                uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+                with:
+                    path: ~/.cache/composer
+                    key: composer-${{ hashFiles('composer.lock') }}
+                    restore-keys: composer-
             -   name: Log in to packaging registry
                 env:
                     REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -254,7 +271,9 @@ jobs:
             -   name: Package sealed payload without compilation
                 if: matrix.library-only != true
                 run: |
+                    mkdir -p "$HOME/.cache/composer"
                     docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
+                        -v "$HOME/.cache/composer":/composer-cache -e COMPOSER_CACHE_DIR=/composer-cache \
                         -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \
                         -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
                         "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package

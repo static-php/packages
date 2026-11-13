@@ -79,12 +79,12 @@ PY
         ;;
     classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-libraries)
         git config --global --add safe.directory "$PWD"
-        composer install --no-interaction --prefer-dist --no-progress
+        composer install --no-dev --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
         ;;
     fingerprint)
         git config --global --add safe.directory "$PWD"
-        composer install --no-interaction --prefer-dist --no-progress >&2
+        composer install --no-dev --no-interaction --prefer-dist --no-progress >&2
         php bin/spp --version >/dev/null
         mkdir -p stage
         php .github/actions/shared-libraries/build-inputs.php "$PWD" "$TYPE" "$TARGET" > stage/library-build-environment.json
@@ -93,7 +93,7 @@ PY
         ;;
     libs)
         git config --global --add safe.directory "$PWD"
-        composer install --no-interaction --prefer-dist --no-progress
+        composer install --no-dev --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/incremental-build.py plan --root . \
             --compatibility "$(cat stage/library-compatibility)" --libraries "${LIBRARIES:-}" \
             --output stage/library-build-plan.json
@@ -106,7 +106,7 @@ PY
         test -s buildroot/shared-libraries.json
         ;;
     payload-key)
-        composer install --no-interaction --prefer-dist --no-progress >&2
+        composer install --no-dev --no-interaction --prefer-dist --no-progress >&2
         php bin/spp --version >/dev/null
         python3 .github/actions/shared-libraries/payload-cache.py key --root . --stream "$PHPV"             --manifest buildroot/shared-libraries.json --compatibility stage/library-compatibility
         ;;
@@ -142,7 +142,7 @@ PY
         ;;
     php)
         git config --global --add safe.directory "$PWD"
-        composer install --no-interaction --prefer-dist --no-progress
+        composer install --no-dev --no-interaction --prefer-dist --no-progress
         cp stage/shared-libraries.json buildroot/shared-libraries.json
         mkdir -p dist/"$TYPE"
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi

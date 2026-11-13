@@ -241,8 +241,10 @@ jobs:
                     python3 .github/actions/shared-libraries/source-snapshot.py fetch
                     python3 .github/actions/shared-libraries/workflow.py validate-source --mode "$MODE"
             -   name: Prepare Composer cache
+                if: inputs.repackage_run_id == '' || matrix.repackage_sdk_artifact != ''
                 run: mkdir -p ~/.cache/composer
             -   name: Restore Composer downloads
+                if: inputs.repackage_run_id == '' || matrix.repackage_sdk_artifact != ''
                 id: composer-cache
                 uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
                 with:
@@ -302,7 +304,7 @@ jobs:
                 run: |
                     if [[ -f buildroot.tar.zst ]]; then
                         zstd -dc buildroot.tar.zst | tar -xf -
-                        composer install --no-interaction --prefer-dist --no-progress
+                        composer install --no-dev --no-interaction --prefer-dist --no-progress
                     fi
                     python3 .github/actions/shared-libraries/repackage.py libraries
             -   name: Classify ABI and package shared libraries
@@ -528,7 +530,7 @@ jobs:
                 if: inputs.repackage_run_id != ''
                 run: |
                     zstd -dc php-payload.tar.zst | tar -xpf -
-                    composer install --no-interaction --prefer-dist --no-progress
+                    composer install --no-dev --no-interaction --prefer-dist --no-progress
                     python3 .github/actions/shared-libraries/repackage.py payload
                     python3 .github/actions/shared-libraries/payload-cache.py package-archive --payload "build/$PHPV" --output php-payload-repackaged.tar.zst
                     mv php-payload-repackaged.tar.zst php-payload.tar.zst
