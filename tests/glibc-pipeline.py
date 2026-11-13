@@ -384,6 +384,37 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(len(archive_checks), 0 if kind == 'apk' else 2)
                 self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), len(formats))
 
+    def test_php_archive_audit_does_not_reaudit_prebuilt_libraries_against_a_subset(self):
+        for kind in ('rpm', 'deb'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                stage, payload = root / 'stage', root / 'build/8.5'
+                plan = stage / kind / 'shared-library-plan.json'
+                glibc.write(plan, {})
+                glibc.write(stage / 'payload-provenance.json', {'php_stream': '8.5', 'source_run_id': '42',
+                    'producer_image': 'producer', 'format_plan_sha256': {kind: hashlib.sha256(plan.read_bytes()).hexdigest()}})
+                glibc.write(stage / kind / 'shared-libraries.json', {'libraries': {'libaom': {}}})
+                glibc.write(payload / 'build-payload.json', {'packaging_selection': {'packages': ['ssh2'], 'libraries': []}})
+                dist = root / 'dist' / kind
+                dist.mkdir(parents=True)
+                library = dist / ('libaom.' + kind)
+                library.write_bytes(b'library already audited against its SDK')
+                def run(arguments, **kwargs):
+                    if arguments[:3] == ['php', 'bin/spp', 'package']:
+                        output = Path(kwargs['env']['SPP_DIST_PATH']) / kind
+                        output.mkdir(parents=True)
+                        (output / ('ssh2.' + kind)).write_bytes(b'sealed PHP extension')
+                    elif len(arguments) > 1 and str(arguments[1]).endswith('/payload-archives.py'):
+                        selected = Path(arguments[arguments.index('--packages') + 1])
+                        self.assertEqual([p.name for p in selected.glob('*.' + kind)], ['ssh2.' + kind])
+                        glibc.write(Path(arguments[arguments.index('--output') + 1]), {'archives': ['ssh2.' + kind]})
+                with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', run), \
+                        patch.dict(os.environ, TYPE=kind, PHPV='8.5', SOURCE_RUN_ID='42', PACKAGES='ssh2'):
+                    glibc.package()
+                self.assertEqual(library.read_bytes(), b'library already audited against its SDK')
+                self.assertEqual((dist / ('ssh2.' + kind)).read_bytes(), b'sealed PHP extension')
+                self.assertTrue((dist / 'payload-archive-receipt.json').is_file())
+
     def test_format_plans_merge_compile_and_packaging_requests_without_extra_compilation(self):
         value = glibc.combine_plans({
             'rpm': {'php_requests': {'8.6': {'full': True, 'packages': [], 'compile': False, 'compile_full': False, 'compile_packages': []}}},

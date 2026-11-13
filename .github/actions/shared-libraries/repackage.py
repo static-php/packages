@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repackage complete retained EL8 payloads without invoking a compiler."""
+"""Repackage retained sealed EL8 payloads without invoking a compiler."""
 
 import argparse
 import hashlib
@@ -45,8 +45,8 @@ def inspect(run_id, architectures, streams):
             for kind, image in [('rpm', 'packages-builder-rhel-8'), ('deb', 'packages-packager-debian')]:
                 pinned_image(target.get('package_images', {}).get(kind), image)
                 selection = plan.get('format_selection', {}).get(kind, plan)
-                if any(not selection.get('php_requests', {}).get(stream, {}).get('full') for stream in selected_php):
-                    raise RuntimeError('Repackaging requires complete retained PHP payloads: ' + target_name)
+                if any(not (selection.get('php_requests', {}).get(stream, {}).get('full') or selection.get('php_requests', {}).get(stream, {}).get('packages')) for stream in selected_php):
+                    raise RuntimeError('Repackaging requires recorded PHP selections: ' + target_name)
             required = ['shared-sdk-glibc-' + target_name, 'shared-sdk-buildroot-glibc-' + target_name]
             required += ['shared-payload-glibc-' + target_name + '-php' + stream for stream in selected_php]
             if any(name not in available for name in required):
@@ -88,9 +88,16 @@ def libraries():
         glibc.copy_tree(sdk, selected_sdk)
         glibc.run(glibc.variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
         glibc.baseline(kind, directory / 'baseline', consumers=True)
+        original = glibc.read(retained / (kind + '.json'))
+        requests = original.get('php_requests', {})
+        partial = any(entry.get('packages') and not entry.get('full') for entry in requests.values())
+        request = retained / (kind + '-request.json')
+        glibc.write(request, {'requests': requests})
         glibc.run(['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
                    '--manifest', selected_sdk / 'shared-libraries.json', '--baseline', directory / 'baseline',
-                   '--mode', 'full', '--rebuilt-libraries', '', '--php-versions', os.environ.get('PHP_VERSIONS', ''),
+                   '--mode', 'incremental' if partial else 'full', '--request', request,
+                   '--rebuilt-libraries', ','.join(original.get('libraries', [])) if partial else '',
+                   '--php-versions', os.environ.get('PHP_VERSIONS', ''),
                    '--output', directory / 'shared-library-plan.json',
                    '--manifest-output', directory / 'shared-libraries.json', *glibc.revision_flags()])
         plan = packaging_requests(glibc.read(directory / 'shared-library-plan.json'))
@@ -119,21 +126,27 @@ def payload():
     glibc.run(['php', 'bin/build-payload', 'verify', '--root', directory])
     record = glibc.read(directory / 'build-payload.json')
     if (record.get('kind') != 'consumer' or record.get('state') != 'sealed'
-            or record.get('packaging_selection') or record.get('libc') != 'glibc'
+            or record.get('libc') != 'glibc'
             or record.get('architecture') != glibc.architecture()
             or not record.get('php_version', '').startswith(stream + '.')):
-        raise RuntimeError('Repackaging requires a complete sealed PHP payload for this target')
+        raise RuntimeError('Repackaging requires a sealed PHP payload for this target')
     target = glibc.read(stage / 'target.json')
     provenance = glibc.read(stage / 'payload-provenance.json')
     if any(str(provenance.get(key)) != str(value) for key, value in {
             'target': os.environ['TARGET'], 'php_stream': stream, 'source_run_id': os.environ['SOURCE_RUN_ID'],
             'producer_image': os.environ['IMAGE']}.items()):
         raise RuntimeError('Retained payload provenance differs from its producer target')
+    selection = record.get('packaging_selection')
+    if selection:
+        for kind in glibc.FORMATS:
+            request = glibc.read(stage / kind / 'shared-library-plan.json')['php_requests'][stream]
+            if request.get('full') or set(request.get('packages', [])) - set(selection['packages']):
+                raise RuntimeError('Repackaging exceeds the retained PHP selection')
     expected = glibc.read(stage / 'repackage/shared-libraries.json')['libraries']
     actual = glibc.read(directory / 'shared-libraries.json')['libraries']
     fields = ('version', 'source_hash', 'build_identity', 'elf', 'files', 'runtime_assets')
-    if (set(actual) != set(expected)
-            or any(actual[name].get(key) != entry.get(key) for name, entry in expected.items() for key in fields)):
+    if (set(actual) != (set(selection['libraries']) if selection else set(expected)) or set(actual) - set(expected)
+            or any(entry.get(key) != expected[name].get(key) for name, entry in actual.items() for key in fields)):
         raise RuntimeError('Retained PHP payload does not match the retained library SDK')
     for kind in glibc.FORMATS:
         original = hashlib.sha256((stage / 'repackage' / (kind + '.json')).read_bytes()).hexdigest()

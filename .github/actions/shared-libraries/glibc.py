@@ -675,7 +675,8 @@ def package():
     flags = ['--phpv=' + stream, '--buildroot=' + str(root), '--prefix=-zts', '--type=' + kind, '--debuginfo', *revision_flags()]
     if os.environ.get('PACKAGES'):
         flags += ['--packages=' + os.environ['PACKAGES']]
-    environment = dict(os.environ)
+    packages = STAGE / 'php-packages'
+    environment = dict(os.environ, SPP_DIST_PATH=str(packages))
     environment['SPP_SHARED_LIBRARY_PLAN'] = str(STAGE / kind / 'shared-library-plan.json')
     if kind == 'deb':
         environment.update(SPP_NATIVE_INVENTORY=str(STAGE / kind / 'native-inventories' / (stream + '.json')),
@@ -688,7 +689,8 @@ def package():
     run(['php', 'bin/spp', 'package', *flags], env=environment)
     run(['php', 'bin/build-payload', 'verify', '--root', root])
     run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', root,
-         '--packages', ROOT / 'dist' / kind, '--type', kind, '--output', ROOT / 'dist' / kind / 'payload-archive-receipt.json'])
+         '--packages', packages / kind, '--type', kind, '--output', packages / kind / 'payload-archive-receipt.json'])
+    shutil.copytree(packages / kind, ROOT / 'dist' / kind, dirs_exist_ok=True)
     run(['python3', '.github/actions/shared-libraries/workflow.py', 'receipt', '--kind', 'consumer',
          '--php-stream', stream, '--plan', STAGE / kind / 'shared-library-plan.json',
          '--source-run-id', os.environ['SOURCE_RUN_ID'], '--image', provenance['producer_image'],

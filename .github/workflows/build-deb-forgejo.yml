@@ -15,7 +15,7 @@ on:
                 description: "Optional: pin the spc-download source snapshot"
                 default: ""
             repackage_run_id:
-                description: "Optional: repackage complete sealed binaries from this build run without compilation"
+                description: "Optional: repackage recorded sealed outputs from this build run without compilation"
                 type: string
                 default: ""
             iteration:

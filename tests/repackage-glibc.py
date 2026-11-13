@@ -72,24 +72,32 @@ class Repackage(unittest.TestCase):
         self.assertEqual(target['repackage_metadata_artifact'], 2)
         self.assertEqual(target['repackage_payload_artifacts'], {'8.4': 4})
 
-    def test_partial_expired_running_or_untrusted_producers_are_rejected(self):
-        for changes in [{'plan': {'php_requests': {'8.4': {'full': False, 'packages': ['imagick']}}}},
+    def test_empty_expired_running_or_untrusted_producers_are_rejected(self):
+        for changes in [{'plan': {'php_requests': {'8.4': {'full': False, 'packages': []}}}},
                         {'missing': True}, {'status': 'in_progress', 'conclusion': None},
                         {'head_branch': 'untrusted'}, {'head_repository': {'full_name': 'someone/fork'}}]:
             with self.subTest(changes=changes), self.assertRaises(RuntimeError):
                 self.inspection(**changes)
 
-    def test_library_repackaging_never_enters_source_or_compilation_paths(self):
+    def test_recorded_partial_producer_can_be_reused(self):
+        result = self.inspection(plan={'php_requests': {'8.4': {'full': False, 'packages': ['imagick']}}})
+        self.assertEqual(result['matrix']['include'][0]['repackage_payload_artifacts'], {'8.4': 4})
+
+    def library_repackaging(self, partial=False):
         sdk = self.root / 'buildroot'
         self.write(sdk / 'build-payload.json', {'kind': 'sdk', 'state': 'sealed'})
         self.write(sdk / 'shared-libraries.json', self.manifest)
         for kind in ('rpm', 'deb'):
-            self.write(self.stage / 'common' / kind / 'shared-library-plan.json', {'original': kind})
+            self.write(self.stage / 'common' / kind / 'shared-library-plan.json',
+                       {'php_requests': {'8.4': {'full': False, 'packages': ['imagick']}}, 'libraries': ['fixture']}
+                       if partial else {'original': kind})
         calls = []
         def baseline(kind, directory, consumers=False):
             self.assertTrue(consumers)
             value = copy.deepcopy(self.manifest)
             value['libraries']['fixture']['published_version'] = '1.0-7'
+            if partial:
+                value['libraries']['fixture'].update(version='0.9', source_hash='old source')
             self.write(directory / 'shared-libraries.json', value)
         def run(arguments, **kwargs):
             arguments = [str(value) for value in arguments]
@@ -108,10 +116,17 @@ class Repackage(unittest.TestCase):
         self.assertEqual(package.call_count, 2)
         plan = json.loads((self.stage / 'common/shared-library-plan.json').read_text())
         self.assertEqual(plan['libraries'], ['fixture'])
-        self.assertTrue(plan['php_requests']['8.4']['full'])
+        self.assertEqual(plan['php_requests']['8.4']['full'], not partial)
+        self.assertEqual(plan['php_requests']['8.4']['packages'], ['imagick'] if partial else [])
         self.assertFalse(any(request['compile'] or request['compile_full'] for request in plan['php_requests'].values()))
         self.assertEqual(json.loads((self.stage / 'common/target.json').read_text())['repackage_run_id'], '22')
         self.assertEqual(json.loads((self.stage / 'common/repackage/shared-libraries.json').read_text()), self.manifest)
+
+    def test_library_repackaging_never_enters_source_or_compilation_paths(self):
+        self.library_repackaging()
+
+    def test_partial_repackaging_retains_only_the_recorded_php_requests(self):
+        self.library_repackaging(partial=True)
 
     def payload_fixture(self):
         payload = self.root / 'build/8.4'
@@ -142,9 +157,8 @@ class Repackage(unittest.TestCase):
         self.assertEqual(provenance['compiled_source_run_id'], '10')
         self.assertEqual(provenance['repackaged_from_run_id'], '22')
 
-    def test_mismatched_sdk_provenance_and_partial_php_payloads_are_rejected(self):
-        for path, field, value in [('build/8.4/build-payload.json', 'packaging_selection', {'packages': ['imagick']}),
-                ('build/8.4/build-payload.json', 'architecture', 'aarch64'),
+    def test_mismatched_sdk_and_provenance_are_rejected(self):
+        for path, field, value in [('build/8.4/build-payload.json', 'architecture', 'aarch64'),
                 ('stage/payload-provenance.json', 'source_run_id', '99'),
                 ('stage/payload-provenance.json', 'format_plan_sha256', {}),
                 ('build/8.4/shared-libraries.json', 'libraries', {})]:
@@ -156,6 +170,21 @@ class Repackage(unittest.TestCase):
                 self.write(record, data)
                 with patch.object(repackage.glibc, 'run'), self.assertRaises(RuntimeError):
                     repackage.payload()
+
+    def test_partial_payload_reuse_preserves_and_cannot_expand_its_selection(self):
+        payload = self.payload_fixture()
+        metadata = json.loads((payload / 'build-payload.json').read_text())
+        metadata['packaging_selection'] = {'packages': ['imagick'], 'libraries': ['fixture']}
+        self.write(payload / 'build-payload.json', metadata)
+        for kind in ('rpm', 'deb'):
+            self.write(self.stage / kind / 'shared-library-plan.json', {'php_requests': {'8.4': {'packages': ['imagick']}}})
+        with patch.object(repackage.glibc, 'run'):
+            repackage.payload()
+        self.assertEqual(json.loads((payload / 'build-payload.json').read_text()), metadata)
+        for kind in ('rpm', 'deb'):
+            self.write(self.stage / kind / 'shared-library-plan.json', {'php_requests': {'8.4': {'full': True}}})
+        with patch.object(repackage.glibc, 'run'), self.assertRaisesRegex(RuntimeError, 'exceeds the retained PHP selection'):
+            repackage.payload()
 
     def test_workflow_skips_all_producer_and_cache_save_steps_for_repackaging(self):
         workflow = json.loads(subprocess.check_output(['php', '-r',
