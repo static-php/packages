@@ -113,18 +113,6 @@ class IncrementalLibraryTests(unittest.TestCase):
             incremental.execute(self.root, self.sdk, self.plan(sources=self.changed('base'), libraries='base'),
                                 'rpm', [sys.executable, '-c', code])
 
-    def test_noop_runtime_scan_preserves_recorded_build_identity(self):
-        runtime = {'fingerprint': 'same-runtime', 'compiler_runtime_inputs': None, 'uses_cxx_runtime': False}
-        previous = {'recipe_hash': 'same-recipe', 'compiler_runtime': incremental.compact_runtime(runtime),
-                    'compiler_runtime_attestation': 'rebuilt'}
-        plan = {'full': False, 'reused': ['openssl'], 'compatibility': 'same-compiler',
-                'inventory': {'libraries': {'openssl': {'depends': []}}},
-                'previous_state': {'libraries': {'openssl': previous}}, 'effective_sources': {},
-                'compiler_runtime_scan': {'libraries': {'openssl': runtime}}}
-        result = incremental.record_state(plan, {'libraries': {'openssl': {'depends': []}}})
-        self.assertEqual(result['libraries']['openssl'], previous)
-        self.assertEqual(result['libraries']['openssl']['compiler_runtime_attestation'], 'rebuilt')
-
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="selective-library-build-")
         self.addCleanup(self.directory.cleanup)
@@ -175,7 +163,7 @@ class IncrementalLibraryTests(unittest.TestCase):
         return current
 
     def test_compatible_update_builds_only_changed_root(self):
-        plan = self.plan(sources=self.changed("base"))
+        plan = self.plan(sources=self.changed("base"), changed_artifacts=["base"])
         self.assertEqual(plan["selected"], ["base"])
         self.assertEqual(plan["reused"], ["consumer", "other"])
 
@@ -203,7 +191,7 @@ class IncrementalLibraryTests(unittest.TestCase):
         plan = self.plan(libraries="base,consumer")
         before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in [self.sdk / incremental.STATE, self.sdk / "shared-libraries.json"]}
         with mock.patch.object(incremental, 'file_snapshot', side_effect=AssertionError('No build to compare')), \
-                mock.patch.object(incremental, 'compiler_runtime_scan', side_effect=AssertionError('Already inspected')):
+                mock.patch.object(subprocess, 'run', side_effect=AssertionError('No compilation requested')):
             result = incremental.execute(self.root, self.sdk, plan, "rpm", ["must-not-run"])
         self.assertFalse(result["built"])
         self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
@@ -224,7 +212,7 @@ class IncrementalLibraryTests(unittest.TestCase):
     def test_damaged_unchanged_library_fails_without_scheduling_compilation(self):
         with self.assertRaisesRegex(RuntimeError, "checksum mismatch: base"):
             self.plan(libraries="consumer", invalid=["base"])
-        self.assertEqual(self.plan(sources=self.changed("base"), invalid=["base"])["selected"], ["base"])
+        self.assertEqual(self.plan(sources=self.changed("base"), changed_artifacts=["base"], invalid=["base"])["selected"], ["base"])
 
     def test_pending_consumer_is_retained(self):
         manifest = dict(self.manifest, pending_rebuilds={"consumer": {"libbase.so.1": "base"}})
@@ -266,15 +254,19 @@ class IncrementalLibraryTests(unittest.TestCase):
         self.assertEqual(self.plan(inventory=inventory, sources=current)["selected"], [])
 
     def test_compiler_image_flags_and_headers_do_not_select_libraries(self):
-        runtime = {"must_rebuild": list(self.graph), "uncertain_stripped_libraries": list(self.graph), "libraries": {}}
         for requested in ["", "base"]:
-            with self.subTest(requested=requested):
-                plan = self.plan(compatibility="different compiler, image, flags and headers", libraries=requested,
-                                 compiler_runtime=runtime)
-                self.assertFalse(plan["full"])
-                self.assertEqual(plan["selected"], [])
-                self.assertEqual(plan["reused"], sorted(self.graph))
-        self.assertEqual(self.plan(sources=self.changed("base"), compatibility="new-compiler")["selected"], ["base"])
+            plan = self.plan(compatibility="different compiler, image, flags and headers", libraries=requested)
+            self.assertFalse(plan["full"])
+            self.assertEqual(plan["selected"], [])
+        self.assertEqual(self.plan(changed_artifacts=["base"], compatibility="new-compiler")["selected"], ["base"])
+
+    def test_update_event_rebuilds_only_that_library_even_with_identical_archive_hash(self):
+        plan = self.plan(changed_artifacts=["base"])
+        self.assertEqual(plan["selected"], ["base"])
+        self.assertEqual(plan["reused"], ["consumer", "other"])
+        plan = self.plan(sources=self.changed("other"), changed_artifacts=["base"])
+        self.assertEqual(plan["selected"], ["base"])
+        self.assertEqual(plan["effective_sources"]["other"], self.sources["other"])
 
     def test_timestamps_and_php_consumer_changes_do_not_select_libraries(self):
         current = copy.deepcopy(self.sources)
@@ -317,7 +309,7 @@ class IncrementalLibraryTests(unittest.TestCase):
 
     def test_runtime_abi_rebuild_expands_only_affected_unbuilt_consumers(self):
         current = self.changed("base")
-        first = self.plan(sources=current)
+        first = self.plan(sources=current, changed_artifacts=["base"])
         first["rebuilt_libraries"] = ["base"]
         next_state = incremental.record_state(first, self.manifest)
         self.manifest["libraries"]["base"]["source_hash"] = current["base"]["source"]["hash"]
@@ -418,7 +410,7 @@ else:m.pop('pending_rebuilds',None)
         unchanged = {n: ((self.sdk / self.manifest["libraries"][n]["files"][0]).read_bytes(),
                          (self.sdk / self.manifest["libraries"][n]["files"][0]).stat().st_mtime_ns) for n in ["consumer", "other"]}
         current = self.changed("base", "2")
-        first = self.plan(sources=current)
+        first = self.plan(sources=current, changed_artifacts=["base"])
         incremental.write(plan_path, first)
         incremental.execute(self.root, self.sdk, first, "rpm", command)
         self.assertEqual(incremental.read(self.root / "counts.json"), {"base": 1})
@@ -428,7 +420,7 @@ else:m.pop('pending_rebuilds',None)
         # A SONAME change recompiles the reverse library in a separate pass, not the root twice.
         self.manifest = incremental.read(self.sdk / "shared-libraries.json")
         self.state = incremental.read(self.sdk / incremental.STATE)
-        first = self.plan(sources=self.changed("base", "3"))
+        first = self.plan(sources=self.changed("base", "3"), changed_artifacts=["base"])
         incremental.write(plan_path, first)
         incremental.execute(self.root, self.sdk, first, "rpm", command)
         current_manifest = incremental.read(self.sdk / "shared-libraries.json")

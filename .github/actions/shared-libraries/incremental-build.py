@@ -23,21 +23,6 @@ def helper_module(filename, name):
     return module
 
 
-def compiler_runtime_scan(buildroot, manifest=None, inputs=None):
-    runtime = helper_module("compiler-runtime-inputs.py", "compiler_runtime_inputs")
-    inputs = inputs or runtime.compiler_runtime_inputs()
-    if inputs.get("semantic", {}).get("mode") != "shared":
-        raise RuntimeError("Shared SDK builds require a dynamic C++ development linker selector")
-    if not manifest or not manifest.get("libraries"):
-        return {"schema": 1, "compiler_runtime": inputs, "libraries": {}, "must_rebuild": [], "uncertain_stripped_libraries": []}
-    return runtime.scan_sdk(buildroot, inputs, manifest)
-
-
-def compact_runtime(record):
-    return {"fingerprint": record["fingerprint"], "inputs": record["compiler_runtime_inputs"],
-            "uses_cxx_runtime": record["uses_cxx_runtime"]}
-
-
 def read(path, default=None):
     return json.loads(path.read_text()) if path.is_file() else default
 
@@ -91,9 +76,7 @@ def changed_inputs(record, previous, sources):
     artifact = record.get("artifact")
     if not artifact or artifact not in sources:
         return False
-    current = sources[artifact].get("source", {}).get("hash")
-    recorded = previous.get("sources", {}).get(artifact, {}).get("source", {}).get("hash")
-    return current != recorded
+    return previous.get("sources", {}).get(artifact, {}).get("source") != sources[artifact].get("source")
 
 
 def pending_rebuilds(manifest):
@@ -117,7 +100,7 @@ def validate_final(manifest):
         raise RuntimeError("Shared-library SDK still requires ABI rebuilds: " + ",".join(sorted(pending)))
 
 
-def selection(inventory, sources, manifest, state, compatibility, libraries="", invalid=(), changed_artifacts=(), deployment_import=None, compiler_runtime=None):
+def selection(inventory, sources, manifest, state, compatibility, libraries="", invalid=(), changed_artifacts=()):
     graph = inventory.get("libraries")
     if not isinstance(graph, dict) or not graph:
         raise RuntimeError("Library inventory has no dependency/recipe graph")
@@ -126,7 +109,6 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
     manual = bool(libraries.strip())
     requested = requested_ids(libraries, graph) if manual else set()
     existing = set((manifest or {}).get("libraries", {})) & graph.keys()
-    imported = isinstance(deployment_import, dict) and deployment_import.get("deployment_compatibility") == compatibility and deployment_import.get("compilation_compatibility") == (state or {}).get("compatibility")
     recorded_sdk = isinstance(state, dict) and state.get("schema") == 1
     if not recorded_sdk:
         if manual:
@@ -134,18 +116,16 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
         result = {"schema": 1, "compatibility": compatibility, "full": True, "manual": False,
                 "requested": [], "selected": [], "reused": [], "reason": "No recorded library SDK",
                 "inventory": inventory, "effective_sources": sources}
-        if compiler_runtime is not None:
-            result["compiler_runtime_scan"] = compiler_runtime
         return result
     recorded = state.get("libraries", {})
     if not existing or not existing <= recorded.keys():
         raise RuntimeError("Restored SDK input state does not cover its managed libraries")
-    scope = requested if manual else existing
+    scope = requested if manual else requested_ids(",".join(changed_artifacts), graph) if changed_artifacts else set()
     selected = set(pending)
     for name in scope & existing:
         current = graph[name]
         previous = recorded[name]
-        if changed_inputs(current, previous, sources):
+        if not manual or changed_inputs(current, previous, sources):
             selected.add(name)
     if manual:
         selected |= closure(requested, graph) - existing
@@ -171,22 +151,16 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
         artifact = graph[name].get("artifact")
         if artifact and artifact not in sources:
             effective.pop(artifact, None)
-    if manual:
-        # Keep unselected sources at their compiled versions while the selected roots build.
-        for name in reused:
-            artifact = graph[name].get("artifact")
-            old = recorded[name].get("sources", {})
-            if artifact and artifact in old:
-                effective[artifact] = old[artifact]
+    for name in reused:
+        artifact = recorded[name].get("artifact")
+        old = recorded[name].get("sources", {})
+        if artifact and artifact in old:
+            effective[artifact] = old[artifact]
     result = {"schema": 1, "compatibility": compatibility, "full": False, "manual": manual,
             "requested": sorted(requested), "selected": sorted(selected), "reused": sorted(reused),
             "rebuilt_libraries": [],
             "reason": "Explicit library selection" if manual else "Changed library sources",
             "inventory": inventory, "effective_sources": effective, "previous_state": state}
-    if imported:
-        result["deployment_import"] = deployment_import
-    if compiler_runtime is not None:
-        result["compiler_runtime_scan"] = compiler_runtime
     return result
 
 
@@ -324,14 +298,6 @@ def record_state(plan, manifest):
             actual[name] = previous[name]
         else:
             actual[name] = dict(graph[name], sources=source_inputs(graph[name], plan["effective_sources"]))
-            actual[name]["compiled_compatibility"] = plan["compatibility"]
-        runtime = plan.get("compiler_runtime_scan", {}).get("libraries", {}).get(name)
-        if runtime is not None:
-            if name in plan.get('reused', []) and actual[name].get('compiler_runtime') == compact_runtime(runtime):
-                continue
-            # This is inspection of actual linkage; it does not relabel reused recipe inputs.
-            actual[name] = dict(actual[name], compiler_runtime=compact_runtime(runtime),
-                                compiler_runtime_attestation="artifact-scan" if name in plan.get("reused", []) else "rebuilt")
     combined = {name: {"depends": sorted(set(record.get("depends", [])) | set(graph.get(name, {}).get("depends", [])))}
                 for name, record in manifest["libraries"].items()}
     for name, record in actual.items():
@@ -347,8 +313,6 @@ def record_state(plan, manifest):
     sources = {name: value for name, value in plan["effective_sources"].items() if name in relevant}
     compilation = plan["compatibility"] if plan["full"] else plan["previous_state"].get("compatibility", plan["compatibility"])
     result = {"schema": 1, "compatibility": compilation, "sources": sources, "libraries": actual}
-    if plan.get("deployment_import"):
-        result["deployment_compatibility"] = plan["compatibility"]
     return result
 
 
@@ -434,10 +398,6 @@ def execute(root, buildroot, plan, package_type, command=None):
             raise RuntimeError("Built library does not match its pinned source: " + name)
     plan["rebuilt_libraries"] = sorted(set(plan.get("rebuilt_libraries", [])) | set(selected))
     write(buildroot / 'shared-libraries.json', current)
-    if "compiler_runtime_scan" in plan:
-        plan["compiler_runtime_scan"] = compiler_runtime_scan(buildroot, current, plan["compiler_runtime_scan"]["compiler_runtime"])
-        if selected_static := set(selected) & set(plan["compiler_runtime_scan"].get("must_rebuild", [])):
-            raise RuntimeError("Rebuilt libraries still embed the static C++ runtime: " + ",".join(sorted(selected_static)))
     state = record_state(plan, current)
     write(buildroot / STATE, state)
     return {"schema": 1, "complete": True, "full": plan["full"], "manual": plan["manual"],
@@ -457,7 +417,6 @@ def main():
     prepare.add_argument("--libraries", default="")
     prepare.add_argument("--request", type=Path)
     prepare.add_argument("--output", type=Path, required=True)
-    prepare.add_argument("--compiler-runtime-scan", type=Path)
     run = sub.add_parser("run")
     run.add_argument("--root", type=Path, default=Path("."))
     run.add_argument("--buildroot", type=Path)
@@ -484,9 +443,8 @@ def main():
         state = read(buildroot / STATE)
         if os.environ.get("MODE") == "incremental" and (not isinstance(state, dict) or state.get("schema") != 1):
             raise RuntimeError("No recorded library SDK; refusing a full rebuild for an incremental request")
-        runtime = read(args.compiler_runtime_scan) if args.compiler_runtime_scan else None
         plan = selection(inventory, sources, manifest, state, args.compatibility,
-                         args.libraries, invalid_libraries(buildroot, manifest), request.get("libraries", []), compiler_runtime=runtime)
+                         args.libraries, invalid_libraries(buildroot, manifest), request.get("libraries", []))
         write(args.output, plan)
         print(json.dumps({key: plan[key] for key in ["full", "manual", "requested", "selected", "reused", "reason"]}, sort_keys=True))
     elif args.action == "expand":

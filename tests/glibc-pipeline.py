@@ -546,7 +546,7 @@ class Pipeline(unittest.TestCase):
             self.assertEqual((output / 'debug/lib/libz.so.1.3.1.debug').read_bytes(), b'actual-debug')
             self.assertFalse((output / 'lib/unrelated.so').exists())
 
-    def test_partial_source_request_without_cached_core_refuses_full_fallback(self):
+    def test_partial_source_request_without_cached_core_refuses_full_compilation(self):
         with tempfile.TemporaryDirectory(prefix='spp-payload-cache-miss-') as temporary:
             root = Path(temporary)
             stage = root / 'stage'
@@ -560,8 +560,6 @@ class Pipeline(unittest.TestCase):
             calls = []
             def record(arguments, **kwargs):
                 calls.append([str(value) for value in arguments])
-                if len(arguments) > 2 and str(arguments[1]).endswith('/payload-cache.py') and arguments[2] == 'restore':
-                    return subprocess.CompletedProcess(arguments, 0, stdout='{"restored": false, "core_source_changed": true}\n')
                 if arguments[:3] == ['php', 'bin/spp', 'build']:
                     (root / 'build/8.6/bin').mkdir(parents=True)
                     (root / 'build/8.6/bin/php').write_bytes(b'consumer')
@@ -574,21 +572,12 @@ class Pipeline(unittest.TestCase):
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
-                    with self.assertRaisesRegex(RuntimeError, 'refusing a full rebuild'):
+                    with self.assertRaisesRegex(RuntimeError, 'requires its cached PHP core'):
                         glibc.payload()
                     self.assertEqual(calls, [])
                     os.environ['COMPILE'] = 'false'
                     with self.assertRaisesRegex(RuntimeError, 'requires its sealed PHP cache'):
                         glibc.payload()
-                    os.environ['COMPILE'] = 'true'
-                    (root / 'php-payload-cache.tar.zst').write_bytes(b'cache verified by fixture')
-                    (stage / 'payload-cache-key').write_text('current')
-                    (stage / 'payload-cache-seed-key').write_text('current-seed')
-                    glibc.payload()
-                    build = next(call for call in calls if call[:3] == ['php', 'bin/spp', 'build'])
-                    self.assertFalse(any(value.startswith('--packages=') for value in build))
-                    self.assertFalse((root / 'buildroot/bin/php').exists())
-                    self.assertEqual((root / 'build/8.6/bin/php').read_bytes(), b'consumer')
                 finally:
                     os.chdir(previous)
 

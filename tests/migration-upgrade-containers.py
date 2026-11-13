@@ -251,10 +251,13 @@ def package_profiles(baseline):
 def candidate_only_profiles(baseline, inventory):
     published = {p['name'] for p in baseline.get('packages', []) + baseline.get('published_packages', [])}
     published.update(inventory.get('published_names', []))
+    previous = {p['name']: p.get('version') for p in inventory.get('old', [])}
+    replaced = {p['name'] for p in inventory.get('incoming', [])
+                if p['name'] in inventory.get('incoming_changes', []) and p.get('version') is not None and previous.get(p['name']) == p['version']}
     core = {'php-zts', 'php-zts-cli', 'php-zts-cgi', 'php-zts-fpm', 'php-zts-embed',
             'php-zts-devel', 'php-zts-runtime-layout', 'php-zts-curl', 'php-zts-fileinfo'}
     names = {p['name'] for p in inventory.get('incoming', [])
-                    if p['name'].startswith('php-zts-') and p['name'] not in published | core
+                    if p['name'].startswith('php-zts-') and (p['name'] not in published or p['name'] in replaced) and p['name'] not in core
                     and not p['name'].startswith('php-zts-lib-')
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))}
     hosts = ({'php-zts-cli', 'php-zts-fpm', 'frankenphp'}

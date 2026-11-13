@@ -40,42 +40,8 @@ def stable_artifact(value):
     return result
 
 
-def library_build_sources(root):
-    sources = json.loads((root / "downloads/.cache.json").read_text())
-    plan_path = root / "downloads/build-plan.json"
-    inventory = json.loads(plan_path.read_text()).get("build_inputs") if plan_path.exists() else None
-    if inventory is not None:
-        fields = ["managed_library_artifacts", "library_tool_artifacts", "irrelevant_artifacts"]
-        if inventory.get("schema") != 1 or any(not isinstance(inventory.get(field), list) or any(not isinstance(name, str) for name in inventory[field]) for field in fields):
-            raise RuntimeError("Invalid library build input inventory")
-        required = set(inventory["managed_library_artifacts"]) | set(inventory["library_tool_artifacts"])
-        excluded = set(inventory["irrelevant_artifacts"]) - required
-        sources = {name: value for name, value in sources.items() if name not in excluded}
-    return {name: stable_artifact(value) for name, value in sources.items()}
-
-
-def fingerprint(root, target, toolchain, libraries="", build_environment=None, image=""):
-    digest = hashlib.sha256(b"shared-libraries-v2\0" + target.encode() + b"\0" + toolchain.encode() + b"\0" + image.encode())
-    sources = library_build_sources(root)
-    digest.update(json.dumps(sources, sort_keys=True, separators=(",", ":")).encode())
-    digest.update(json.dumps(csv(libraries, []), separators=(",", ":")).encode())
-    if build_environment is not None:
-        digest.update(json.dumps(build_environment, sort_keys=True, separators=(",", ":")).encode())
-    for pattern in ("composer.json", "composer.lock", "craft.yml", "spc.registry.yml", "config/**/*", "Dockerfile.*",
-                    "src/hook/**/*", "src/artifact/**/*", "src/Command/BuildCommand.php", "src/Command/BaseCommand.php",
-                    "src/CraftConfig.php", "src/util/SpcAutoload.php", "src/util/TwigRenderer.php", "src/step/RunSPC.php",
-                    "bin/spp", "bin/shared-library-plan", ".github/actions/shared-libraries/*"):
-        for path in sorted(root.glob(pattern)):
-            if path.is_file():
-                digest.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
-    return digest.hexdigest()[:32]
-
-
-def compatibility(root, target, toolchain, build_environment):
-    if build_environment.get("schema") != 1 or not isinstance(build_environment.get("environment"), dict):
-        raise RuntimeError("Missing rendered library build environment")
-    value = {"target": target, "toolchain": toolchain, "build_environment": build_environment}
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
+def fingerprint(target):
+    return hashlib.sha256(target.encode()).hexdigest()[:32]
 
 
 def consumer_target(target, plan, stream, request):
@@ -258,9 +224,6 @@ def main():
     setup.add_argument("--resolve-images", action="store_true")
     fp = sub.add_parser("fingerprint")
     fp.add_argument("--target", required=True)
-    fp.add_argument("--toolchain", required=True)
-    fp.add_argument("--libraries", default="")
-    fp.add_argument("--image", default="")
     fp.add_argument("--build-environment", type=Path, required=True)
     validate = sub.add_parser("validate-source")
     validate.add_argument("--mode", choices=("full", "incremental"), required=True)
@@ -363,11 +326,10 @@ def main():
         emit("matrix", {"include": values})
         emit("php-versions", csv(args.php_versions, STREAMS))
     elif args.command == "fingerprint":
-        environment = json.loads(args.build_environment.read_text())
-        emit("fingerprint", fingerprint(Path("."), args.target, args.toolchain, args.libraries, environment, args.image))
-        compatible = compatibility(Path("."), args.target, args.toolchain, environment)
-        emit("compatibility", compatible)
-        args.build_environment.with_name("library-compatibility").write_text(compatible + "\n")
+        identity = fingerprint(args.target)
+        emit("fingerprint", identity)
+        emit("compatibility", identity)
+        args.build_environment.with_name("library-compatibility").write_text(identity + "\n")
     elif args.command == "validate-source":
         if args.mode == "incremental" and not Path("downloads/build-plan.json").is_file():
             raise RuntimeError("Incremental builds require downloads/build-plan.json; run spc-download or select full mode")

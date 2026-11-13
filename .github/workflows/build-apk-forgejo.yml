@@ -50,9 +50,6 @@ concurrency:
     cancel-in-progress: false
     queue: max
 
-env:
-    REQUESTED_PACKAGES: ${{ inputs.packages }}
-
 jobs:
     setup-matrix:
         runs-on: ubuntu-24.04

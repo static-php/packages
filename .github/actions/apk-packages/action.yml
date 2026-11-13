@@ -30,17 +30,16 @@ runs:
                 key: ${{ steps.payload-cache-key.outputs.cache-key }}
                 seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
                 path: php-payload-cache.tar.zst
-                reuse-current-slot: ${{ env.COMPILE_PACKAGES != '' && env.ABI_CORE_REBUILD != 'true' }}
         -   name: Freeze actual published baseline
             uses: ./.github/actions/native-baseline
         -   name: Build and test PHP packages
             if: env.LIBRARY_ONLY != 'true'
             env:
-                EXPORT_PAYLOAD_CACHE: ${{ env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true' }}
+                EXPORT_PAYLOAD_CACHE: ${{ env.PUBLISH == 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true') }}
             shell: bash
             run: bash .github/actions/shared-libraries/run.sh php
         -   name: Save sealed PHP payload cache
-            if: ${{ !cancelled() && env.PUBLISH == 'true' && env.LIBRARY_ONLY != 'true' && steps.payload-cache.outputs.cache-current != 'true' && hashFiles('php-payload-cache-ready.tar.zst') != '' }}
+            if: ${{ !cancelled() && env.PUBLISH == 'true' && env.LIBRARY_ONLY != 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true') && hashFiles('php-payload-cache-ready.tar.zst') != '' }}
             uses: ./.github/actions/buildroot-cache
             with:
                 mode: save

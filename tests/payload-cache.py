@@ -35,7 +35,6 @@ class PayloadCache(unittest.TestCase):
         (self.root / 'bin/build-payload').symlink_to(ROOT / 'bin/build-payload')
         self.request = {'payload_core_inputs': {'8.6': 'a' * 64}, 'payload_component_inputs': {'8.6': {'imagick': 'old'}}}
         (self.root / 'downloads/.spc-meta.json').write_text(json.dumps({'php_versions': {'8.6': '8.6.0RC4'}}))
-        (self.root / 'downloads/php-8.6.0RC4.tar.xz').write_bytes(b'pinned PHP core source')
         template = self.root / 'config/templates/craft.yml.twig'
         template.parent.mkdir(parents=True)
         template.write_text("{% set base_sapi_str = 'cli,embed' %}\n{% set base_shared_str = 'imagick' %}\n# -O2\n")
@@ -84,19 +83,18 @@ class PayloadCache(unittest.TestCase):
         self.request['payload_component_inputs']['8.6']['imagick'] = 'new'
         self.save_request()
         current = self.state()
-        self.assertNotEqual(current['key'], previous['key'])
+        self.assertEqual(current['key'], previous['key'])
         self.assertEqual(current['seed-key'], previous['seed-key'])
-        self.assertEqual(cache.changed_components({'go': 'old'}, {'go': 'new'}), {'frankenphp'})
 
-    def test_core_source_flags_or_compiler_changes_invalidate_seed(self):
+    def test_flags_or_compiler_changes_preserve_the_cache_slot(self):
         previous = self.state()
         template = self.root / 'config/templates/craft.yml.twig'
         previous_template = template.read_text()
         template.write_text(previous_template.replace('-O2', '-O3'))
-        self.assertNotEqual(self.state()['seed-key'], previous['seed-key'])
+        self.assertEqual(self.state()['seed-key'], previous['seed-key'])
         template.write_text(previous_template)
         self.compiler.write_text('another compiler')
-        self.assertNotEqual(self.state()['seed-key'], previous['seed-key'])
+        self.assertEqual(self.state()['seed-key'], previous['seed-key'])
 
     def test_old_snapshot_recipe_fingerprints_cannot_override_current_checkout(self):
         previous = self.state()
@@ -105,65 +103,7 @@ class PayloadCache(unittest.TestCase):
         self.assertEqual(self.state()['key'], previous['key'])
         template = self.root / 'config/templates/craft.yml.twig'
         template.write_text(template.read_text().replace('-O2', '-O3'))
-        self.assertNotEqual(self.state()['seed-key'], previous['seed-key'])
-
-    def test_selected_source_update_reuses_core_across_builder_changes(self):
-        old = self.root / 'old'
-        self.fixture(old, 1, php=True)
-        state = self.state()
-        archive = self.root / 'old.tar.zst'
-        cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler,
-                     key=state['key'], seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        sdk = self.root / 'sdk'
-        self.fixture(sdk, 2)
-        self.compiler.write_text('updated compiler and system headers')
-        template = self.root / 'config/templates/craft.yml.twig'
-        template.write_text(template.read_text().replace('-O2', '-O3'))
-        self.request['payload_component_inputs']['8.6']['imagick'] = 'new-source'
-        self.save_request()
-        current = self.state()
-        target = self.root / 'restored'
-        args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=target,
-                                  compatibility=self.compiler, key=current['key'], seed_key=current['seed-key'],
-                                  archive=archive, compile_packages='imagick', reuse_core_sources=True)
-        cache.restore(args)
-        self.assertEqual((target / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
-        self.assertEqual(cache.read(target / 'consumer-cache-seed.json')['rebuild_packages'], ['imagick'])
-        self.assertEqual((target / 'lib/libfixture.so.1').read_bytes(), (sdk / 'lib/libfixture.so.1').read_bytes())
-        current_sources = cache.read(self.root / 'downloads/.cache.json')
-        current_sources['ext-imagick']['source'].update(hash='old', version='metadata-only-update')
-        cache.write(self.root / 'downloads/.cache.json', current_sources)
-        current = self.state()
-        args.key, args.seed_key, args.payload = current['key'], current['seed-key'], self.root / 'metadata-only'
-        cache.restore(args)
-        self.assertEqual(cache.read(args.payload / 'consumer-cache-seed.json')['rebuild_packages'], [])
-        self.assertEqual((args.payload / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
-        (self.root / 'downloads/php-8.6.0RC4.tar.xz').write_bytes(b'changed PHP core source')
-        current = self.state()
-        args.key, args.seed_key, args.payload = current['key'], current['seed-key'], self.root / 'changed-core'
-        cache.restore(args)
-        self.assertFalse(args.payload.exists())
-        self.assertEqual((sdk / 'lib/libfixture.so.1').read_bytes(), (target / 'lib/libfixture.so.1').read_bytes())
-
-    def test_legacy_core_sources_require_the_recorded_source_run(self):
-        current = self.state()['inputs']['core_sources']
-        manifest = {'inputs': {}, 'source_run_id': '1234', 'build_payload': {'source_version': '8.6.0RC4'}}
-        cache.write(self.root / 'stage/php-core-sources-1234.json', {
-            '.cache.json': cache.read(self.root / 'downloads/.cache.json'),
-            '.spc-meta.json': {'php_versions': {'8.6': '8.6.0RC4'}, 'php_source_hashes': {'8.6': current['php_source']}}})
-        self.assertEqual(cache.recorded_core_sources(self.root, manifest, '8.6'), current)
-        manifest['build_payload']['source_version'] = '8.6.0RC5'
-        with self.assertRaisesRegex(RuntimeError, 'does not identify the cached core'):
-            cache.recorded_core_sources(self.root, manifest, '8.6')
-
-    def test_bundled_zip_does_not_rebuild_for_an_unused_pecl_archive(self):
-        spec = importlib.util.spec_from_file_location('bundled_zip_sources', ROOT / '.github/actions/shared-libraries/source-plan.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        sources = {'ext-zip': {'source': {'hash': 'changed PECL archive'}}}
-        self.assertEqual(cache.component_sources(module, sources, {}, '8.4', ['zip']), {'zip': 'changed PECL archive'})
-        for stream in ['8.5', '8.6']:
-            self.assertEqual(cache.component_sources(module, sources, {}, stream, ['zip']), {'zip': None})
+        self.assertEqual(self.state()['seed-key'], previous['seed-key'])
 
     def test_streamed_archive_rejects_corruption_and_inventory_changes(self):
         content = b'cached executable'
@@ -343,7 +283,7 @@ class PayloadCache(unittest.TestCase):
         original_sdk = (sdk / 'build-payload.json').read_bytes()
         args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=self.root / 'selected',
                                   compatibility=self.compiler, key=state['key'], seed_key=state['seed-key'],
-                                  archive=archive, compile_packages='imagick', package_selection='imagick')
+                                  archive=archive, compile_packages='', package_selection='imagick')
         cache.restore(args)
         self.assertFalse((args.payload / 'lib/libfixture.so.1').exists())
         self.assertTrue((args.payload / 'lib/libphp-zts-86.so').is_file())
@@ -355,7 +295,7 @@ class PayloadCache(unittest.TestCase):
         self.request['payload_component_inputs']['8.6']['imagick'] = 'new'
         self.save_request()
         args.key = self.state()['key']
-        args.payload = self.root / 'changed'
+        args.payload = self.root / 'changed'; args.compile_packages = 'imagick'
         cache.restore(args)
         self.assertTrue((args.payload / 'lib/libfixture.so.1').exists())
         self.assertNotIn('packaging_selection', cache.read(args.payload / 'build-payload.json'))
@@ -375,10 +315,7 @@ class PayloadCache(unittest.TestCase):
         target = self.root / 'restored'
         args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=target, compatibility=self.compiler,
                                   key=state['key'], seed_key=state['seed-key'], archive=archive, compile_packages='')
-        runtime = cache.runtime_helper()
-        with patch.object(cache, 'runtime_helper', return_value=runtime), \
-                patch.object(runtime, 'scan_payload', side_effect=AssertionError('unchanged compiler runtime scan')):
-            cache.restore(args)
+        cache.restore(args)
         self.assertEqual((target / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
         self.assertEqual((target / 'payload/runtime/bin/php').read_bytes(), (old / 'payload/runtime/bin/php').read_bytes())
         self.assertEqual(hashlib.sha256((target / 'lib/libfixture.so.1').read_bytes()).hexdigest(), new_library)
@@ -388,78 +325,9 @@ class PayloadCache(unittest.TestCase):
         cache.restore(args)
         retry = cache.read(args.payload / 'consumer-cache-seed.json')
         self.assertTrue(retry['cache_exact'])
-        self.assertEqual(retry['rebuild_packages'], [])
-        runtime_path = self.root / 'stage/payload-compiler-runtime.json'
-        original_runtime = cache.read(runtime_path)
-        changed_runtime = json.loads(json.dumps(original_runtime))
-        changed_runtime['semantic']['headers_sha256'] = 'b' * 64
-        changed_runtime['fingerprint'] = cache.digest(changed_runtime['semantic'])
-        cache.write(runtime_path, changed_runtime)
-        args.key = self.state()['key']
-        args.payload = self.root / 'compatible-nonexact-retry'
-        cache.restore(args)
-        retry = cache.read(args.payload / 'consumer-cache-seed.json')
-        self.assertFalse(retry['cache_exact'])
-        self.assertEqual(retry['rebuild_packages'], [])
-        cache.write(runtime_path, original_runtime)
-        args.compile_packages = ''
-        self.request['payload_component_inputs']['8.6']['imagick'] = 'new'
-        self.save_request()
-        changed = self.state()
-        args.key = changed['key']
-        args.payload = self.root / 'refused'
-        with self.assertRaisesRegex(RuntimeError, 'outside the requested compile packages'):
-            cache.restore(args)
-        self.assertFalse(args.payload.exists())
-        args.compile_packages = 'imagick'
-        args.payload = self.root / 'partial'
-        cache.restore(args)
-        self.assertEqual(cache.read(args.payload / 'consumer-cache-seed.json')['rebuild_packages'], ['imagick'])
-        with self.assertRaisesRegex(RuntimeError, 'still require their selected'):
-            cache.export(argparse.Namespace(root=self.root, payload=args.payload, compatibility=self.compiler,
-                                            key=changed['key'], seed_key=changed['seed-key'], source_run_id='5678',
-                                            output=self.root / 'pending.tar.zst'))
-        args.compile_packages = ''
-        args.allow_all_components = True
-        args.payload = self.root / 'derived-partial'
-        cache.restore(args)
-        self.assertEqual(cache.read(args.payload / 'consumer-cache-seed.json')['rebuild_packages'], ['imagick'])
+        self.assertEqual(retry['rebuild_packages'], ['imagick'])
 
-    @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'g++', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native C++ payload tools required')
-    def test_changed_cxx_input_rebuilds_only_actual_cxx_consumer(self):
-        old = self.root / 'old'
-        self.fixture(old, 1, php=True)
-        module = old / 'modules/imagick-zts-86.so'
-        module.parent.mkdir(exist_ok=True)
-        source = self.root / 'consumer.cc'
-        source.write_text('#include <stdexcept>\nextern "C" int addon(int v) { if (v) throw std::runtime_error("test"); return 0; }\n')
-        subprocess.run(['g++', '-shared', '-fPIC', '-g', str(source), '-o', str(module)], check=True)
-        config = self.root / 'craft.yml'
-        for command, extras in [('record', ['--config', str(self.root / 'craft.yml'), '--php-version', '8.6.0RC4', '--arch', self.architecture]), ('seal', [])]:
-            subprocess.run(['php', str(ROOT / 'bin/build-payload'), command, '--root', str(old), *extras], check=True, stdout=subprocess.DEVNULL)
-        state = self.state()
-        archive = self.root / 'cache.tar.zst'
-        cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
-                                        seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        runtime_path = self.root / 'stage/payload-compiler-runtime.json'
-        runtime = cache.read(runtime_path)
-        runtime['semantic']['headers_sha256'] = 'b' * 64
-        runtime['fingerprint'] = cache.digest(runtime['semantic'])
-        cache.write(runtime_path, runtime)
-        current = self.state()
-        self.assertEqual(current['seed-key'], state['seed-key'])
-        self.assertNotEqual(current['key'], state['key'])
-        sdk = self.root / 'sdk'
-        self.fixture(sdk, 2)
-        restored = self.root / 'restored'
-        cache.restore(argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=restored, compatibility=self.compiler,
-                                         key=current['key'], seed_key=current['seed-key'], archive=archive, compile_packages=''))
-        receipt = cache.read(restored / 'consumer-cache-seed.json')
-        self.assertEqual(receipt['runtime_rebuild_packages'], ['imagick'])
-        self.assertEqual(receipt['rebuild_packages'], ['imagick'])
-        self.assertEqual((restored / 'bin/php').read_bytes(), (old / 'bin/php').read_bytes())
 
-    @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
     def test_abi_rebuild_reuses_core_only_when_all_changed_library_consumers_are_selected(self):
         old = self.root / 'old'
         self.fixture(old, 1, php=True)
@@ -517,14 +385,13 @@ class PayloadCache(unittest.TestCase):
         self.assertFalse(args.payload.exists())
 
     @unittest.skipUnless(all(shutil.which(command) for command in ['gcc', 'php', 'zstd', 'readelf', 'strip', 'objcopy']), 'native payload tools required')
-    def test_abi_change_unused_by_php_does_not_recompile_requested_source_retry(self):
+    def test_extension_update_rebuilds_requested_extension_with_unchanged_source_hash(self):
         old = self.root / 'old'
         self.fixture(old, 1, php=True)
         state = self.state()
         archive = self.root / 'cache.tar.zst'
         cache.export(argparse.Namespace(root=self.root, payload=old, compatibility=self.compiler, key=state['key'],
                                         seed_key=state['seed-key'], source_run_id='1234', output=archive))
-        self.manifest['libraries']['fixture']['elf']['lib/libfixture.so.1']['soname'] = 'libfixture.so.2'
         current = self.state()
         sdk = self.root / 'sdk'
         self.fixture(sdk, 2)
@@ -533,9 +400,17 @@ class PayloadCache(unittest.TestCase):
                                          key=current['key'], seed_key=current['seed-key'], archive=archive,
                                          compile_packages='imagick', abi_rebuild_libraries='fixture'))
         receipt = cache.read(target / 'consumer-cache-seed.json')
-        self.assertEqual(receipt['rebuild_packages'], [])
+        self.assertEqual(receipt['rebuild_packages'], ['imagick'])
         self.assertFalse(receipt['abi_rebuild_required'])
         self.assertEqual((target / 'modules/imagick-zts-86.so').read_bytes(), (old / 'modules/imagick-zts-86.so').read_bytes())
+        cache.write(self.root / 'downloads/.spc-meta.json', {'php_versions': {'8.6': '8.6.0RC5'}})
+        args = argparse.Namespace(root=self.root, stream='8.6', sdk=sdk, payload=self.root / 'new-core',
+                                  compatibility=self.compiler, key=current['key'], seed_key=current['seed-key'],
+                                  archive=archive, compile_packages='imagick')
+        with self.assertRaises(SystemExit) as changed:
+            cache.restore(args)
+        self.assertEqual(changed.exception.code, 3)
+        self.assertFalse(args.payload.exists())
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,11 +4,9 @@
 import argparse
 import io
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
-import tarfile
 import time
 import zipfile
 
@@ -95,53 +93,32 @@ class RemoteZip(io.RawIOBase):
         return data[:count]
 
 
-def metadata_archive(run_id, artifact):
-    token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
-    if not token:
-        token = subprocess.check_output(['gh', 'auth', 'token'], text=True).strip()
-    headers = {'Authorization': 'Bearer ' + token}
-    records = []
-    for page in range(1, 101):
-        response = request(requests, 'GET', f'https://api.github.com/repos/{repository()}/actions/runs/{run_id}/artifacts',
-                           headers=headers, params={'per_page': 100, 'page': page}, timeout=30)
-        if response.status_code != 200:
-            raise RuntimeError('Cannot list retained build artifacts: HTTP ' + str(response.status_code))
-        values = response.json()['artifacts']
-        records.extend(values)
-        if len(values) < 100:
+def read_metadata(run_id, artifact, selected):
+    pages = None
+    for attempt in range(3):
+        result = subprocess.run(['gh', 'api', '--paginate', '--slurp',
+            f'repos/{repository()}/actions/runs/{run_id}/artifacts'], text=True, capture_output=True)
+        if result.returncode == 0:
+            pages = json.loads(result.stdout)
             break
-    matches = [record for record in records if record['name'] == artifact and not record['expired']]
+        if attempt < 2:
+            time.sleep(attempt + 1)
+    if pages is None:
+        raise RuntimeError('Cannot list retained build artifacts after three attempts')
+    matches = [record for page in pages for record in page['artifacts']
+               if record['name'] == artifact and not record['expired']]
     if len(matches) != 1:
         raise RuntimeError('Missing or ambiguous retained metadata artifact: ' + artifact)
+    token = subprocess.check_output(['gh', 'auth', 'token'], text=True).strip()
     response = request(requests, 'GET', f"https://api.github.com/repos/{repository()}/actions/artifacts/{matches[0]['id']}/zip",
         headers={'Authorization': 'Bearer ' + token}, allow_redirects=False, timeout=30)
     if response.status_code != 302:
         raise RuntimeError('Cannot access retained metadata artifact: HTTP ' + str(response.status_code))
-    return zipfile.ZipFile(RemoteZip(response.headers['Location']))
-
-
-def read_metadata(run_id, artifact, selected):
-    with metadata_archive(run_id, artifact) as archive:
+    with zipfile.ZipFile(RemoteZip(response.headers['Location'])) as archive:
         records = {name: archive.read(name) for name in selected}
     for data in records.values():
         json.loads(data)
     return records
-
-
-def source_metadata(run_id):
-    wanted = {'.cache.json', '.spc-meta.json'}
-    records = {}
-    with metadata_archive(run_id, 'downloads-inputs') as archive:
-        with archive.open('downloads-inputs.tar.gz') as source, tarfile.open(fileobj=source, mode='r|gz') as bundle:
-            for entry in bundle:
-                name = entry.name.removeprefix('./')
-                if name in wanted and entry.isfile():
-                    if entry.size > 8 * 1024 * 1024:
-                        raise RuntimeError('Oversized recorded source metadata: ' + name)
-                    records[name] = json.load(bundle.extractfile(entry))
-                    if records.keys() == wanted:
-                        return records
-    raise RuntimeError('Recorded source snapshot lacks its PHP source identities')
 
 
 def main():

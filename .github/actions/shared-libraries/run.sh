@@ -19,7 +19,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -v "$HOME/.cache/composer":/composer-cache \
         -e IN_BUILDER=true -e COMPOSER_CACHE_DIR=/composer-cache \
         -e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)" \
-        -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e REQUESTED_PACKAGES -e PHPV -e ITERATION -e BUMP -e PUBLISH \
+        -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP -e PUBLISH \
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
@@ -71,9 +71,8 @@ case "$command" in
         php bin/spp --version >/dev/null
         mkdir -p stage
         php .github/actions/shared-libraries/build-inputs.php "$PWD" "$TYPE" "$TARGET" > stage/library-build-environment.json
-        toolchain=$(python3 .github/actions/shared-libraries/toolchain.py --build-environment stage/library-build-environment.json)
-        python3 .github/actions/shared-libraries/workflow.py fingerprint --target "$TYPE-$TARGET" --toolchain "$toolchain" \
-            --libraries "${LIBRARIES:-}" --image "$IMAGE" --build-environment stage/library-build-environment.json
+        python3 .github/actions/shared-libraries/workflow.py fingerprint --target "$TYPE-$TARGET" \
+            --build-environment stage/library-build-environment.json
         ;;
     libs)
         git config --global --add safe.directory "$PWD"
@@ -102,7 +101,9 @@ case "$command" in
         if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi
         baseline_args=(--packages "${PACKAGES:-}")
         if [[ "${TLS_CHECKS:-false}" == true ]]; then baseline_args+=(--tls); fi
-        if [[ "${LIBRARY_ONLY:-}" == true ]]; then baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json"); fi
+        if [[ "${LIBRARY_ONLY:-}" == true ]] || jq -e '.libraries | length > 0' "$baseline_stage/shared-library-plan.json" >/dev/null; then
+            baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json")
+        fi
         python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
             --inventory "$baseline_stage/native-inventories/$PHPV.json" "${baseline_args[@]}"
         ;;

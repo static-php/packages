@@ -22,7 +22,6 @@ runs:
                 key: ${{ steps.payload-cache-key.outputs.cache-key }}
                 seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
                 path: php-payload-cache.tar.zst
-                reuse-current-slot: ${{ env.COMPILE_PACKAGES != '' && env.ABI_CORE_REBUILD != 'true' }}
         -   name: Build and seal common PHP payload
             shell: bash
             run: bash .github/actions/shared-libraries/run.sh glibc-payload
@@ -38,13 +37,13 @@ runs:
                 compression-level: 0
                 retention-days: 1
         -   name: Export PHP-only sealed cache
-            if: env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true'
+            if: env.PUBLISH == 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true')
             shell: bash
             run: |
                 source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
                 python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV" --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)" --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache.tar.zst
         -   name: Save sealed PHP payload cache
-            if: env.PUBLISH == 'true' && steps.payload-cache.outputs.cache-current != 'true'
+            if: env.PUBLISH == 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true')
             uses: ./.github/actions/buildroot-cache
             with:
                 mode: save

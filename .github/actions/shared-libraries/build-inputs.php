@@ -5,12 +5,6 @@ declare(strict_types=1);
 
 use staticphp\util\SpcAutoload;
 use staticphp\util\TwigRenderer;
-use StaticPHP\Package\LibraryPackage;
-use StaticPHP\Runtime\Executor\UnixAutoconfExecutor;
-use StaticPHP\Runtime\Executor\UnixCMakeExecutor;
-use StaticPHP\Toolchain\GccNativeToolchain;
-use StaticPHP\Util\SharedLibraryManifest;
-use StaticPHP\Util\SharedLibraryUtil;
 use Symfony\Component\Yaml\Yaml;
 
 $root = $argv[1] ?? dirname(__DIR__, 3);
@@ -49,19 +43,9 @@ foreach ($config['extra-env'] as $name => $value) {
 $options = array_intersect_key($config['build-options'], array_flip([
     'with-shared-libs', 'with-shared-libdir', 'with-suggests',
 ]));
-$implementation = [];
-foreach ([LibraryPackage::class, UnixAutoconfExecutor::class, UnixCMakeExecutor::class, GccNativeToolchain::class, SharedLibraryManifest::class] as $class) {
-    $implementation[$class] = hash_file('sha256', (new ReflectionClass($class))->getFileName());
-}
-foreach (['configureEnvironment', 'withoutStaticFlags', 'ldflags', 'buildEnvironment', 'normalizeLibraryDirectory', 'removeLibtoolArchives', 'linkArchive', 'libraryFiles', 'pkgConfigFiles', 'buildsShared', 'runtimeDirectory', 'isManaged'] as $method) {
-    $reflection = new ReflectionMethod(SharedLibraryUtil::class, $method);
-    $lines = file($reflection->getFileName());
-    $implementation[SharedLibraryUtil::class . '::' . $method] = hash('sha256', implode('', array_slice($lines, $reflection->getStartLine() - 1, $reflection->getEndLine() - $reflection->getStartLine() + 1)));
-}
 ksort($environment);
 ksort($options);
-ksort($implementation);
 echo json_encode([
     'schema' => 1, 'type' => $type, 'target' => $target, 'architecture' => $arch,
-    'environment' => $environment, 'options' => $options, 'implementation' => $implementation,
+    'environment' => $environment, 'options' => $options,
 ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES), "\n";

@@ -554,6 +554,16 @@ class MigrationUpgradeHarness(unittest.TestCase):
         inventory['published_names'] = ['php-zts-grpc']
         self.assertEqual(harness['candidate_only_profiles'](baseline, inventory), [])
 
+    def test_changed_same_version_extension_gets_a_fresh_install_check(self):
+        baseline = {'packages': [{'name': 'php-zts-ssh2'}]}
+        package = {'name': 'php-zts-ssh2', 'version': '1.6.0-r0'}
+        inventory = {'old': [package], 'incoming': [package], 'incoming_changes': ['php-zts-ssh2']}
+        self.assertEqual(harness['candidate_only_profiles'](baseline, inventory),
+                         [{'id': 'fresh-php-zts-ssh2', 'packages': ['php-zts-ssh2'],
+                           'fresh_package': 'php-zts-ssh2'}])
+        inventory['incoming_changes'] = []
+        self.assertEqual(harness['candidate_only_profiles'](baseline, inventory), [])
+
     def test_candidate_only_profile_is_appended_to_shared_mirror_suite_and_counted_separately(self):
         calls = []
         class Shared(PreparedStub):

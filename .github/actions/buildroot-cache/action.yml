@@ -16,10 +16,6 @@ inputs:
         required: false
         default: 'false'
         description: Require the exact compiled SDK; never accept a compatible seed.
-    reuse-current-slot:
-        required: false
-        default: 'false'
-        description: Restore the current target for downstream verification of its recorded sources.
     path:
         required: false
         default: buildroot.tar.zst
@@ -49,7 +45,6 @@ runs:
                 KEY: ${{ inputs.key }}
                 SEED_KEY: ${{ inputs.seed-key }}
                 FAIL_ON_MISS: ${{ inputs.fail-on-cache-miss }}
-                REUSE_CURRENT: ${{ inputs.reuse-current-slot }}
                 LOCAL_FILE: ${{ inputs.path }}
                 REPO: ${{ github.repository }}
                 GH_TOKEN: ${{ github.token }}

@@ -156,13 +156,12 @@ class GitHub:
 
 
 class ReleaseCache:
-    def __init__(self, backend, key, path, seed_key="", reuse_current=False):
+    def __init__(self, backend, key, path, seed_key=""):
         self.tag = "cache"
         self.asset, self.receipt = cache_names(key)
         if seed_key and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,220}", seed_key):
             raise CacheError("Invalid compatibility cache key")
         self.backend, self.key, self.path, self.seed_key = backend, key, Path(path), seed_key
-        self.reuse_current = reuse_current
 
     def metadata(self, tag, name, temporary):
         destination = temporary / "metadata.json"
@@ -232,12 +231,11 @@ class ReleaseCache:
             if value is not None:
                 self.validate(value, compatibility=False)
                 if value["key"] == self.key:
-                    self.validate(value, self.key)
+                    self.validate(value, self.key, compatibility=False)
                     self.install(value, temporary)
                     return {"cache-hit": "true", "seed-hit": "false", "cache-current": "true", "restored-key": self.key}
-                current_slot = self.key.startswith("buildroot-shared-") or self.reuse_current
-                if not required and self.seed_key and (current_slot or value.get("compatibility") == self.seed_key):
-                    self.validate(value, compatibility=not current_slot)
+                if not required and self.seed_key:
+                    self.validate(value, compatibility=False)
                     self.install(value, temporary)
                     return {"cache-hit": "false", "seed-hit": "true", "cache-current": "false", "restored-key": value["key"]}
         if required:
@@ -283,7 +281,7 @@ class ReleaseCache:
 
 def main(environment=None):
     environment = os.environ if environment is None else environment
-    cache = ReleaseCache(GitHub(environment["REPO"], environment.get("GH_TOKEN", "")), environment["KEY"], environment.get("LOCAL_FILE", "buildroot.tar.zst"), environment.get("SEED_KEY", ""), environment.get("REUSE_CURRENT", "false").lower() == "true")
+    cache = ReleaseCache(GitHub(environment["REPO"], environment.get("GH_TOKEN", "")), environment["KEY"], environment.get("LOCAL_FILE", "buildroot.tar.zst"), environment.get("SEED_KEY", ""))
     if environment["MODE"] == "restore":
         output = cache.restore(environment.get("FAIL_ON_MISS", "false").lower() == "true")
         destination = environment.get("GITHUB_OUTPUT")

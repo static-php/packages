@@ -202,24 +202,13 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual(result['seed-hit'], 'true')
         self.assertEqual(self.path.read_bytes(), b'compiled library payload')
 
-    def test_payload_seed_still_requires_matching_compilation_inputs(self):
+    def test_payload_seed_reuses_its_target_without_compiler_fingerprints(self):
         key = 'php-payload-glibc-aarch64-84-' + 'a' * 32
         self.store(key=key, seed='old-php-inputs')
         self.path.unlink()
         result = self.restore(key=key.replace('a' * 32, 'b' * 32), seed='new-php-inputs')
-        self.assertEqual(result['seed-hit'], 'false')
-        self.assertFalse(self.path.exists())
-
-    def test_selected_php_sources_can_restore_the_current_slot_for_source_verification(self):
-        key = 'php-payload-glibc-aarch64-84-' + 'a' * 32
-        self.store(key=key, seed='old-php-inputs')
-        self.path.unlink()
-        selected = cache.ReleaseCache(self.backend, key.replace('a' * 32, 'b' * 32), self.path,
-                                      seed_key='new-php-inputs', reuse_current=True)
-        self.assertEqual(selected.restore()['seed-hit'], 'true')
+        self.assertEqual(result['seed-hit'], 'true')
         self.assertEqual(self.path.read_bytes(), b'compiled library payload')
-        with self.assertRaisesRegex(cache.CacheError, 'No exact'):
-            selected.restore(required=True)
 
     def test_library_seed_cannot_cross_architectures_or_producers(self):
         self.store()
@@ -264,15 +253,6 @@ class ReleaseCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(cache.CacheError, "No exact"):
             self.restore(newer, required=True)
         self.assertFalse(any(event[2] == self.seed + ".json" for event in self.backend.events))
-
-    def test_wrong_compatibility_is_rejected_before_payload_download(self):
-        value = self.store()
-        value["compatibility"] = "different-toolchain"
-        self.backend.assets[value["tag"], cache.cache_names(self.key)[1]] = json.dumps(value).encode()
-        self.path.write_bytes(b"keep existing local data")
-        with self.assertRaisesRegex(cache.CacheError, "compatibility"):
-            self.restore()
-        self.assertEqual(self.path.read_bytes(), b"keep existing local data")
 
     def test_corrupt_tarball_is_rejected_without_replacing_local_file(self):
         value = self.store()

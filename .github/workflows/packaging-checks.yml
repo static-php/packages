@@ -62,7 +62,6 @@ jobs:
                         done
                         python3 tests/payload-profile.py
                         python3 tests/payload-cache.py
-                        python3 tests/source-snapshot-transfer.py
                         python3 tests/repackage-glibc.py
                         python3 tests/openssl-variants.py
                         python3 tests/pinned-library-sources.py

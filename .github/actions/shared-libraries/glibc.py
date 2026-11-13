@@ -21,7 +21,7 @@ STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
 
 
 def run(arguments, **kwargs):
-    return subprocess.run([str(value) for value in arguments], check=True, **kwargs)
+    subprocess.run([str(value) for value in arguments], check=True, **kwargs)
 
 
 def read(path):
@@ -572,7 +572,7 @@ def payload():
     sdk_moved = False
     compiled_source = os.environ['SOURCE_RUN_ID']
     try:
-        if cached.is_file():
+        if cached.is_file() and not (compile_requested and not compile_packages and not os.environ.get('ABI_REBUILD_LIBRARIES')):
             if saved_sdk.exists():
                 raise RuntimeError('Unfinished cached PHP restore owns stage/sdk-before-php')
             (ROOT / 'buildroot').rename(saved_sdk)
@@ -586,17 +586,16 @@ def payload():
                 args += ['--package-selection', os.environ['PACKAGES']]
             allow_all_components = compile_requested and not compile_packages
             if compile_requested and compile_packages:
-                args += ['--compile-packages', compile_packages, '--reuse-core-sources']
-                if os.environ.get('REQUESTED_PACKAGES') == '':
-                    args += ['--allow-all-components']
+                args += ['--compile-packages', compile_packages]
             elif allow_all_components:
                 args += ['--allow-all-components']
             if compile_requested and os.environ.get('ABI_REBUILD_LIBRARIES'):
                 args += ['--abi-rebuild-libraries', os.environ['ABI_REBUILD_LIBRARIES']]
-            result = run(args, stdout=subprocess.PIPE, text=True)
-            print(result.stdout, end='', flush=True)
-            restored_result = json.loads(result.stdout.strip().splitlines()[-1])
-            if restored_result.get('core_source_changed'):
+            try:
+                run(args)
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 3 or not compile_requested:
+                    raise
                 saved_sdk.rename(ROOT / 'buildroot')
                 sdk_moved = False
                 compile_packages = ''
@@ -617,7 +616,7 @@ def payload():
         elif not compile_requested:
             raise RuntimeError('Package-only change requires its sealed PHP cache; no compilation was requested')
         elif compile_packages:
-            raise RuntimeError('Selected PHP source update requires its sealed core cache; refusing a full rebuild')
+            raise RuntimeError('Selected extension update requires its cached PHP core; refusing a full rebuild')
         else:
             compile_packages = ''
         if compile_requested:

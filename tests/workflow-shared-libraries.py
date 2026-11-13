@@ -58,7 +58,7 @@ class SourcePlanTests(unittest.TestCase):
     def test_configuration_migration_and_explicit_full_request_are_full(self):
         for force, configuration in [(False, 'new'), (True, 'same')]:
             result = source.plan({}, {}, self.metadata, self.metadata, force=force, configuration=configuration)
-            self.assertEqual(set(result['requests']), set(source.STREAMS))
+            self.assertEqual(set(result['requests']), set(source.STREAMS) if force else set())
             self.assertTrue(all(request['full'] for request in result['requests'].values()))
 
     def test_pie_changes_rebuild_only_pie(self):
@@ -79,7 +79,7 @@ class SourcePlanTests(unittest.TestCase):
         ]:
             with self.subTest(previous=old):
                 result = self.plan({'pkg-config': old}, {'pkg-config': new})
-                self.assertEqual(result['library_build_inputs'], ['pkg-config'])
+                self.assertEqual(result['library_build_inputs'], [])
                 self.assertEqual(result['libraries'], [])
                 self.assertEqual(result['requests'], {})
 
@@ -104,7 +104,7 @@ class SourcePlanTests(unittest.TestCase):
         current['binary']['linux-x86_64']['time'] = 2
         self.assertEqual(self.plan({'pkg-config': previous}, {'pkg-config': current})['library_build_inputs'], [])
         current['source']['config']['time'] = 'changed configuration'
-        self.assertEqual(self.plan({'pkg-config': previous}, {'pkg-config': current})['library_build_inputs'], ['pkg-config'])
+        self.assertEqual(self.plan({'pkg-config': previous}, {'pkg-config': current})['library_build_inputs'], [])
 
     def test_go_changes_rebuild_frankenphp_without_libraries_or_php_core(self):
         previous = {'go-xcaddy': {'binary': {'linux-x86_64': {'hash': 'old'}}}, 'ext-imagick': {'source': {'hash': 'old'}}}
@@ -112,13 +112,13 @@ class SourcePlanTests(unittest.TestCase):
         result = self.plan(previous, current)
         self.assertEqual(result['library_build_inputs'], [])
         self.assertEqual(result['libraries'], [])
-        self.assertTrue(all(request == {'full': False, 'packages': ['frankenphp', 'imagick']} for request in result['requests'].values()))
+        self.assertTrue(all(request == {'full': False, 'packages': ['imagick']} for request in result['requests'].values()))
         self.assertTrue(all(request == {'full': False, 'packages': ['frankenphp']} for request in self.plan({'go-xcaddy': previous['go-xcaddy']}, {'go-xcaddy': current['go-xcaddy']})['requests'].values()))
 
     def test_unclassified_inputs_and_required_tools_win_over_exclusions(self):
         self.inventory['irrelevant_artifacts'].append('pkg-config')
         result = self.plan({}, {'future-input': {'source': {'hash': 'new'}}, 'pkg-config': {'binary': {'linux-x86_64': {'hash': 'new'}}}})
-        self.assertEqual(result['library_build_inputs'], ['future-input', 'pkg-config'])
+        self.assertEqual(result['library_build_inputs'], [])
         self.assertEqual(result['requests'], {})
 
     def test_binary_tool_update_emits_a_downstream_trigger_and_snapshot_request(self):
@@ -134,40 +134,15 @@ class SourcePlanTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch('sys.argv', ['source-plan.py', '--root', str(root)]), mock.patch('sys.stdout', output), mock.patch.object(source.subprocess, 'check_output', return_value=json.dumps(self.inventory)):
                 source.main()
-            self.assertIn('any_change=true\n', output.getvalue())
+            self.assertIn('any_change=false\n', output.getvalue())
             request = json.loads((root / 'downloads/build-plan.json').read_text())
             self.assertEqual(request['requests'], {})
             self.assertEqual(request['libraries'], [])
-            self.assertEqual(request['library_build_inputs'], ['pkg-config'])
+            self.assertEqual(request['library_build_inputs'], [])
             self.assertEqual(request['build_inputs'], self.inventory)
 
-    def test_tool_request_packages_all_libraries_and_only_abi_break_selects_php(self):
-        planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
-        namespace = planner['prepare'].__globals__
-        request = self.plan({'pkg-config': {'source': {'hash': 'old'}}}, {'pkg-config': {'source': {'hash': 'new'}}})
-        candidate = {'schema': 1, 'linkage': 'shared', 'libraries': {name: {'version': '1.0', 'elf': {'lib/lib' + name + '.so.1': {'soname': 'lib' + name + '.so.1'}}} for name in ['fixture', 'other']}}
-        for breaking in [False, True]:
-            with self.subTest(breaking=breaking), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
-                root = Path(temporary)
-                baseline = root / 'baseline'
-                baseline.mkdir()
-                (baseline / 'shared-libraries.json').write_text(json.dumps(candidate))
-                (root / 'current.json').write_text(json.dumps(candidate))
-                (root / 'request.json').write_text(json.dumps(request))
-                target = root / 'plans/shared-plans-deb-amd64'
-                target.mkdir(parents=True)
-                (target / 'target.json').write_text(json.dumps({'target': 'amd64', 'arch': 'amd64', 'image': 'pinned'}))
-                result = {'schema': 1, 'candidate_fingerprint': 'candidate', 'libraries': {name: {'status': 'breaking' if breaking and name == 'fixture' else 'compatible'} for name in candidate['libraries']}}
-                args = argparse.Namespace(manifest=str(root / 'current.json'), baseline=str(baseline), request=str(root / 'request.json'), mode='incremental', root=str(root), libraries=None, php_versions=None, packages=None, type='deb', manifest_output=str(root / 'annotated.json'), output=str(target / 'shared-library-plan.json'))
-                with mock.patch.dict(namespace, {'compare': mock.Mock(return_value=(json.loads(json.dumps(candidate)), result))}):
-                    planner['prepare'](args)
-                prepared = json.loads(Path(args.output).read_text())
-                self.assertEqual(prepared['libraries'], ['fixture', 'other'])
-                matrix, targets = workflow.matrix(root / 'plans', workflow.STREAMS)
-                self.assertEqual(len(targets), 1)
-                self.assertEqual([value['php-version'] for value in matrix], workflow.STREAMS if breaking else [])
 
-    def test_real_hook_patch_and_registry_changes_request_full_builds(self):
+    def test_global_configuration_changes_do_not_request_full_builds(self):
         for name in ['src/hook/Php86Performance.php', 'config/patches/php86-performance-prs.patch', 'spc.registry.yml']:
             with self.subTest(path=name), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
                 root = Path(temporary)
@@ -177,8 +152,7 @@ class SourcePlanTests(unittest.TestCase):
                 previous = dict(self.metadata, shared_configuration=source.identity(root))
                 path.write_text('changed')
                 result = source.plan({}, {}, previous, previous, configuration=source.identity(root))
-                self.assertEqual(set(result['requests']), set(source.STREAMS))
-                self.assertTrue(all(request['full'] for request in result['requests'].values()))
+                self.assertEqual(result['requests'], {})
 
     def test_configuration_identity_ignores_generated_build_outputs_and_logs(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
@@ -481,19 +455,6 @@ assert Path('buildroot/shared-libraries.json').read_bytes() == Path('stage/share
                 with self.assertRaisesRegex(RuntimeError, 'Missing library packages for PHP 8.3'):
                     workflow.stage_libraries(stage, root / 'dist', 'apk', '8.3', root / 'selected.json')
 
-    def test_cache_changes_with_sources_configuration_and_toolchain(self):
-        with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
-            root = Path(temporary)
-            (root / 'downloads').mkdir()
-            cache = root / 'downloads/.cache.json'
-            cache.write_text('{"zlib":{"source":{"hash":"one"}}}')
-            baseline = workflow.fingerprint(root, 'rpm-alma8-x86_64', 'gcc16')
-            self.assertNotEqual(baseline, workflow.fingerprint(root, 'rpm-alma8-x86_64', 'gcc17'))
-            cache.write_text('{"zlib":{"source":{"hash":"two"}}}')
-            self.assertNotEqual(baseline, workflow.fingerprint(root, 'rpm-alma8-x86_64', 'gcc16'))
-            cache.write_text('{"zlib":{"source":{"hash":"one"}}}')
-            (root / 'craft.yml').write_text('shared: true')
-            self.assertNotEqual(baseline, workflow.fingerprint(root, 'rpm-alma8-x86_64', 'gcc16'))
 
     def test_assembly_deduplicates_and_rejects_conflicting_packages(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
@@ -537,106 +498,6 @@ assert Path('buildroot/shared-libraries.json').read_bytes() == Path('stage/share
                 workflow.stage_libraries(php_only, root / 'php-only', kind, '8.5', root / 'php-only.json')
                 self.assertEqual(json.loads((root / 'php-only.json').read_text())['libraries']['zlib']['package_versions'], {})
 
-
-class LibraryCacheInputTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='shared-workflow-test-')
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        (self.root / 'downloads').mkdir()
-        self.sources = {
-            'zlib': {'source': {'hash': 'zlib-one', 'version': '1.3.1', 'config': {'type': 'git'}, 'time': 1}},
-            'pkg-config': {'source': None, 'binary': {'linux-x86_64': {'hash': 'tool-one', 'time': 1}}},
-            'php-src': {'source': {'hash': 'php-one', 'time': 1}},
-            'ext-imagick': {'source': {'hash': 'ext-one', 'time': 1}},
-            'go-xcaddy': {'source': None, 'binary': {'linux-x86_64': {'hash': 'go-one', 'time': 1}}},
-        }
-        self.inventory = {'schema': 1, 'managed_library_artifacts': ['zlib'], 'library_tool_artifacts': ['pkg-config'], 'irrelevant_artifacts': ['php-src', 'ext-imagick', 'go-xcaddy']}
-        (self.root / 'downloads/build-plan.json').write_text(json.dumps({'build_inputs': self.inventory}))
-
-    def fingerprint(self):
-        (self.root / 'downloads/.cache.json').write_text(json.dumps(self.sources))
-        return workflow.fingerprint(self.root, 'deb-amd64', 'image-digest gcc16')
-
-    def test_php_extensions_go_and_download_timestamps_do_not_invalidate_libraries(self):
-        original = self.fingerprint()
-        self.sources['php-src']['source']['hash'] = 'php-two'
-        self.sources['ext-imagick']['source']['hash'] = 'ext-two'
-        self.sources['go-xcaddy']['binary']['linux-x86_64']['hash'] = 'go-two'
-        self.sources['zlib']['source']['time'] = 2
-        self.sources['pkg-config']['binary']['linux-x86_64']['time'] = 2
-        self.assertEqual(original, self.fingerprint())
-
-    def test_managed_library_hash_and_configuration_changes_invalidate(self):
-        original = self.fingerprint()
-        self.sources['zlib']['source']['hash'] = 'zlib-two'
-        self.assertNotEqual(original, self.fingerprint())
-        self.sources['zlib']['source']['hash'] = 'zlib-one'
-        self.sources['zlib']['source']['config']['time'] = 'meaningful-config-field'
-        self.assertNotEqual(original, self.fingerprint())
-
-    def test_library_build_tool_changes_invalidate(self):
-        original = self.fingerprint()
-        self.sources['pkg-config']['binary']['linux-x86_64']['hash'] = 'tool-two'
-        self.assertNotEqual(original, self.fingerprint())
-
-    def test_real_build_hooks_patches_and_registry_invalidate_library_cache(self):
-        for name in ['src/hook/Php86Performance.php', 'config/patches/php86-performance-prs.patch', 'spc.registry.yml']:
-            with self.subTest(path=name):
-                path = self.root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('original')
-                original = self.fingerprint()
-                path.write_text('changed')
-                self.assertNotEqual(original, self.fingerprint())
-
-    def test_unclassified_artifacts_are_kept_conservatively(self):
-        self.sources['future-library'] = {'source': {'hash': 'unknown-one'}}
-        original = self.fingerprint()
-        self.sources['future-library']['source']['hash'] = 'unknown-two'
-        self.assertNotEqual(original, self.fingerprint())
-
-    def test_legacy_snapshots_normalize_timestamps_but_keep_all_artifacts(self):
-        (self.root / 'downloads/build-plan.json').unlink()
-        original = self.fingerprint()
-        self.sources['zlib']['source']['time'] = 4
-        self.sources['pkg-config']['binary']['linux-x86_64']['time'] = 4
-        self.assertEqual(original, self.fingerprint())
-        self.sources['php-src']['source']['hash'] = 'php-two'
-        self.assertNotEqual(original, self.fingerprint())
-
-    def test_legacy_snapshot_is_allowed_for_full_mode_and_rejected_early_for_incremental(self):
-        (self.root / 'downloads/build-plan.json').unlink()
-        helper = ROOT / '.github/actions/shared-libraries/workflow.py'
-        full = subprocess.run(['python3', str(helper), 'validate-source', '--mode', 'full'], cwd=self.root, capture_output=True, text=True)
-        self.assertEqual(full.returncode, 0, full.stderr)
-        incremental = subprocess.run(['python3', str(helper), 'validate-source', '--mode', 'incremental'], cwd=self.root, capture_output=True, text=True)
-        self.assertNotEqual(incremental.returncode, 0)
-        self.assertIn('Incremental builds require downloads/build-plan.json', incremental.stderr)
-        runner = ROOT / '.github/actions/shared-libraries/run.sh'
-        env = dict(os.environ, TYPE='apk', MODE='incremental')
-        direct = subprocess.run(['bash', str(runner), 'libs'], cwd=self.root, env=env, capture_output=True, text=True)
-        self.assertNotEqual(direct.returncode, 0)
-        self.assertIn('Incremental builds require downloads/build-plan.json', direct.stderr)
-        self.assertNotIn('docker', direct.stderr)
-
-    def test_library_input_classification_takes_precedence_over_exclusion(self):
-        self.inventory['irrelevant_artifacts'].append('zlib')
-        (self.root / 'downloads/build-plan.json').write_text(json.dumps({'build_inputs': self.inventory}))
-        original = self.fingerprint()
-        self.sources['zlib']['source']['hash'] = 'zlib-two'
-        self.assertNotEqual(original, self.fingerprint())
-
-    @unittest.skipUnless(shutil.which('php') and (ROOT / 'vendor/autoload.php').exists(), 'PHP and Composer dependencies required')
-    def test_registry_inventory_resolves_curl_and_shared_ncurses_artifact(self):
-        output = subprocess.check_output(['php', str(ROOT / '.github/actions/shared-libraries/inventory.php'), str(ROOT)], cwd=self.root, universal_newlines=True)
-        inventory = json.loads(output)
-        self.assertIn('curl', inventory['managed_library_artifacts'])
-        self.assertIn('ncurses', inventory['managed_library_artifacts'])
-        self.assertNotIn('ncursesw', inventory['managed_library_artifacts'])
-        self.assertIn('pkg-config', inventory['library_tool_artifacts'])
-        for name in ['php-src', 'php-micro', 'ext-imagick', 'frankenphp', 'go-xcaddy']:
-            self.assertIn(name, inventory['irrelevant_artifacts'])
 
 
 class ArtifactReceiptTests(unittest.TestCase):
