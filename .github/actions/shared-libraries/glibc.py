@@ -257,7 +257,7 @@ def package_library_archives(kind, directory, sdk, manifest, stream=None):
     baseline = directory / 'baseline'
     if stream:
         baseline = baseline / 'owners' / stream
-        snapshot = (STAGE if kind == 'apk' else STAGE / 'common' / kind) / 'native-inventories' / (stream + '.json')
+        snapshot = format_stage(kind) / 'native-inventories' / (stream + '.json')
         environment.update(SPP_NATIVE_INVENTORY=str(snapshot), SPP_FORGEJO_OWNER=stream.replace('.', ''))
     environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in baseline.glob('shared-libraries.json')])
     retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
