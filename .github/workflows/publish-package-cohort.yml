@@ -11,10 +11,22 @@ on:
                 description: Existing primary publication results for a mirror-only retry
                 type: string
                 default: ""
+            primary-artifact-name:
+                description: Recorded publication results artifact for this cohort
+                type: string
+                default: ""
             php-version:
                 description: Optional single PHP stream to retry
                 type: string
                 default: all
+            php-versions:
+                description: Retained PHP streams selected by the publication matrix
+                type: string
+                default: ""
+            publication-id:
+                description: Distinguish retained cohorts within one format run
+                type: string
+                default: ""
             format:
                 type: string
                 required: true
@@ -62,6 +74,7 @@ defaults:
 env:
     TYPE: ${{ inputs.format }}
     PUBLISH_PHP_VERSION: ${{ inputs.php-version }}
+    PUBLISH_PHP_VERSIONS: ${{ inputs.php-versions }}
     TARGET: ${{ inputs.target }}
     MATRIX_ARCH: ${{ inputs.arch }}
     IMAGE: ${{ inputs.image }}
@@ -153,7 +166,7 @@ jobs:
                 with:
                     github-token: ${{ github.token }}
                     run-id: ${{ inputs.primary-run-id || github.run_id }}
-                    name: publication-${{ inputs.format }}-${{ inputs.target }}
+                    name: ${{ inputs.primary-artifact-name || format('publication-{0}-{1}{2}', inputs.format, inputs.target, inputs.publication-id != '' && format('-{0}', inputs.publication-id) || '') }}
                     path: log
             -   name: Publish each validated PHP stream independently
                 env:
@@ -165,7 +178,7 @@ jobs:
                 if: ${{ !cancelled() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
-                    name: publication-${{ inputs.format }}-${{ inputs.target }}${{ inputs.mirror && '-mirror' || '' }}
+                    name: publication-${{ inputs.format }}-${{ inputs.target }}${{ inputs.publication-id != '' && format('-{0}', inputs.publication-id) || '' }}${{ inputs.mirror && '-mirror' || '' }}
                     overwrite: true
                     path: |
                         log/publication-*.log

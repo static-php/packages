@@ -2,16 +2,19 @@
 """Select complete package cohorts from an existing build run."""
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-from urllib.request import Request, urlopen
+import zipfile
+from urllib.request import Request, build_opener, urlopen
 
 from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, verify_upgrades
 
@@ -58,7 +61,7 @@ def pinned_image(image, name):
     return image
 
 
-def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
+def publication_matrix(state, plans, selected_arch='all', selected_php='all', allow_empty=False):
     includes = []
     kind, family = state['type'], state['family']
     for name in state['plans']:
@@ -87,6 +90,7 @@ def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
                 continue
             streams = [selected_php]
         required = ['shared-libs-' + kind + '-' + identity]
+        available_streams = []
         if streams:
             artifacts = ['shared-' + ('consumers' if stream in consumers else 'validation') + '-' + kind + '-' + identity + '-php' + stream for stream in streams]
             available = [name for name in artifacts if name in state['artifacts']]
@@ -94,6 +98,7 @@ def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
                 print('::warning::Skipping unavailable stream: ' + missing, file=sys.stderr)
             if not available:
                 continue
+            available_streams = [name.rsplit('-php', 1)[1] for name in available]
             required += available
         elif selection.get('libraries'):
             validations = ['shared-validation-' + kind + '-' + identity + '-php' + stream for stream in STREAMS]
@@ -106,10 +111,88 @@ def publication_matrix(state, plans, selected_arch='all', selected_php='all'):
             continue
         includes.append({'type': kind, 'target': identity, 'arch': arch, 'image': image,
                          'package-image': packaging, 'package-image-digest': image_digest(packaging), 'source-run-id': source_run,
+                         'build-run-id': state['build_run_id'], 'php-versions': ','.join(sorted(available_streams)),
                          'artifact-ids': ','.join(str(state['artifacts'][name]) for name in required)})
-    if not includes:
+    if not includes and not allow_empty:
         raise RuntimeError('No complete retained ' + kind + ' package cohort is available to publish')
     return includes
+
+
+def run_ids(value, distinct=True):
+    values = [item.strip() for item in value.split(',')]
+    if not values or any(not item.isdigit() or int(item) <= 0 for item in values) or distinct and len(set(values)) != len(values):
+        raise RuntimeError('Provide distinct positive build run IDs separated by commas')
+    return values
+
+
+def batch_matrix(entries, selected_arch='all', selected_php='all'):
+    includes, selected = [], set()
+    for state, plans, primary_run, primary_artifacts in entries:
+        for value in publication_matrix(state, plans, selected_arch, selected_php, allow_empty=True):
+            identity = 'build' + state['build_run_id']
+            primary_artifact = ''
+            if primary_run:
+                name = 'publication-' + value['type'] + '-' + value['target']
+                primary_artifact = name + '-' + identity if name + '-' + identity in primary_artifacts else name
+                if primary_artifact not in primary_artifacts:
+                    print('::warning::No primary publication results for ' + value['target'], file=sys.stderr)
+                    continue
+            scopes = value['php-versions'].split(',') if value['php-versions'] else ['libraries']
+            for stream in scopes:
+                key = (value['type'], value['arch'], stream)
+                if key in selected:
+                    raise RuntimeError('Multiple build cohorts selected for ' + ' '.join(key))
+                selected.add(key)
+            value.update({'publication-id': identity, 'primary-run-id': primary_run, 'primary-artifact-name': primary_artifact,
+                          'scope': 'php' + value['php-versions'] if value['php-versions'] else 'libraries'})
+            includes.append(value)
+    if not includes:
+        raise RuntimeError('No complete retained package cohort is available for this format selection')
+    return includes
+
+
+def read_plan_archive(repository, artifact_id):
+    cache = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'buildroot-cache/cache.py'))
+    token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'static-php-packages'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    base = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+    request = Request(f'{base}/repos/{repository}/actions/artifacts/{artifact_id}/zip', headers=headers)
+    with build_opener(cache['AssetRedirectHandler']()).open(request, timeout=60) as response:
+        return response.read()
+
+
+def prepare_publication(builds, kind, repository, branch, selected_arch='all', selected_php='all', primary_runs=''):
+    builds = run_ids(builds)
+    primary = run_ids(primary_runs, distinct=False) if primary_runs else []
+    if primary and len(primary) not in (1, len(builds)):
+        raise RuntimeError('Mirror retries require one shared primary run or one primary run per build')
+    entries, results = [], {}
+    with tempfile.TemporaryDirectory(prefix='spp-publication-plans-') as temporary:
+        for index, run_id in enumerate(builds):
+            endpoint = f'repos/{repository}/actions/runs/{run_id}'
+            run = api(endpoint)
+            if not primary and run.get('status') != 'completed':
+                raise RuntimeError('Publication requires completed package build runs')
+            artifacts = [item for page in api(endpoint + '/artifacts?per_page=100', True) for item in page['artifacts']]
+            state = inspect_run(run, artifacts, repository, branch, kind)
+            plans = Path(temporary) / run_id
+            for name in state['plans']:
+                content = read_plan_archive(repository, state['artifacts'][name])
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    for filename in ('target.json', 'shared-library-plan.json'):
+                        data = archive.read(filename)
+                        json.loads(data)
+                        destination = plans / name / filename
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(data)
+            primary_run = primary[0 if len(primary) == 1 else index] if primary else ''
+            if primary_run and primary_run not in results:
+                endpoint = f'repos/{repository}/actions/runs/{primary_run}/artifacts?per_page=100'
+                results[primary_run] = {item['name'] for page in api(endpoint, True) for item in page['artifacts'] if not item.get('expired')}
+            entries.append((state, plans, primary_run, results.get(primary_run, set())))
+        return batch_matrix(entries, selected_arch, selected_php)
 
 
 def verify_target(directory, kind, target, arch, image, source_run):
@@ -164,7 +247,7 @@ def failure_reason(lines):
     return ' | '.join(reasons[-8:] if reasons else lines[-4:])[:2400]
 
 
-def publish_available(source, kind, target, mirror=False, selected_php='all'):
+def publish_available(source, kind, target, mirror=False, selected_php='all', selected_versions=''):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
     prune_consumers(source, library)
@@ -174,6 +257,11 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
         if selected_php not in streams:
             raise RuntimeError('Selected PHP stream is not in the retained build plan: ' + selected_php)
         streams = [selected_php]
+    if selected_versions:
+        wanted = selected_versions.split(',')
+        if not set(wanted) <= set(streams):
+            raise RuntimeError('Publication streams are not in the retained build plan')
+        streams = sorted(set(wanted))
     scopes = [[stream] for stream in streams] or [None]
     results = []
     outcomes = Path('log') / f'publication-{kind}-{target}.json'
@@ -250,6 +338,14 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
+    prepare = sub.add_parser('prepare')
+    prepare.add_argument('--run-ids', required=True)
+    prepare.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
+    prepare.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY'))
+    prepare.add_argument('--branch', required=True)
+    prepare.add_argument('--arch', choices=('all', 'x86_64', 'arm64'), default='all')
+    prepare.add_argument('--php', choices=('all', *STREAMS), default='all')
+    prepare.add_argument('--primary-run-ids', default='')
     inspect = sub.add_parser('inspect')
     inspect.add_argument('--run-id', required=True)
     inspect.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
@@ -266,10 +362,17 @@ def main():
     publish = sub.add_parser('publish-available')
     publish.add_argument('--mirror', action='store_true', default=os.environ.get('MIRROR') == 'true')
     publish.add_argument('--php', choices=('all', *STREAMS), default=os.environ.get('PUBLISH_PHP_VERSION') or 'all')
+    publish.add_argument('--php-streams', default=os.environ.get('PUBLISH_PHP_VERSIONS', ''))
     artifacts = sub.add_parser('artifact-ids')
     artifacts.add_argument('--run-id', required=True)
     args = parser.parse_args()
-    if args.command == 'inspect':
+    if args.command == 'prepare':
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository or ''):
+            raise RuntimeError('A repository is required')
+        includes = prepare_publication(args.run_ids, args.type, args.repository, args.branch, args.arch, args.php, args.primary_run_ids)
+        emit('matrix', {'include': includes})
+        emit('any', 'true')
+    elif args.command == 'inspect':
         if not re.fullmatch('[0-9]+', args.run_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository or ''):
             raise RuntimeError('A numeric build run ID and repository are required')
         endpoint = 'repos/' + args.repository + '/actions/runs/' + args.run_id
@@ -292,7 +395,7 @@ def main():
             raise RuntimeError('No staged native packages available')
         emit('ids', ','.join(ids))
     elif args.command == 'publish-available':
-        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], args.mirror, args.php):
+        if not publish_available(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], args.mirror, args.php, args.php_streams):
             raise SystemExit(1)
     else:
         verify_target(args.directory, *(os.environ[name] for name in ['TYPE', 'TARGET', 'MATRIX_ARCH', 'IMAGE', 'SOURCE_RUN_ID']))

@@ -1,5 +1,5 @@
 name: Publish existing packages
-run-name: Publish ${{ inputs.format }} packages from build ${{ inputs.build_run_id }}
+run-name: ${{ inputs.mirror_run_id != '' && 'Mirror' || 'Publish' }} ${{ inputs.format }} packages
 
 on:
     workflow_dispatch:
@@ -10,11 +10,11 @@ on:
                 options: [rpm, deb, apk]
                 required: true
             build_run_id:
-                description: "Existing package build run ID (shared EL8 for RPM/DEB, Alpine for APK)"
+                description: "Completed package build run IDs (comma-separated)"
                 type: string
                 required: true
             mirror_run_id:
-                description: "Optional: retry only mirrors using this run's completed primary publication results"
+                description: "Mirror only: one shared primary run ID or one per build (comma-separated)"
                 type: string
                 default: ""
             skip_mirror:
@@ -49,36 +49,24 @@ jobs:
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
                 with:
                     persist-credentials: false
-            -   name: Inspect retained package build artifacts
-                id: inspect
+            -   name: Select retained cohorts for the format matrix
+                id: matrix
                 env:
                     GH_TOKEN: ${{ github.token }}
                     BUILD_RUN_ID: ${{ inputs.build_run_id }}
                     TYPE: ${{ inputs.format }}
                     DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-                run: |
-                    python3 .github/actions/shared-libraries/publication.py inspect \
-                        --run-id "$BUILD_RUN_ID" --type "$TYPE" --branch "$DEFAULT_BRANCH" \
-                        --output publication.json >> "$GITHUB_OUTPUT"
-            -   name: Download recorded build plans
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    github-token: ${{ github.token }}
-                    run-id: ${{ inputs.build_run_id }}
-                    artifact-ids: ${{ steps.inspect.outputs.plan-artifact-ids }}
-                    path: plans
-            -   name: Select complete package cohorts
-                id: matrix
-                env:
                     SELECTED_ARCH: ${{ inputs.arch }}
                     SELECTED_PHP: ${{ inputs.php_version }}
+                    PRIMARY_RUN_IDS: ${{ inputs.mirror_run_id }}
                 run: |
-                    python3 .github/actions/shared-libraries/publication.py matrix \
-                        --state publication.json --plans plans \
-                        --arch "$SELECTED_ARCH" --php "$SELECTED_PHP" >> "$GITHUB_OUTPUT"
+                    python3 .github/actions/shared-libraries/publication.py prepare \
+                        --run-ids "$BUILD_RUN_ID" --type "$TYPE" --branch "$DEFAULT_BRANCH" \
+                        --arch "$SELECTED_ARCH" --php "$SELECTED_PHP" \
+                        --primary-run-ids "$PRIMARY_RUN_IDS" >> "$GITHUB_OUTPUT"
 
     publish:
-        name: Publish (${{ matrix.type }} ${{ matrix.target }})
+        name: Publish (${{ matrix.type }} ${{ matrix.target }} ${{ matrix.scope }})
         needs: prepare
         if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && inputs.mirror_run_id == '' }}
         permissions:
@@ -92,17 +80,19 @@ jobs:
         with:
             format: ${{ matrix.type }}
             php-version: ${{ inputs.php_version }}
+            php-versions: ${{ matrix.php-versions }}
+            publication-id: ${{ matrix.publication-id }}
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}
             package-image-digest: ${{ matrix.package-image-digest }}
             source-run-id: ${{ matrix.source-run-id }}
-            build-run-id: ${{ inputs.build_run_id }}
+            build-run-id: ${{ matrix.build-run-id }}
             artifact-ids: ${{ matrix.artifact-ids }}
         secrets: inherit
 
     mirror:
-        name: Mirror (${{ matrix.type }} ${{ matrix.target }})
+        name: Mirror (${{ matrix.type }} ${{ matrix.target }} ${{ matrix.scope }})
         needs: [prepare, publish]
         if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && (inputs.mirror_run_id != '' || !inputs.skip_mirror) }}
         permissions:
@@ -117,13 +107,16 @@ jobs:
         with:
             mirror: true
             php-version: ${{ inputs.php_version }}
-            primary-run-id: ${{ inputs.mirror_run_id }}
+            php-versions: ${{ matrix.php-versions }}
+            publication-id: ${{ matrix.publication-id }}
+            primary-run-id: ${{ matrix.primary-run-id }}
+            primary-artifact-name: ${{ matrix.primary-artifact-name }}
             format: ${{ matrix.type }}
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}
             package-image-digest: ${{ matrix.package-image-digest }}
             source-run-id: ${{ matrix.source-run-id }}
-            build-run-id: ${{ inputs.build_run_id }}
+            build-run-id: ${{ matrix.build-run-id }}
             artifact-ids: ${{ matrix.artifact-ids }}
         secrets: inherit
