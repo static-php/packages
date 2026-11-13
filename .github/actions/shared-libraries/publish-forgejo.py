@@ -21,11 +21,13 @@ def independent(name):
     return name.startswith('php-zts-lib-') or name.removesuffix('-debuginfo') == LAYOUT_PACKAGE
 
 
-def consumer_owners(cohort, package_type, helper):
+def consumer_owners(cohort, package_type, helper, filenames):
     owners = {}
     for manifest in cohort.rglob("shared-library-consumers.json"):
         consumers = json.loads(manifest.read_text()).get("consumers", {})
         for archive in manifest.parent.glob("*." + package_type):
+            if archive.name not in filenames:
+                continue
             key = helper["package_metadata"](archive, {"deb": "debian", "apk": "alpine"}[package_type])
             consumer = consumers.get(key[0].removesuffix("-debuginfo"), {})
             stream = consumer.get("php_version") or consumer.get("php_stream")
@@ -59,16 +61,6 @@ def package_groups(directory, package_type, owners, helper, selected_owners=None
     return groups
 
 
-def validate_plans(cohort, package_type, plan_path=None):
-    paths = [plan_path] if plan_path else sorted(cohort.rglob('shared-library-plan.json'))
-    plans = [json.loads(path.read_text()) for path in paths]
-    plans = [plan for plan in plans if plan.get('type') == package_type]
-    if not plans:
-        raise RuntimeError('Shared-library publication requires its format-specific build plan')
-    if len({bool(plan.get('abi_break')) for plan in plans}) != 1:
-        raise RuntimeError('Conflicting shared-library publication plans')
-
-
 def publication_order(groups, helper, kind, mirror=False):
     ordered = []
     for owner, paths in groups.items():
@@ -89,41 +81,18 @@ def publication_order(groups, helper, kind, mirror=False):
     return sorted(ordered, key=lambda item: (item[0], item[1], item[2].name))
 
 
-def mirror_candidates(paths, remote, host, owner, password, kind, helper):
-    metadata = {path: helper['package_metadata'](path, kind) for path in paths}
-    newer = set()
-    for name, version, arch in metadata.values():
-        for package in remote:
-            if package['name'] != name or not helper['version_is_newer'](kind, package['version'], version):
-                continue
-            architectures = helper['get_remote_package_archs'](host, owner, password, kind, name, package['version'], strict=True)
-            if not architectures:
-                raise RuntimeError(f'Cannot verify newer mirror package: {owner}/{name}/{package["version"]}')
-            if arch in architectures:
-                newer.add(name.removesuffix('-debuginfo'))
-    selected = []
-    for path, (name, version, arch) in metadata.items():
-        if name.removesuffix('-debuginfo') in newer:
-            print(f'Keeping newer mirror package: {owner}/{path.name}', flush=True)
-        else:
-            selected.append(path)
-    return selected
-
-
 def verify_debian_indexes(host, password, groups, helper):
     verifier = runpy.run_path(str(Path(__file__).with_name('forgejo-index.py')))
     return verifier['verify_indexes'](host, password, groups, helper)
 
 
-def publish(action, host, password, kind, groups, helper, mirror=False):
-    if action not in ('check', 'upload'):
-        raise RuntimeError('Unknown publication action: ' + action)
+def publish(host, password, kind, groups, helper, mirror=False):
     digests = {}
     selected = {}
     for owner, paths in sorted(groups.items()):
         print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
         remote = helper['get_remote_candidates'](host, owner, password, kind, paths)
-        if kind == 'debian' and not mirror:
+        if kind == 'debian':
             for path in paths:
                 name, version, arch = helper['package_metadata'](path, kind)
                 if not any(item['name'] == name and item['version'] == version for item in remote):
@@ -141,17 +110,14 @@ def publish(action, host, password, kind, groups, helper, mirror=False):
                         if runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/package-content.py'))['equivalent'](path, existing, 'deb'):
                             path.write_bytes(data)
                             print('Reusing identical published DEB: ' + path.name, flush=True)
-        digests.update({path: helper['archive_sha256'](path) for path in paths})
-        if mirror:
-            paths = mirror_candidates(paths, remote, host, owner, password, kind, helper)
-        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
-        if len(allowed) != len(paths):
+        before = {path: helper['archive_sha256'](path) for path in paths}
+        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote, keep_newer=mirror)
+        if not mirror and len(allowed) != len(paths):
             raise RuntimeError('A version/archive identity guard rejected the cohort for owner ' + owner)
+        digests.update({path: before[path] for path in allowed})
         selected[owner] = allowed
     if any(helper['archive_sha256'](path) != digest for path, digest in digests.items()):
         raise RuntimeError('A cohort archive changed during publication preflight')
-    if action == 'check':
-        return
     ordered = publication_order(selected, helper, kind, mirror)
     completed = {owner: [] for owner in selected}
     def upload(item):
@@ -179,32 +145,10 @@ def publish(action, host, password, kind, groups, helper, mirror=False):
                            + ' | '.join(failures[:5]))
 
 
-def publish_mirror(action, cohort, directory, package_type, owners, selected, helper):
-    kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    failures = []
-    for debug_phase in (False, True):
-        groups = package_groups(directory, package_type, owners, helper, selected)
-        groups = {owner: [path for path in paths
-                         if helper['package_metadata'](path, kind)[0].endswith('-debuginfo') == debug_phase]
-                  for owner, paths in groups.items()}
-        groups = {owner: paths for owner, paths in groups.items() if paths}
-        if not groups:
-            continue
-        try:
-            publish(action, helper['host2'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, mirror=True)
-        except RuntimeError as error:
-            failures.append(str(error))
-            print(str(error) + '; continuing with remaining mirror packages', flush=True)
-    if failures:
-        raise RuntimeError('Mirror remains incomplete: ' + ' | '.join(failures[:5]))
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('check', 'upload'))
     parser.add_argument('package_type', choices=('deb', 'apk'))
     parser.add_argument('host_number', choices=('1', '2'))
-    parser.add_argument('--plan', type=Path)
     parser.add_argument('--cohort', type=Path)
     parser.add_argument('--directory', type=Path, default=Path('.'))
     args = parser.parse_args(argv)
@@ -212,16 +156,12 @@ def main(argv=None):
     helper = runpy.run_path(str(root / 'bin/forgejo-helper'))
     cohort = args.cohort or root / 'cohort'
     kind = {'deb': 'debian', 'apk': 'alpine'}[args.package_type]
-    owners = consumer_owners(cohort, args.package_type, helper)
+    owners = consumer_owners(cohort, args.package_type, helper, {path.name for path in args.directory.glob('*.' + args.package_type)})
     selected = [stream.replace('.', '') for stream in os.environ.get('PUBLICATION_PHP_STREAMS', '').split(',') if stream]
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
-    validate_plans(cohort, args.package_type, args.plan)
-    if args.host_number == '2':
-        publish_mirror(args.action, cohort, args.directory, args.package_type, owners, selected, helper)
-    else:
-        groups = package_groups(args.directory, args.package_type, owners, helper, selected)
-        publish(args.action, helper['host1'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper)
+    groups = package_groups(args.directory, args.package_type, owners, helper, selected)
+    publish(helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, mirror=args.host_number == '2')
 
 
 

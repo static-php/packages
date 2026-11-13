@@ -54,7 +54,6 @@ class SourceIdentities(unittest.TestCase):
                     self.assertEqual(request['libraries'], [])
                     self.assertEqual(request['library_build_inputs'], [])
                     self.assertIn('any_change=' + str(bool(expected)).lower(), output.getvalue())
-                    self.assertNotEqual(request['configuration'], previous['shared_configuration'])
 
     def test_automatic_reconciliation_keeps_php_release_selection_after_builder_change(self):
         for comparison_available in [True, False]:
@@ -67,7 +66,7 @@ class SourceIdentities(unittest.TestCase):
                 previous['php_versions']['8.6'] = '8.6.0RC5'
                 current = json.loads(json.dumps(previous))
                 current['php_versions']['8.6'] = '8.6.0RC6'
-                original = source.plan({}, {}, previous, current, configuration='source-only', automatic=True)
+                original = source.plan({}, {}, previous, current)
                 original['source_comparison_available'] = comparison_available
                 if not comparison_available:
                     original['requests'] = {stream: {'full': True, 'packages': []} for stream in source.STREAMS}
@@ -103,7 +102,7 @@ class SourceIdentities(unittest.TestCase):
                     'libraries': ['libaom'], 'source_comparison_available': True}
         inventory = {'managed_library_artifacts': ['libaom'], 'libraries': {}}
         current = {name: 'changed helper' for name in metadata['shared_components']}
-        result = source.reconcile(original, {}, metadata, 'changed compiler', '', current, inventory, '', {}, automatic=True)
+        result = source.reconcile(original, {}, metadata, inventory)
         self.assertEqual(result['requests'], original['requests'])
         self.assertEqual(result['libraries'], ['libaom'])
 
@@ -115,13 +114,11 @@ class SourceIdentities(unittest.TestCase):
                      'managed_library_artifacts': ['libaom', 'libjxl'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
         old = {'libaom': 'old-aom', 'libjxl': 'old-jxl', 'frankenphp': 'unchanged-frankenphp'}
         new = dict(old, libaom='new-aom', libjxl='new-jxl')
-        original = source.plan(old, new, previous, previous, configuration='build', build_inputs=inventory,
-                               library_ids={'libaom', 'libjxl'}, components={})
+        original = source.plan(old, new, previous, previous, library_ids={'libaom', 'libjxl'})
         self.assertEqual(original['libraries'], ['libaom', 'libjxl'])
         self.assertEqual(original['requests'], {})
         self.assertEqual(original['package_requests'], {})
-        effective = source.reconcile(original, new, previous, 'build', 'changed-packaging-code', {}, inventory,
-                                     'changed-library-packaging', {}, automatic=True)
+        effective = source.reconcile(original, new, previous, inventory)
         self.assertEqual(effective['requests'], {})
         self.assertEqual(effective['package_requests'], {})
         self.assertEqual(effective['library_package_requests'], [])
@@ -130,26 +127,25 @@ class SourceIdentities(unittest.TestCase):
         inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
                      'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
         def plan(previous):
-            return source.plan({}, {}, previous, {}, configuration='build', build_inputs=inventory,
-                               library_package_configuration='packaging', variants={'rpm': 'profile'})
+            return source.plan({}, {}, previous, {})
         self.assertEqual(plan({})['library_package_requests'], [])
         self.assertEqual(plan({})['variant_package_requests'], {})
-        self.assertEqual(plan({'shared_library_package_configuration': 'older-packaging'})['library_package_requests'], ['attr'])
-        self.assertEqual(plan({'shared_variant_configuration': {'rpm': 'older-profile'}})['variant_package_requests'], {'rpm': ['openssl']})
+        self.assertEqual(plan({'shared_library_package_configuration': 'older-packaging'})['library_package_requests'], [])
+        self.assertEqual(plan({'shared_variant_configuration': {'rpm': 'older-profile'}})['variant_package_requests'], {})
 
-    def test_legacy_snapshot_packaging_hints_need_evidence_of_a_previous_configuration(self):
+    def test_legacy_snapshot_packaging_hints_are_ignored(self):
         inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
                      'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
         metadata = {'shared_configuration': 'build', 'shared_package_configuration': 'package',
                     'shared_library_package_configuration': 'library-package', 'shared_variant_configuration': {'rpm': 'profile'}}
         original = {'library_package_requests': ['attr'], 'variant_package_requests': {'rpm': ['openssl']}}
         def reconcile():
-            return source.reconcile(original, {}, metadata, 'build', 'package', {}, inventory, 'library-package', {'rpm': 'profile'})
+            return source.reconcile(original, {}, metadata, inventory)
         self.assertEqual(reconcile()['library_package_requests'], [])
         self.assertEqual(reconcile()['variant_package_requests'], {})
         original.update(library_package_baseline='older-package', variant_package_baselines={'rpm': 'older-profile'})
-        self.assertEqual(reconcile()['library_package_requests'], ['attr'])
-        self.assertEqual(reconcile()['variant_package_requests'], {'rpm': ['openssl']})
+        self.assertEqual(reconcile()['library_package_requests'], [])
+        self.assertEqual(reconcile()['variant_package_requests'], {})
 
     def actor_template(self, root, shared):
         path = root / 'config/templates/craft.yml.twig'
@@ -164,16 +160,12 @@ class SourceIdentities(unittest.TestCase):
         return path
 
     def metadata(self, root):
-        return {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
-                'shared_configuration': 'source-only',
-                'shared_package_configuration': source.package_identity(root),
-                'shared_components': {}}
+        return {'php_versions': {stream: stream + '.1' for stream in source.STREAMS}}
 
     def request(self, root, old):
-        return source.plan({}, {}, old, old, configuration='source-only',
-                           package_configuration=source.package_identity(root), components={})
+        return source.plan({}, {}, old, old)
 
-    def test_package_metadata_changes_preserve_compiled_payload_key(self):
+    def test_package_metadata_changes_do_not_request_work(self):
         with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
             root = Path(temporary)
             path = root / 'src/step/CreatePackages.php'
@@ -184,8 +176,7 @@ class SourceIdentities(unittest.TestCase):
             path.write_text('new dependency relationships')
             current = self.request(root, previous)
             self.assertEqual(current['requests'], {})
-            self.assertEqual(set(current['package_requests']), set(source.STREAMS))
-            self.assertTrue(all(item['full'] for item in current['package_requests'].values()))
+            self.assertEqual(current['package_requests'], {})
             self.assertEqual(current['payload_inputs'], old_inputs)
             self.assertEqual(current['libraries'], [])
             self.assertEqual(current['library_build_inputs'], [])
@@ -227,7 +218,7 @@ class SourceIdentities(unittest.TestCase):
             path.write_text('-O3')
             self.assertEqual(self.request(root, previous)['requests'], {})
             changed = dict(previous, php_source_hashes={'8.6': {'php-8.6.1.tar.gz': 'different bytes'}})
-            request = source.plan({}, {}, previous, changed, configuration=previous['shared_configuration'])
+            request = source.plan({}, {}, previous, changed)
             self.assertEqual(set(request['requests']), {'8.6'})
 
     def test_recipe_only_update_does_not_select_library_sources(self):
@@ -235,7 +226,7 @@ class SourceIdentities(unittest.TestCase):
                     'shared_configuration': 'same', 'shared_library_recipes': {'zlib': 'old', 'curl': 'same'}}
         inventory = {'managed_library_artifacts': ['zlib', 'curl'], 'library_tool_artifacts': [],
                      'irrelevant_artifacts': [], 'libraries': {'zlib': {'recipe_hash': 'new'}, 'curl': {'recipe_hash': 'same'}}}
-        request = source.plan({}, {}, metadata, metadata, configuration='same', library_ids={'zlib', 'curl'}, build_inputs=inventory)
+        request = source.plan({}, {}, metadata, metadata, library_ids={'zlib', 'curl'})
         self.assertEqual(request['requests'], {})
         self.assertEqual(request['libraries'], [])
 
@@ -244,36 +235,38 @@ class SourceIdentities(unittest.TestCase):
         for name in ['memcache', 'zip']:
             old = {'ext-' + name: {'source': {'hash': 'old'}}}
             new = {'ext-' + name: {'source': {'hash': 'new'}}}
-            before = source.plan(old, old, metadata, metadata, configuration='same')
-            after = source.plan(old, new, metadata, metadata, configuration='same')
+            before = source.plan(old, old, metadata, metadata)
+            after = source.plan(old, new, metadata, metadata)
             self.assertEqual(set(after['requests']), {'8.2', '8.3', '8.4'})
             for stream in ['8.5', '8.6']:
                 self.assertEqual(before['payload_inputs'][stream], after['payload_inputs'][stream])
 
-    def test_library_metadata_and_one_openssl_profile_never_request_compilation(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
+    def test_unused_packaging_recipes_cannot_break_source_planning(self):
+        with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            library = root / 'src/package/library.php'
-            library.parent.mkdir(parents=True)
-            library.write_text('old library package metadata')
-            variants = root / '.github/actions/shared-libraries/openssl-variants.py'
-            variants.parent.mkdir(parents=True)
-            variants.write_text("PROFILES = {'rpm': '/etc/pki/tls', 'deb': '/etc/ssl'}\ndef build(): pass\n")
-            previous = self.metadata(root)
-            previous['shared_library_package_configuration'] = source.library_package_identity(root)
-            previous['shared_variant_configuration'] = source.variant_identities(root)
-            library.write_text('new library package dependencies')
-            variants.write_text("PROFILES = {'rpm': '/etc/pki/tls', 'deb': '/etc/ssl/changed'}\ndef build(): pass\n")
-            inventory = {'managed_library_artifacts': ['zlib'], 'library_tool_artifacts': [], 'irrelevant_artifacts': [], 'libraries': {'zlib': {'recipe_hash': 'same'}}}
-            previous['shared_library_recipes'] = {'zlib': 'same'}
-            request = source.plan({}, {}, previous, previous, configuration='source-only',
-                                  package_configuration=source.package_identity(root), components={},
-                                  build_inputs=inventory, library_package_configuration=source.library_package_identity(root), variants=source.variant_identities(root))
-            self.assertEqual(request['requests'], {})
-            self.assertEqual(request['package_requests'], {})
-            self.assertEqual(request['libraries'], [])
-            self.assertEqual(request['library_package_requests'], ['zlib'])
-            self.assertEqual(request['variant_package_requests'], {'deb': ['openssl']})
+            self.actor_template(root, ['ssh2'])
+            downloads = root / 'downloads'
+            downloads.mkdir()
+            original = {'source_comparison_available': True, 'requests': {'8.6': {'packages': ['ssh2']}},
+                        'libraries': ['libaom'], 'package_requests': {'8.5': {'full': True, 'packages': []}},
+                        'library_package_requests': ['zlib'], 'variant_package_requests': {'deb': ['openssl']}}
+            for filename, value in [('.spc-meta.json', self.metadata(root)), ('.cache.json', {}), ('build-plan.json', original)]:
+                (downloads / filename).write_text(json.dumps(value))
+            recipe = root / '.github/actions/shared-libraries/openssl-variants.py'
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text('invalid syntax that source planning must not parse')
+            inventory = {'managed_library_artifacts': ['libaom'], 'libraries': {}}
+            output = root / 'effective.json'
+            with mock.patch('sys.argv', ['source-plan.py', '--root', str(root), '--reconcile', '--output', str(output)]), \
+                    mock.patch('sys.stdout', io.StringIO()), \
+                    mock.patch.object(source.subprocess, 'check_output', return_value=json.dumps(inventory)):
+                source.main()
+            result = json.loads(output.read_text())
+            self.assertEqual(result['requests'], {'8.6': {'full': False, 'packages': ['ssh2']}})
+            self.assertEqual(result['libraries'], ['libaom'])
+            self.assertEqual(result['package_requests'], {})
+            self.assertEqual(result['library_package_requests'], [])
+            self.assertEqual(result['variant_package_requests'], {})
 
     def test_current_checkout_reconciles_old_snapshot_without_mutating_sources(self):
         with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
@@ -282,16 +275,14 @@ class SourceIdentities(unittest.TestCase):
             template.parent.mkdir(parents=True)
             template.write_text('-O2')
             metadata = self.metadata(root)
-            metadata['shared_library_package_configuration'] = source.library_package_identity(root)
+            metadata['shared_library_package_configuration'] = 'old-library-recipe'
             metadata['shared_variant_configuration'] = {}
             original = {'requests': {}, 'package_requests': {}, 'configuration': 'source-only'}
             inventory = {'managed_library_artifacts': [], 'library_tool_artifacts': [], 'irrelevant_artifacts': [], 'libraries': {}}
             template.write_text('-O3')
-            request = source.reconcile(original, {}, metadata, 'source-only', source.package_identity(root),
-                                       {}, inventory, source.library_package_identity(root), {})
+            request = source.reconcile(original, {}, metadata, inventory)
             self.assertEqual(request['requests'], {})
             self.assertEqual(original['requests'], {})
-            self.assertEqual(request['snapshot_configuration'], original['configuration'])
 
     def test_never_selected_vendor_extension_recipe_does_not_request_work(self):
         with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
@@ -314,14 +305,14 @@ class SourceIdentities(unittest.TestCase):
         current = json.loads(json.dumps(previous))
         current['extension_sources']['8.6']['ext-apcu']['hash'] = 'new-master'
         artifacts = {'ext-apcu': {'source': stable}}
-        request = source.plan(artifacts, artifacts, previous, current, configuration='same')
+        request = source.plan(artifacts, artifacts, previous, current)
         self.assertEqual(request['requests'], {'8.6': {'full': False, 'packages': ['apcu']}})
-        before = source.plan(artifacts, artifacts, previous, previous, configuration='same')
+        before = source.plan(artifacts, artifacts, previous, previous)
         for stream in ['8.2', '8.3', '8.4', '8.5']:
             self.assertEqual(request['payload_inputs'][stream], before['payload_inputs'][stream])
         current['extension_sources']['8.6']['ext-apcu']['hash'] = 'old-master'
         current['extension_sources']['8.6']['ext-apcu']['time'] = 999
-        self.assertEqual(source.plan(artifacts, artifacts, previous, current, configuration='same')['requests'], {})
+        self.assertEqual(source.plan(artifacts, artifacts, previous, current)['requests'], {})
 
     def test_retired_apk_alias_configuration_has_no_effect(self):
         with TemporaryDirectory(prefix='source-plan-apk-alias-') as temporary:
@@ -330,12 +321,9 @@ class SourceIdentities(unittest.TestCase):
             path = root / 'config/apk-runtime-aliases.json'
             path.write_text(json.dumps({'schema': 1, 'extensions': {'amqp': {'suffix': '-shared'}, 'igbinary': {'suffix': '-shared'}}}))
             previous = self.metadata(root)
-            previous['shared_format_package_configuration'] = source.format_package_identities(root)
             before = self.request(root, previous)
             path.write_text(path.read_text().replace('-shared', '-runtime'))
-            after = source.plan({}, {}, previous, previous, configuration='source-only',
-                                package_configuration=source.package_identity(root), components={},
-                                format_package_configuration=source.format_package_identities(root))
+            after = source.plan({}, {}, previous, previous)
             self.assertEqual(after['requests'], {})
             self.assertEqual(after['package_requests'], {})
             self.assertEqual(after['libraries'], [])

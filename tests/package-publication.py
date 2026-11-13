@@ -528,17 +528,24 @@ class Publication(unittest.TestCase):
             with self.subTest(index=index), self.assertRaises(RuntimeError):
                 publication.verify_target(*changed)
 
-    def test_inspection_paginates_and_pins_artifact_ids(self):
-        self.plan()
-        output = self.plans / 'publication.json'
-        with patch.object(publication, 'api', side_effect=[self.run, [{'artifacts': self.artifacts[:2]}, {'artifacts': self.artifacts[2:]}]]) as api:
-            with patch.object(sys, 'argv', ['publication.py', 'inspect', '--run-id', '42', '--type', 'rpm',
-                                          '--repository', 'static-php/packages', '--branch', 'master', '--output', str(output)]):
-                with contextlib.redirect_stdout(io.StringIO()) as printed:
-                    publication.main()
-        self.assertEqual(api.call_args_list[1].kwargs, {'paginate': True})
-        self.assertEqual(json.loads(output.read_text())['artifacts'], {item['name']: item['id'] for item in self.artifacts})
-        self.assertIn('plan-artifact-ids=1', printed.getvalue())
+    def test_preparation_paginates_and_pins_artifact_ids(self):
+        plan = self.plan()
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            for filename in ('target.json', 'shared-library-plan.json'):
+                archive.writestr(filename, (plan / filename).read_bytes())
+        with patch.object(publication, 'api', side_effect=[self.run, [{'artifacts': self.artifacts[:2]}, {'artifacts': self.artifacts[2:]}]]) as api, \
+                patch.object(publication, 'read_plan_archive', return_value=data.getvalue()):
+            with patch.object(sys, 'argv', ['publication.py', 'prepare', '--run-ids', '42', '--type', 'rpm',
+                                          '--repository', 'static-php/packages', '--branch', 'master']), \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
+                publication.main()
+        self.assertTrue(api.call_args_list[1].args[1])
+        fields = dict(line.split('=', 1) for line in printed.getvalue().splitlines())
+        entry, = json.loads(fields['matrix'])['include']
+        wanted = {str(item['id']) for item in self.artifacts if item['name'].startswith(('shared-libs-rpm-', 'shared-consumers-rpm-'))}
+        self.assertEqual(set(entry['artifact-ids'].split(',')), wanted)
+        self.assertEqual(entry['build-run-id'], '42')
 
 
 class WorkflowContracts(unittest.TestCase):
@@ -547,10 +554,12 @@ class WorkflowContracts(unittest.TestCase):
         self.publisher = yaml.safe_load((ROOT / '.github/workflows/publish-package-cohort.yml').read_text())
 
     def test_only_secondary_mirror_failures_are_non_blocking(self):
-        self.assertEqual(self.workflow['jobs']['prepare']['continue-on-error'], "${{ inputs.mirror_run_id != '' }}")
+        self.assertNotIn('continue-on-error', self.workflow['jobs']['prepare'])
         for name in ['publish-glibc', 'publish-apk']:
             job = self.publisher['jobs'][name]
-            self.assertEqual(job['continue-on-error'], '${{ inputs.mirror }}')
+            self.assertEqual(job['continue-on-error'], "${{ inputs.mirror && inputs.primary-run-id == '' }}")
+            results = next(step for step in job['steps'] if step['name'] == 'Download primary publication results')
+            self.assertEqual(results['continue-on-error'], "${{ inputs.primary-run-id == '' }}")
             publish = next(step for step in job['steps'] if step['name'] == 'Publish each validated PHP stream independently')
             self.assertFalse(publish.get('continue-on-error', False))
             diagnostics = next(step for step in job['steps'] if step['name'] == 'Upload publication diagnostics')

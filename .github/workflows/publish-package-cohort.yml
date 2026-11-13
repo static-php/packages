@@ -90,7 +90,7 @@ jobs:
         name: Publish glibc cohort
         if: inputs.format == 'deb' || (inputs.format == 'rpm' && !inputs.mirror)
         runs-on: ubuntu-24.04${{ inputs.arch == 'arm64' && '-arm' || '' }}
-        continue-on-error: ${{ inputs.mirror }}
+        continue-on-error: ${{ inputs.mirror && inputs.primary-run-id == '' }}
         container:
             image: ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}
         steps: &publish-steps
@@ -161,7 +161,7 @@ jobs:
                 run: python3 .github/actions/shared-libraries/publication.py verify-target --directory "cohort/shared-libs-$TYPE-$TARGET"
             -   name: Download primary publication results
                 if: inputs.mirror
-                continue-on-error: true
+                continue-on-error: ${{ inputs.primary-run-id == '' }}
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     github-token: ${{ github.token }}
@@ -189,5 +189,5 @@ jobs:
         name: Publish Alpine cohort
         if: inputs.format == 'apk'
         runs-on: ubuntu-24.04${{ inputs.arch == 'arm64' && '-arm' || '' }}
-        continue-on-error: ${{ inputs.mirror }}
+        continue-on-error: ${{ inputs.mirror && inputs.primary-run-id == '' }}
         steps: *publish-steps

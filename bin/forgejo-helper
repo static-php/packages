@@ -128,12 +128,12 @@ def get_remote_candidates(host, owner, password, pkg_type, files):
     names = {metadata(path, pkg_type)[0] for path in files}
     if not names:
         return []
-    query = min(names)
-    while query and any(not name.startswith(query) for name in names):
-        query = query[:-1]
     print(f"Listing versions for {len(names)} packages: {host} {owner} ({pkg_type})", flush=True)
-    return [package for package in get_remote_packages(host, owner, password, pkg_type, query or None)
-            if package['name'] in names]
+    def selected(name):
+        return [package for package in get_remote_packages(host, owner, password, pkg_type, name)
+                if package['name'] == name]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [package for packages in pool.map(selected, sorted(names)) for package in packages]
 
 def get_remote_package_files(host, owner, password, pkg_type, name, version):
     url = f"{host}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/{quote(name, safe='')}/{quote(version, safe='')}/files"
@@ -506,9 +506,10 @@ def version_is_newer(pkg_type, left, right):
         raise RuntimeError(f"Cannot compare APK versions {left} and {right}")
     return result == '>'
 
-def verify_upload_versions(host, owner, password, pkg_type, files, packages):
+def verify_upload_versions(host, owner, password, pkg_type, files, packages, *, keep_newer=False):
     candidates = {}
     skipped = {}
+    newer = set()
     def check(item):
         index, pkg_file = item
         name, version, arch = package_metadata(pkg_file, pkg_type)
@@ -536,14 +537,22 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages):
                 skipped[key] = f"Cannot verify {name} {version} for {arch}: {error}"
                 break
             if arch in archs:
-                skipped[key] = f"{name} {version} sorts below published {published['version']} for {arch}"
+                if keep_newer:
+                    newer.add(key)
+                else:
+                    skipped[key] = f"{name} {version} sorts below published {published['version']} for {arch}"
                 break
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(check, enumerate(files, 1)))
+    rejected = [reason for key, reason in skipped.items() if key not in newer]
+    if keep_newer and rejected:
+        raise RuntimeError('A version/archive identity guard rejected the cohort: ' + ' | '.join(rejected))
     allowed = []
     for pkg_file in files:
         key = candidates[pkg_file]
-        if key in skipped:
+        if key in newer:
+            print(f"Keeping newer mirror package: {owner}/{pkg_file.name}", flush=True)
+        elif key in skipped:
             print(f"::warning::Skipping upload of {pkg_file.name}: {skipped[key]}")
         else:
             allowed.append(pkg_file)
@@ -659,12 +668,12 @@ def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php
             response = registry_request('put', url, files={'file': archive}, auth=(owner, password), timeout=120)
         if response.status_code not in (201, 409):
             raise RuntimeError(f"Upload failed for {owner}/{path.name}: HTTP {response.status_code}")
-    after = remote_package_archives(host, owner, password, pkg_type, name, version, True)
-    identities = {(record['arch'], record['sha256']) for record in after}
-    if (arch, digest) not in identities:
-        raise RuntimeError(f"Served archive differs or is missing after upload: {owner}/{name}/{version}/{arch}")
-    if any((record['arch'], record['sha256']) not in identities for record in before):
-        raise RuntimeError(f"Upload changed an existing architecture: {owner}/{name}/{version}")
+        after = remote_package_archives(host, owner, password, pkg_type, name, version, True)
+        identities = {(record['arch'], record['sha256']) for record in after}
+        if (arch, digest) not in identities:
+            raise RuntimeError(f"Served archive differs or is missing after upload: {owner}/{name}/{version}/{arch}")
+        if any((record['arch'], record['sha256']) not in identities for record in before):
+            raise RuntimeError(f"Upload changed an existing architecture: {owner}/{name}/{version}")
     publish_consumer_sidecar(host, owner, password, pkg_type, path)
     print(f"Verified: {owner}/{name} {version} {arch} sha256={digest}", flush=True)
     return 0

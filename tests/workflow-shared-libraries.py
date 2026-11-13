@@ -39,36 +39,36 @@ class SourcePlanTests(unittest.TestCase):
         self.inventory = {'schema': 1, 'managed_library_artifacts': ['zlib'], 'library_tool_artifacts': ['pkg-config'], 'irrelevant_artifacts': ['php-src', 'ext-imagick', 'go-xcaddy']}
 
     def plan(self, previous, current):
-        return source.plan(previous, current, self.metadata, self.metadata, configuration='same', library_ids=set(self.inventory['managed_library_artifacts']), build_inputs=self.inventory)
+        return source.plan(previous, current, self.metadata, self.metadata, library_ids=set(self.inventory['managed_library_artifacts']))
 
     def test_library_only_update_requests_no_php(self):
         old = {'zlib': {'source': {'hash': 'old'}}}
         new = {'zlib': {'source': {'hash': 'new'}}, 're2c': {'source': {'hash': 'new'}}}
-        result = source.plan(old, new, self.metadata, self.metadata, configuration='same', library_ids={'zlib'})
+        result = source.plan(old, new, self.metadata, self.metadata, library_ids={'zlib'})
         self.assertEqual(result['libraries'], ['zlib'])
         self.assertEqual(result['requests'], {})
 
     def test_combines_full_and_partial_requests_in_one_plan(self):
         current = json.loads(json.dumps(self.metadata))
         current['php_versions']['8.4'] = '8.4.2'
-        result = source.plan({}, {'ext-imagick': {'source': {'hash': 'new'}}}, self.metadata, current, configuration='same')
+        result = source.plan({}, {'ext-imagick': {'source': {'hash': 'new'}}}, self.metadata, current)
         self.assertEqual(result['requests']['8.4'], {'full': True, 'packages': []})
         self.assertEqual(result['requests']['8.3'], {'full': False, 'packages': ['imagick']})
 
     def test_configuration_migration_and_explicit_full_request_are_full(self):
         for force, configuration in [(False, 'new'), (True, 'same')]:
-            result = source.plan({}, {}, self.metadata, self.metadata, force=force, configuration=configuration)
+            result = source.plan({}, {}, self.metadata, self.metadata, force=force)
             self.assertEqual(set(result['requests']), set(source.STREAMS) if force else set())
             self.assertTrue(all(request['full'] for request in result['requests'].values()))
 
     def test_pie_changes_rebuild_only_pie(self):
         for current in [dict(self.metadata, pie_version='2.0'), dict(self.metadata, pie_sha256='new-frozen-bytes')]:
-            result = source.plan({}, {}, self.metadata, current, configuration='same')
+            result = source.plan({}, {}, self.metadata, current)
             self.assertEqual(result['requests'], {})
             self.assertTrue(all(request == {'full': False, 'packages': ['pie']} for request in result['package_requests'].values()))
 
     def test_binary_only_artifacts_do_not_break_change_detection(self):
-        result = source.plan({}, {'pkg-config': {'source': None, 'binary': {}}}, self.metadata, self.metadata, configuration='same', library_ids={'zlib'})
+        result = source.plan({}, {'pkg-config': {'source': None, 'binary': {}}}, self.metadata, self.metadata, library_ids={'zlib'})
         self.assertEqual(result['requests'], {})
         self.assertEqual(result['libraries'], [])
 
@@ -151,7 +151,7 @@ class SourcePlanTests(unittest.TestCase):
                 path.write_text('original')
                 previous = dict(self.metadata, shared_configuration='source-only')
                 path.write_text('changed')
-                result = source.plan({}, {}, previous, previous, configuration='source-only')
+                result = source.plan({}, {}, previous, previous)
                 self.assertEqual(result['requests'], {})
 
 
@@ -296,6 +296,53 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CacheAndCohortTests(unittest.TestCase):
+    def test_alpine_publication_runs_as_the_runner_without_recursive_ownership_repair(self):
+        with tempfile.TemporaryDirectory(prefix='shared-workflow-user-') as temporary:
+            root = Path(temporary)
+            shims = root / 'shims'
+            shims.mkdir()
+            docker = shims / 'docker'
+            docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nopen(os.environ["DOCKER_ARGUMENTS"], "w").write(json.dumps(sys.argv[1:]))\n')
+            docker.chmod(0o755)
+            environment = dict(os.environ, TYPE='apk', MODE='full', HOME=str(root / 'home'), IMAGE='builder',
+                               GITHUB_WORKSPACE=str(root), DOCKER_ARGUMENTS=str(root / 'arguments'),
+                               PATH=str(shims) + ':' + os.environ['PATH'])
+            environment.pop('IN_BUILDER', None)
+            for command in ('upload-1', 'upload-2', 'record-repository', 'libs'):
+                subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), command],
+                               cwd=root, env=environment, check=True, capture_output=True)
+                arguments = json.loads((root / 'arguments').read_text())
+                if command == 'libs':
+                    self.assertNotIn('--user', arguments)
+                    self.assertTrue(any(value.startswith('BUILDER_HOST_UID=') for value in arguments))
+                else:
+                    self.assertEqual(arguments[arguments.index('--user') + 1], str(os.getuid()) + ':' + str(os.getgid()))
+                    self.assertFalse(any(value.startswith('BUILDER_HOST_UID=') for value in arguments))
+
+    def test_shared_workflow_installs_composer_dependencies_only_once(self):
+        with tempfile.TemporaryDirectory(prefix='shared-workflow-composer-') as temporary:
+            root = Path(temporary)
+            for name in ('shims', 'home', '.github/actions/shared-libraries'):
+                (root / name).mkdir(parents=True)
+            scripts = root / '.github/actions/shared-libraries'
+            shutil.copy2(ROOT / '.github/actions/shared-libraries/workflow.py', scripts / 'workflow.py')
+            (scripts / 'glibc.py').write_text('')
+            (scripts / 'payload-cache.py').write_text('print("key=existing-payload")')
+            composer = root / 'shims/composer'
+            composer.write_text('#!/bin/sh\nmkdir -p vendor\ntouch vendor/autoload.php\nprintf "install\\n" >> composer-calls\n')
+            composer.chmod(0o755)
+            php = root / 'shims/php'
+            php.write_text('#!/bin/sh\ncase "$1" in *build-inputs.php) echo "{}";; *) exit 99;; esac\n')
+            php.chmod(0o755)
+            environment = dict(os.environ, TYPE='rpm', MODE='full', TARGET='alma8-arm64', PHPV='8.6', HOME=str(root / 'home'),
+                               PATH=str(root / 'shims') + ':' + os.environ['PATH'])
+            for command in ('fingerprint', 'glibc-record', 'payload-key'):
+                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), command],
+                                        cwd=root, env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / 'composer-calls').read_text().splitlines(), ['install'])
+            self.assertTrue((root / 'stage/library-compatibility').is_file())
+
     def test_alpine_builder_returns_ownership_after_success_and_failure(self):
         for status in [0, 7]:
             with self.subTest(status=status), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:

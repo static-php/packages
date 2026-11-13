@@ -17,11 +17,11 @@ def read(path):
 def restore(root, repository, before, allow_sources=False, github=None, fetch=None, allow_empty=False):
     state = root / '.download-state'
     lock, metadata = state / 'lock.prev.json', state / 'meta.prev.json'
-    if read(lock) and read(metadata).get('shared_configuration'):
+    if read(lock) and read(metadata).get('php_versions'):
         return 'cache'
     if allow_sources:
         previous = root / 'downloads'
-        if read(previous / '.cache.json') and read(previous / '.spc-meta.json').get('shared_configuration'):
+        if read(previous / '.cache.json') and read(previous / '.spc-meta.json').get('php_versions'):
             state.mkdir(parents=True, exist_ok=True)
             lock.write_bytes((previous / '.cache.json').read_bytes())
             metadata.write_bytes((previous / '.spc-meta.json').read_bytes())
@@ -52,7 +52,7 @@ def restore(root, repository, before, allow_sources=False, github=None, fetch=No
                 fetch(previous, repository, run['id'])
                 sources = read(previous / 'downloads/.cache.json')
                 inputs = read(previous / 'downloads/.spc-meta.json')
-                if not sources or not inputs.get('shared_configuration'):
+                if not sources or not inputs.get('php_versions'):
                     raise RuntimeError('Previous source snapshot has no usable comparison state: ' + str(run['id']))
                 state.mkdir(parents=True, exist_ok=True)
                 lock.write_text(json.dumps(sources, sort_keys=True) + '\n')

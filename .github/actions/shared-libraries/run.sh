@@ -15,10 +15,15 @@ if [[ "${MODE:-full}" == incremental && ! -f downloads/build-plan.json && "$comm
 fi
 if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
     mkdir -p "$HOME/.cache/composer"
-    exec docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
+    owner_args=(-e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)")
+    case "$command" in
+        upload-1|upload-2|record-repository|invalidate-repository)
+            owner_args=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+            ;;
+    esac
+    exec docker run --rm "${owner_args[@]}" -v "$GITHUB_WORKSPACE":/build -w /build \
         -v "$HOME/.cache/composer":/composer-cache \
         -e IN_BUILDER=true -e COMPOSER_CACHE_DIR=/composer-cache \
-        -e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)" \
         -e TYPE -e MODE -e LIBRARIES -e PHP_VERSIONS -e PACKAGES -e PHPV -e ITERATION -e BUMP -e PUBLISH \
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
@@ -58,6 +63,15 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
 fi
 
 case "$command" in
+    fingerprint|libs|payload-key|php|classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-libraries)
+        git config --global --add safe.directory "$PWD"
+        if [[ ! -f vendor/autoload.php ]]; then
+            composer install --no-dev --no-interaction --prefer-dist --no-progress >&2
+        fi
+        ;;
+esac
+
+case "$command" in
     record-repository|invalidate-repository)
         export REPOSITORY_STATE_ACTION="$command"
         python3 - <<'PY'
@@ -78,22 +92,15 @@ PY
         python3 .github/actions/shared-libraries/glibc.py native-inventories
         ;;
     classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-libraries)
-        git config --global --add safe.directory "$PWD"
-        composer install --no-dev --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
         ;;
     fingerprint)
-        git config --global --add safe.directory "$PWD"
-        composer install --no-dev --no-interaction --prefer-dist --no-progress >&2
-        php bin/spp --version >/dev/null
         mkdir -p stage
         php .github/actions/shared-libraries/build-inputs.php "$PWD" "$TYPE" "$TARGET" > stage/library-build-environment.json
         python3 .github/actions/shared-libraries/workflow.py fingerprint --target "$TYPE-$TARGET" \
             --build-environment stage/library-build-environment.json
         ;;
     libs)
-        git config --global --add safe.directory "$PWD"
-        composer install --no-dev --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/incremental-build.py plan --root . \
             --compatibility "$(cat stage/library-compatibility)" --libraries "${LIBRARIES:-}" \
             --output stage/library-build-plan.json
@@ -106,8 +113,6 @@ PY
         test -s buildroot/shared-libraries.json
         ;;
     payload-key)
-        composer install --no-dev --no-interaction --prefer-dist --no-progress >&2
-        php bin/spp --version >/dev/null
         python3 .github/actions/shared-libraries/payload-cache.py key --root . --stream "$PHPV"             --manifest buildroot/shared-libraries.json --compatibility stage/library-compatibility
         ;;
     prepare-runtime)
@@ -128,7 +133,7 @@ PY
         host=${command##*-}
         export SPP_ARCHIVE_HEADER_CACHE="$PWD/stage/verified-archive-headers"
         cd "dist/$TYPE"
-        python3 ../../.github/actions/shared-libraries/publish-forgejo.py upload "$TYPE" "$host"
+        python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE" "$host"
         ;;
     record)
         jq -n --arg type "$TYPE" --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
@@ -142,8 +147,6 @@ PY
             --output stage/shared-library-build-receipt.json
         ;;
     php)
-        git config --global --add safe.directory "$PWD"
-        composer install --no-dev --no-interaction --prefer-dist --no-progress
         cp stage/shared-libraries.json buildroot/shared-libraries.json
         mkdir -p dist/"$TYPE"
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi
@@ -186,7 +189,6 @@ PY
         libs="cohort/shared-libs-$TYPE-$TARGET"
         scope_args=()
         if [[ -n "${PUBLICATION_PHP_STREAMS:-}" ]]; then scope_args+=(--php-streams "$PUBLICATION_PHP_STREAMS"); fi
-        python3 .github/actions/shared-libraries/workflow.py prune-consumers --source cohort --library-artifact "$libs"
         if [[ ! -d "dist/$TYPE" ]]; then
             python3 .github/actions/shared-libraries/workflow.py assemble --source cohort --destination "dist/$TYPE" --type "$TYPE" "${scope_args[@]}"
         fi

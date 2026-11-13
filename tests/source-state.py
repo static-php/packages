@@ -22,7 +22,7 @@ class SourceState(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             self.write(root, '.download-state/lock.prev.json', {'libaom': 'old'})
-            self.write(root, '.download-state/meta.prev.json', {'shared_configuration': 'build'})
+            self.write(root, '.download-state/meta.prev.json', {'php_versions': {'8.6': '8.6.0RC7'}})
             github = Mock()
             self.assertEqual(state.restore(root, 'org/repo', '30', github=github), 'cache')
             github.api.assert_not_called()
@@ -31,7 +31,7 @@ class SourceState(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             self.write(root, 'downloads/.cache.json', {'libaom': 'old'})
-            self.write(root, 'downloads/.spc-meta.json', {'shared_configuration': 'build'})
+            self.write(root, 'downloads/.spc-meta.json', {'php_versions': {'8.6': '8.6.0RC7'}})
             github = Mock()
             self.assertEqual(state.restore(root, 'org/repo', '30', allow_sources=True, github=github), 'source-cache')
             self.assertEqual(state.read(root / '.download-state/lock.prev.json'), {'libaom': 'old'})
@@ -51,7 +51,7 @@ class SourceState(unittest.TestCase):
             def fetch(destination, repository, run_id):
                 self.assertEqual((repository, run_id), ('org/repo', 20))
                 self.write(destination, 'downloads/.cache.json', {'libaom': 'actual-old'})
-                self.write(destination, 'downloads/.spc-meta.json', {'shared_configuration': 'build'})
+                self.write(destination, 'downloads/.spc-meta.json', {'php_versions': {'8.6': '8.6.0RC7'}})
             self.assertEqual(state.restore(root, 'org/repo', '30', github=Mock(api=api), fetch=fetch), '20')
             self.assertEqual(state.read(root / '.download-state/lock.prev.json'), {'libaom': 'actual-old'})
 

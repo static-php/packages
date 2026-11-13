@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import zipfile
 from urllib.request import Request, build_opener, urlopen
 
@@ -280,26 +279,13 @@ def publish_available(source, kind, target, mirror=False, selected_php='all', se
             log.parent.mkdir(exist_ok=True)
             def run(*arguments):
                 print(f'{kind.upper()} {target} PHP {label}: {arguments[-1]}', flush=True)
-                finished = threading.Event()
-                def progress():
-                    while not finished.wait(30):
-                        with log.open('rb') as output:
-                            output.seek(max(0, output.seek(0, 2) - 4096))
-                            lines = output.read().decode(errors='replace').splitlines()
-                        detail = lines[-1][-300:] if lines else 'waiting for output'
-                        print(f'{kind.upper()} {target} PHP {label}: {arguments[-1]} running; {detail}', flush=True)
                 log.touch(exist_ok=True)
-                monitor = threading.Thread(target=progress, daemon=True)
-                monitor.start()
                 try:
                     run_logged(arguments, environment, log)
                 except subprocess.CalledProcessError as error:
                     lines = log.read_text(errors='replace').splitlines()
                     detail = failure_reason(lines)
                     raise RuntimeError((detail or str(error)) + f' (details: {log})') from error
-                finally:
-                    finished.set()
-                    monitor.join()
             try:
                 verify_upgrades(source, library, kind, scope)
                 destination = Path('dist') / kind
@@ -346,17 +332,6 @@ def main():
     prepare.add_argument('--arch', choices=('all', 'x86_64', 'arm64'), default='all')
     prepare.add_argument('--php', choices=('all', *STREAMS), default='all')
     prepare.add_argument('--primary-run-ids', default='')
-    inspect = sub.add_parser('inspect')
-    inspect.add_argument('--run-id', required=True)
-    inspect.add_argument('--type', choices=('rpm', 'deb', 'apk'), required=True)
-    inspect.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY'))
-    inspect.add_argument('--branch', required=True)
-    inspect.add_argument('--output', type=Path, required=True)
-    matrix = sub.add_parser('matrix')
-    matrix.add_argument('--state', type=Path, required=True)
-    matrix.add_argument('--plans', type=Path, required=True)
-    matrix.add_argument('--arch', choices=('all', 'x86_64', 'arm64'), default='all')
-    matrix.add_argument('--php', choices=('all', *STREAMS), default='all')
     verify = sub.add_parser('verify-target')
     verify.add_argument('--directory', type=Path, required=True)
     publish = sub.add_parser('publish-available')
@@ -370,20 +345,6 @@ def main():
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository or ''):
             raise RuntimeError('A repository is required')
         includes = prepare_publication(args.run_ids, args.type, args.repository, args.branch, args.arch, args.php, args.primary_run_ids)
-        emit('matrix', {'include': includes})
-        emit('any', 'true')
-    elif args.command == 'inspect':
-        if not re.fullmatch('[0-9]+', args.run_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository or ''):
-            raise RuntimeError('A numeric build run ID and repository are required')
-        endpoint = 'repos/' + args.repository + '/actions/runs/' + args.run_id
-        run = api(endpoint)
-        artifacts = [item for page in api(endpoint + '/artifacts?per_page=100', paginate=True) for item in page['artifacts']]
-        state = inspect_run(run, artifacts, args.repository, args.branch, args.type)
-        args.output.write_text(json.dumps(state, sort_keys=True) + '\n')
-        emit('plan-artifact-ids', ','.join(str(state['artifacts'][name]) for name in state['plans']))
-    elif args.command == 'matrix':
-        state = json.loads(args.state.read_text())
-        includes = publication_matrix(state, args.plans, args.arch, args.php)
         emit('matrix', {'include': includes})
         emit('any', 'true')
     elif args.command == 'artifact-ids':
