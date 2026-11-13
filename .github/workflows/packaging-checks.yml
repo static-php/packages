@@ -48,6 +48,7 @@ jobs:
                         php tests/builder-tool-cache.php
                         php tests/attr-install.php
                         php tests/build-payload.php
+                        php tests/partial-consumer-preservation.php
                         python3 tests/glibc-pipeline.py \
                             Pipeline.test_sdk_classification_needs_no_temporary_craft_and_scans_consumers_only_after_rebuild \
                             Pipeline.test_publication_rechecks_the_recorded_library_baseline_scope \

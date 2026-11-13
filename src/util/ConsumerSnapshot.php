@@ -46,7 +46,7 @@ final class ConsumerSnapshot
             foreach ($expected as $relative => $identity) {
                 $snapshot->preserve($relative, $identity, $previousPayload);
             }
-            foreach (['bin', 'lib', 'modules', 'debug'] as $directory) {
+            foreach (['bin', 'lib', 'modules'] as $directory) {
                 if (!is_dir($root . '/' . $directory)) {
                     continue;
                 }
@@ -60,17 +60,6 @@ final class ConsumerSnapshot
                             throw new RuntimeException('Unverified consumer symlink before partial build: ' . $relative);
                         }
                         $snapshot->preserve($relative, ['symlink' => readlink($file->getPathname())], null);
-                    } elseif ($directory === 'debug' && $file->isFile() && !$file->isLink()) {
-                        $basename = preg_replace('/\.debug$/D', '', $file->getFilename());
-                        foreach (array_keys($metadata['files'] ?? []) as $consumer) {
-                            if (self::consumer($consumer) && basename($consumer) === $basename) {
-                                if (!self::matchingDebugInfo($root . '/' . $consumer, $file->getPathname())) {
-                                    throw new RuntimeException('Unverified consumer debug companion before partial build: ' . $relative);
-                                }
-                                $snapshot->preserve($relative, self::identity($file->getPathname()), null, self::actor($consumer));
-                                break;
-                            }
-                        }
                     }
                 }
             }
@@ -244,39 +233,7 @@ final class ConsumerSnapshot
                 && (fileperms($path) & 0777) === ($identity['mode'] ?? null);
     }
 
-    private static function identity(string $path): array
-    {
-        return ['sha256' => hash_file('sha256', $path), 'mode' => fileperms($path) & 0777];
-    }
-
     private static function normalize(string $name): string { return str_replace('_', '-', $name); }
-
-    private static function matchingDebugInfo(string $runtime, string $debug): bool
-    {
-        if (!is_file($runtime)) {
-            return false;
-        }
-        $read = static function (array $arguments): string {
-            $process = new Process($arguments);
-            $process->mustRun();
-            return $process->getOutput();
-        };
-        preg_match('/Build ID:\s*(\S+)/', $read(['readelf', '--notes', $runtime]), $first);
-        preg_match('/Build ID:\s*(\S+)/', $read(['readelf', '--notes', $debug]), $second);
-        if (isset($first[1], $second[1])) {
-            return $first[1] === $second[1];
-        }
-        $section = $read(['readelf', '--wide', '--hex-dump=.gnu_debuglink', $runtime]);
-        preg_match_all('/^\s*0x[0-9a-f]+\s+((?:[0-9a-f]{8}\s*){1,4})/mi', $section, $words);
-        $bytes = hex2bin(preg_replace('/\s+/', '', implode('', $words[1])));
-        if ($bytes === false || ($end = strpos($bytes, "\0")) === false || strlen($bytes) < 8
-            || substr($bytes, 0, $end) !== basename($debug)) {
-            return false;
-        }
-        $offset = ($end + 4) & ~3;
-        return strlen($bytes) === $offset + 4
-            && sprintf('%08x', unpack('Vcrc', substr($bytes, $offset, 4))['crc']) === hash_file('crc32b', $debug);
-    }
 
     private static function consumer(string $relative): bool
     {

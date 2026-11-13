@@ -70,10 +70,13 @@ try {
         BuildPayload::record($previous, $configuration, '8.6.0RC4', php_uname('m'));
         $metadata = BuildPayload::seal($previous)->metadata();
         $hashes = [];
-        foreach (['bin/php', 'lib/libphp-zts-86.so', 'modules/kept-zts-86.so', 'debug/kept-zts-86.so.debug', 'include/php/Zend/zend_modules.h'] as $relative) {
+        foreach (['bin/php', 'lib/libphp-zts-86.so', 'modules/kept-zts-86.so', 'include/php/Zend/zend_modules.h'] as $relative) {
             $hashes[$relative] = identity($root . '/' . $relative);
         }
+        file_put_contents($root . '/debug/php.debug', 'stale debug file from another PHP stream');
         $snapshot = ConsumerSnapshot::capture($root, $metadata, ['selected'], $previous);
+        $debug = $metadata['prepared']['modules/kept-zts-86.so']['debug']['path'];
+        $hashes[$debug] = identity($previous . '/' . $debug);
         run(['cc', '-g', '-shared', '-fPIC', $case . '/new.c', '-o', $case . '/new.so']);
         $process = new Process(['python3', '-c', <<<'PY'
 import os, shutil, sys
@@ -114,6 +117,11 @@ PY, $root, $case . '/new.so', (string) $exitCode]);
         copy($root . '/bin/php', $frankenRoot . '/bin/frankenphp');
         BuildPayload::record($frankenRoot, $configuration, '8.6.0RC4', php_uname('m'));
         $frankenMetadata = BuildPayload::seal($frankenRoot)->metadata();
+        $debugFile = $frankenRoot . '/' . $frankenMetadata['prepared']['bin/frankenphp']['debug']['path'];
+        $debugBytes = file_get_contents($debugFile);
+        file_put_contents($debugFile, 'corrupted recorded debug companion');
+        rejected(static fn () => ConsumerSnapshot::capture($frankenRoot, $frankenMetadata, ['selected']), 'Missing or changed retained consumer');
+        file_put_contents($debugFile, $debugBytes);
         $frankenSnapshot = ConsumerSnapshot::capture($frankenRoot, $frankenMetadata, ['frankenphp']);
         $replace = new Process(['python3', '-c', <<<'PYTHON'
 import os, shutil, sys
