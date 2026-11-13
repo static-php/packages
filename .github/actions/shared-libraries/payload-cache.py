@@ -193,7 +193,8 @@ def core_sources(module, root, sources, metadata, stream):
 
 def component_sources(module, sources, metadata, stream, names):
     artifacts = module.stream_artifacts(sources, metadata, stream)
-    return {name: (artifacts.get(name, {}).get('source') or {}).get('hash')
+    return {name: ((artifacts.get(name, {}).get('source') or {}).get('hash')
+                   if module.component_used(name, stream, artifact=True) else None)
             for name in names if name not in ('go', 'go-xcaddy')}
 
 

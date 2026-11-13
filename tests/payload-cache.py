@@ -156,6 +156,15 @@ class PayloadCache(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'does not identify the cached core'):
             cache.recorded_core_sources(self.root, manifest, '8.6')
 
+    def test_bundled_zip_does_not_rebuild_for_an_unused_pecl_archive(self):
+        spec = importlib.util.spec_from_file_location('bundled_zip_sources', ROOT / '.github/actions/shared-libraries/source-plan.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sources = {'ext-zip': {'source': {'hash': 'changed PECL archive'}}}
+        self.assertEqual(cache.component_sources(module, sources, {}, '8.4', ['zip']), {'zip': 'changed PECL archive'})
+        for stream in ['8.5', '8.6']:
+            self.assertEqual(cache.component_sources(module, sources, {}, stream, ['zip']), {'zip': None})
+
     def test_streamed_archive_rejects_corruption_and_inventory_changes(self):
         content = b'cached executable'
         manifest = {'files': {'bin/php': {'sha256': hashlib.sha256(content).hexdigest(), 'mode': 0o755}}}
