@@ -126,6 +126,7 @@ PY
         ;;
     upload-1|upload-2)
         host=${command##*-}
+        export SPP_ARCHIVE_HEADER_CACHE="$PWD/stage/verified-archive-headers"
         cd "dist/$TYPE"
         python3 ../../.github/actions/shared-libraries/publish-forgejo.py upload "$TYPE" "$host"
         ;;

@@ -91,6 +91,37 @@ class ForgejoPublication(unittest.TestCase):
         self.assertLess(stream.tell(), 256 * 1024)
         self.assertEqual(get.call_count, 3)
 
+    def test_verified_headers_are_reused_across_stream_processes_by_checksum(self):
+        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'aarch64', signed=True)
+        digest = hashlib.sha256(data).hexdigest()
+        files = [{'id': 42, 'name': 'php-zts-lib-ssl-3.6.0-r1.apk', 'sha256': digest}]
+        archive = response(data=data)
+        archive.raw = io.BytesIO(data)
+        cache = self.root / 'verified-headers'
+        with patch.dict('os.environ', {'SPP_ARCHIVE_HEADER_CACHE': str(cache)}), \
+                patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), archive, response(payload=files)]) as get:
+            helper['remote_package_archives']('https://example.com', '85', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+            helper_globals['ARCHIVE_HEADER_IDENTITIES'].clear()
+            mirrored = helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+            self.assertEqual(mirrored[0]['arch'], 'aarch64')
+            self.assertEqual(mirrored[0]['owner'], '86')
+            self.assertEqual(get.call_count, 3)
+            record = cache / (digest + '.json')
+            original = record.read_text()
+            value = json.loads(original)
+            value['name'] = 'another-package'
+            record.write_text(json.dumps(value))
+            helper_globals['ARCHIVE_HEADER_IDENTITIES'].clear()
+            with patch.object(helper_globals['requests'], 'get', return_value=response(payload=files)), \
+                    self.assertRaisesRegex(RuntimeError, 'Cached archive header identity differs'):
+                helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+            record.write_text(original)
+            changed = dict(files[0], sha256='f' * 64)
+            archive.raw = io.BytesIO(data)
+            with patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=[changed]), archive]) as changed_get:
+                helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
+            self.assertEqual(changed_get.call_count, 2)
+
     @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB reader unavailable')
     def test_deb_publication_stops_after_the_control_header(self):
         import os
