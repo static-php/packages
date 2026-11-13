@@ -411,10 +411,6 @@ def plan(previous, current, previous_meta, current_meta, force=False, configurat
     package_only = ["pie"] if any(previous_meta.get(key) != current_meta.get(key) for key in ['pie_version', 'pie_sha256']) else []
     libraries = [key for key in changed if (key in library_ids if library_ids is not None else key not in TOOLS and not key.startswith("ext-") and key != "frankenphp")]
     library_build_inputs = []
-    if build_inputs is not None:
-        recipes = {name: item.get("recipe_hash") for name, item in build_inputs.get("libraries", {}).items()}
-        previous_recipes = previous_meta.get("shared_library_recipes", {})
-        libraries += [name for name in recipes.keys() | previous_recipes.keys() if recipes.get(name) != previous_recipes.get(name)]
     full = force
     requests, package_requests = {}, {}
     package_change = package_configuration is not None and previous_meta.get("shared_package_configuration") != package_configuration
@@ -559,7 +555,6 @@ def main():
     metadata["shared_configuration"] = configuration
     metadata["shared_package_configuration"] = packaging
     metadata["shared_components"] = components
-    metadata["shared_library_recipes"] = {name: item.get("recipe_hash") for name, item in inventory.get("libraries", {}).items()}
     metadata['shared_library_package_configuration'] = library_packaging
     metadata['shared_variant_configuration'] = variants
     metadata['shared_format_package_configuration'] = format_package_identities(root)

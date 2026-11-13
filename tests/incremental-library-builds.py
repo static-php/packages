@@ -251,21 +251,21 @@ class IncrementalLibraryTests(unittest.TestCase):
         current["cmake"] = {"source": {"hash": "new-build-tool"}}
         current["base"]["source"].update(version="renamed-version", filename="renamed-archive.tar.gz",
                                           config={"type": "url", "url": "https://mirror.invalid/base.tar.gz"})
-        self.assertEqual(self.plan(inventory=inventory, sources=current)["selected"], [])
+        self.assertEqual(self.plan(inventory=inventory, sources=current, libraries="base")["selected"], [])
 
     def test_compiler_image_flags_and_headers_do_not_select_libraries(self):
         for requested in ["", "base"]:
             plan = self.plan(compatibility="different compiler, image, flags and headers", libraries=requested)
             self.assertFalse(plan["full"])
             self.assertEqual(plan["selected"], [])
-        self.assertEqual(self.plan(changed_artifacts=["base"], compatibility="new-compiler")["selected"], ["base"])
+        self.assertEqual(self.plan(changed_artifacts=["base"], compatibility="new-compiler")["selected"], [])
 
-    def test_update_event_rebuilds_only_that_library_even_with_identical_archive_hash(self):
+    def test_replayed_update_does_not_rebuild_an_unchanged_library(self):
         plan = self.plan(changed_artifacts=["base"])
-        self.assertEqual(plan["selected"], ["base"])
-        self.assertEqual(plan["reused"], ["consumer", "other"])
+        self.assertEqual(plan["selected"], [])
+        self.assertEqual(plan["reused"], ["base", "consumer", "other"])
         plan = self.plan(sources=self.changed("other"), changed_artifacts=["base"])
-        self.assertEqual(plan["selected"], ["base"])
+        self.assertEqual(plan["selected"], [])
         self.assertEqual(plan["effective_sources"]["other"], self.sources["other"])
 
     def test_timestamps_and_php_consumer_changes_do_not_select_libraries(self):

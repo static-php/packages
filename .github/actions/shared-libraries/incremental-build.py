@@ -76,7 +76,7 @@ def changed_inputs(record, previous, sources):
     artifact = record.get("artifact")
     if not artifact or artifact not in sources:
         return False
-    return previous.get("sources", {}).get(artifact, {}).get("source") != sources[artifact].get("source")
+    return previous.get("sources", {}).get(artifact, {}).get("source", {}).get("hash") != sources[artifact].get("source", {}).get("hash")
 
 
 def pending_rebuilds(manifest):
@@ -125,7 +125,7 @@ def selection(inventory, sources, manifest, state, compatibility, libraries="", 
     for name in scope & existing:
         current = graph[name]
         previous = recorded[name]
-        if not manual or changed_inputs(current, previous, sources):
+        if changed_inputs(current, previous, sources):
             selected.add(name)
     if manual:
         selected |= closure(requested, graph) - existing

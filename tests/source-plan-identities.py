@@ -245,14 +245,14 @@ class SourceIdentities(unittest.TestCase):
             request = source.plan({}, {}, previous, changed, configuration=previous['shared_configuration'])
             self.assertEqual(set(request['requests']), {'8.6'})
 
-    def test_recipe_only_update_requests_only_that_library(self):
+    def test_recipe_only_update_does_not_select_library_sources(self):
         metadata = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
                     'shared_configuration': 'same', 'shared_library_recipes': {'zlib': 'old', 'curl': 'same'}}
         inventory = {'managed_library_artifacts': ['zlib', 'curl'], 'library_tool_artifacts': [],
                      'irrelevant_artifacts': [], 'libraries': {'zlib': {'recipe_hash': 'new'}, 'curl': {'recipe_hash': 'same'}}}
         request = source.plan({}, {}, metadata, metadata, configuration='same', library_ids={'zlib', 'curl'}, build_inputs=inventory)
         self.assertEqual(request['requests'], {})
-        self.assertEqual(request['libraries'], ['zlib'])
+        self.assertEqual(request['libraries'], [])
 
     def test_linked_core_patch_and_helper_change_core_identity(self):
         with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
