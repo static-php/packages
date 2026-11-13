@@ -179,10 +179,15 @@ def record_publication(source, kind, target, stream):
         value['snapshots'][selected] = freezer['snapshot_inventory'](args, refresh=True)
     inventory = value['snapshots'][stream]['inventory']
     baseline = value['baseline']
+    uploaded_consumers = {}
+    version_of = lambda item: (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version']
+    indexed = {(item['name'], version_of(item)): item for item in inventory}
     for archive_path in sorted((Path('dist') / kind).glob('*.' + kind)):
         package_name, version, package_arch = planner['archive_identity'](archive_path, kind)
-        package = next((item for item in inventory if item['name'] == package_name
-                        and compare(kind, (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version'], version) == 0), None)
+        package = indexed.get((package_name, version))
+        if package is None:
+            package = next((item for item in inventory if item['name'] == package_name
+                            and compare(kind, version_of(item), version) == 0), None)
         if package is None:
             raise RuntimeError('Published package missing from native repository index: ' + package_name)
         checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
@@ -213,6 +218,7 @@ def record_publication(source, kind, target, stream):
             baseline['runtime_layout'] = dict(layout, archive=reference['published_archive'], archive_sha256=checksum,
                                               package_version=version, complete=True, download_url=package['publication_url'])
         elif not package_name.endswith(('-debuginfo', '-dbgsym')):
+            uploaded_consumers[package_name] = package
             if package_name == 'php-zts-cli':
                 cutoffs = planner['archive_migration_cutoffs'](archive_path, kind)
                 if cutoffs:
@@ -228,8 +234,11 @@ def record_publication(source, kind, target, stream):
     for selected, captured in value['snapshots'].items():
         consumers = [item for item in captured['inventory'] if not item['name'].startswith('php-zts-lib-')
                      and item['name'] != 'php-zts-runtime-layout' and not item['name'].endswith(('-debuginfo', '-dbgsym'))]
-        latest = {}
-        version_of = lambda item: (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version']
+        known = baseline.get('consumer_native_metadata', {}).get(selected)
+        retained = baseline.get('consumer_inventory_complete') and isinstance(known, dict)
+        latest = dict(known) if retained else {}
+        if retained:
+            consumers = uploaded_consumers.values() if selected == stream else ()
         for item in consumers:
             if item['name'] not in latest or version_of(item) != version_of(latest[item['name']]) and compare(kind, version_of(item), version_of(latest[item['name']])) > 0:
                 latest[item['name']] = item

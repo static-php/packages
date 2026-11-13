@@ -187,6 +187,12 @@ class RepositoryState(unittest.TestCase):
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
         self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['migration_cutoffs'], {'8.6': {'legacy': 5}})
+        old = dict(package, version='8.6.0~rc1-1')
+        freezer['snapshot_inventory'] = lambda args, refresh=False: {'inventory': [old, package]}
+        planner['native_compare'] = lambda kind, left, right: 0 if left == right else (_ for _ in ()).throw(AssertionError('Unchanged historical packages must not be rescanned'))
+        with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
+            state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
+        self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['consumer_versions']['8.6'], {'php-zts-cli': package['version']})
 
 
 if __name__ == '__main__':
