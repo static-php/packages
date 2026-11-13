@@ -87,6 +87,7 @@ def libraries():
         if any(glibc.read(common / kind / 'shared-library-plan.json').get('libraries') for kind in glibc.FORMATS):
             raise RuntimeError('Selected library packages require the retained SDK')
         sdk_manifest = glibc.read(common / 'sdk-shared-libraries.json')
+    glibc.write(common / 'sdk-shared-libraries.json', sdk_manifest)
     retained = common / 'repackage'
     glibc.write(retained / 'shared-libraries.json', sdk_manifest)
     plans = {}

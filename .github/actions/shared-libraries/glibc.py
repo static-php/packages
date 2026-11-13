@@ -482,7 +482,10 @@ def capture_native_inventories():
         for stream in streams:
             args = SimpleNamespace(type=kind, php=stream, arch=os.environ['MATRIX_ARCH'], el='el8', base_url=None)
             try:
-                snapshot = freezer['snapshot_inventory'](args)
+                retained = output / (stream + '.json')
+                snapshot = read(retained) if retained.is_file() else None
+                if snapshot is None or snapshot.get('error'):
+                    snapshot = freezer['snapshot_inventory'](args)
                 print(f'Captured {kind} PHP {stream} published inventory', flush=True)
             except Exception as error:
                 snapshot = dict(schema=1, type=kind, php_stream=stream, architecture=args.arch, error=str(error))
