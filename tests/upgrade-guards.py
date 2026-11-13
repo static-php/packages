@@ -95,6 +95,12 @@ class UpgradeGuards(unittest.TestCase):
             self.assertTrue(rpm['reuse_published_signature'](path, [remote], lambda _: signed))
             rpm['same_archive'](local, remote)
             self.assertEqual(path.read_bytes(), signed)
+            os.utime(payload / 'fixture', (1, 1))
+            run('fpm', '--force', '-s', 'dir', '-t', 'rpm', '-n', 'php-zts-signature-fixture', '-v', '1.0', '--iteration', '1',
+                '--package', str(path), '-C', str(payload), '.')
+            self.assertNotEqual(rpm['rpm_content'](path.read_bytes()), rpm['rpm_content'](signed))
+            self.assertTrue(rpm['reuse_published_signature'](path, [remote], lambda _: signed))
+            self.assertEqual(path.read_bytes(), signed)
             secret = run('gpg', '--batch', '--armor', '--export-secret-keys', fingerprint, env=environment).decode()
             workspace = directory / 'workspace'
             archives = workspace / 'dist/rpm'
@@ -232,6 +238,13 @@ class UpgradeGuards(unittest.TestCase):
         with patch.dict(rpm_globals, {'subprocess': Mock(run=lambda *args, **kwargs: Mock(returncode=255, stderr=b'offline'))}):
             with self.assertRaisesRegex(RuntimeError, 'Cannot read'):
                 rpm['read_remote_file']('example.com', '/rpm', 'repodata/repomd.xml', True)
+
+    def test_rpm_retries_transient_ssh_resets(self):
+        response = Mock(side_effect=[Mock(returncode=255, stderr=b'Connection reset by peer'),
+                                     Mock(returncode=0, stderr=b'', stdout=b'metadata')])
+        with patch.object(rpm_globals['subprocess'], 'run', response), patch.object(rpm_globals['time'], 'sleep'):
+            self.assertEqual(rpm['read_remote_file']('example.com', '/rpm', 'repodata/primary.xml'), b'metadata')
+        self.assertEqual(response.call_count, 2)
 
     def test_rpm_refreshes_index_when_publication_replaces_primary_metadata(self):
         template = '<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/{}.xml.gz"/></data></repomd>'

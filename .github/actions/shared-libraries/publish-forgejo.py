@@ -2,11 +2,13 @@
 """Preflight every existing stream repository before publishing a shared cohort."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import runpy
 import shutil
+import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -195,11 +197,30 @@ def verify_debian_indexes(host, password, groups, helper):
 def publish(action, host, password, kind, groups, helper, mirror=False):
     if action not in ('check', 'upload'):
         raise RuntimeError('Unknown publication action: ' + action)
-    digests = {path: helper['archive_sha256'](path) for paths in groups.values() for path in paths}
+    digests = {}
     selected = {}
     for owner, paths in sorted(groups.items()):
         print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
         remote = helper['get_remote_candidates'](host, owner, password, kind, paths)
+        if kind == 'debian' and not mirror:
+            for path in paths:
+                name, version, arch = helper['package_metadata'](path, kind)
+                if not any(item['name'] == name and item['version'] == version for item in remote):
+                    continue
+                for published in helper['remote_package_archives'](host, owner, password, kind, name, version, True):
+                    if published['arch'] != arch or published['sha256'] == helper['archive_sha256'](path):
+                        continue
+                    data = helper['registry_request']('get', published['url'], auth=helper['registry_auth'](owner, password),
+                        timeout=60, read=lambda response: (response.raise_for_status(), response.content)[1])
+                    if hashlib.sha256(data).hexdigest() != published['sha256']:
+                        raise RuntimeError('Published DEB checksum mismatch: ' + name)
+                    with tempfile.TemporaryDirectory(prefix='spp-deb-compare-') as temporary:
+                        existing = Path(temporary) / 'published.deb'
+                        existing.write_bytes(data)
+                        if runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/package-content.py'))['equivalent'](path, existing, 'deb'):
+                            path.write_bytes(data)
+                            print('Reusing identical published DEB: ' + path.name, flush=True)
+        digests.update({path: helper['archive_sha256'](path) for path in paths})
         if mirror:
             paths = mirror_candidates(paths, remote, host, owner, password, kind, helper)
         allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)

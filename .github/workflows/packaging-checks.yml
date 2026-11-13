@@ -72,6 +72,7 @@ jobs:
                         python3 tests/incremental-library-builds.py
                         python3 tests/spc-library-transition.py
                         python3 tests/upgrade-guards.py
+                        python3 tests/package-content.py
                         python3 tests/migration-upgrade-harness.py
                         python3 tests/migration-baseline.py
                         python3 tests/forgejo-publication.py

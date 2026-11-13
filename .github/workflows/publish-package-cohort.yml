@@ -109,6 +109,14 @@ jobs:
                     $host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu
                     EOF
                     chmod 600 "$ssh_dir/known_hosts"
+                    cat >> "$ssh_dir/config" <<'EOF'
+                    Host *
+                        ControlMaster auto
+                        ControlPath /tmp/spp-ssh-%C
+                        ControlPersist 10m
+                        ServerAliveInterval 30
+                        ServerAliveCountMax 3
+                    EOF
             -   name: Set EL8 RPM upload directory
                 if: env.TYPE == 'rpm'
                 run: |

@@ -7,11 +7,13 @@ import hashlib
 import http.client
 import lzma
 import re
+import runpy
 import shlex
 import struct
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -61,7 +63,12 @@ def read_remote_file(host, directory, location, missing_ok=False):
     command = 'cat ' + path
     if missing_ok:
         command = 'if test -f {0}; then cat {0}; else exit 44; fi'.format(path)
-    result = subprocess.run(['ssh', host, command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for attempt in range(3):
+        result = subprocess.run(['ssh', host, command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        transient = any(text in result.stderr for text in (b'Connection reset', b'Connection closed', b'kex_exchange_identification'))
+        if result.returncode == 0 or not transient or attempt == 2:
+            break
+        time.sleep(attempt + 1)
     if missing_ok and result.returncode == 44:
         return None
     if result.returncode != 0:
@@ -152,7 +159,15 @@ def reuse_published_signature(path, published, read_file, cache=None):
         if hashlib.new(algorithm, data).hexdigest() != checksum['value']:
             raise RuntimeError('Published RPM checksum mismatch: ' + remote['name'])
         if rpm_content(data) != content:
-            raise RuntimeError('Existing RPM package content differs: ' + local['name'] + ' ' + local['evr'])
+            with tempfile.TemporaryDirectory(prefix='spp-rpm-compare-') as temporary:
+                existing = Path(temporary) / 'published.rpm'
+                existing.write_bytes(data)
+                try:
+                    same = runpy.run_path(str(Path(__file__).with_name('package-content.py')))['equivalent'](path, existing, 'rpm')
+                except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError):
+                    same = False
+            if not same:
+                raise RuntimeError('Existing RPM package content differs: ' + local['name'] + ' ' + local['evr'])
         if cached:
             cached.write_bytes(data)
         path.write_bytes(data)
