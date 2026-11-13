@@ -169,7 +169,7 @@ A broken old state must never block publication of a working replacement. If the
 - `actions/cache` stores Composer downloads keyed on `composer.lock`; reusable compiled SDKs and PHP payloads use the release cache described above.
 - `shared-sdk-*` and `shared-payload-*` artifacts use `retention-days: 1` as intermediates. SDK archives are transferred only when the plan requests separate PHP jobs or selected native library packaging; library-only validation consumes native archives and metadata, without restoring sources or an SDK. Package cohorts, validation receipts and target plans are retained for seven days for independent publication. Publish-only runs pin artifact IDs and the recorded builder/packager digests, and share per-format/per-target publication locks with normal builds. Missing or failed PHP streams are skipped independently within each architecture and format; each selected stream must pass every publication guard. Original build-plan and receipt identities remain unchanged when selecting a stream. Publication downloads only native package artifacts, never SDK or source artifacts. Publishing preserves the built versions/revisions and does not populate release caches.
 
-Secondary mirrors use separate per-format/per-target locks so they cannot hold up a new primary publication.
+Secondary mirrors use separate per-format/per-target locks so they cannot hold up a new primary publication. They copy only the validated primary cohort; do not backfill other retained libraries or debuginfo.
 
 ## Comments
 

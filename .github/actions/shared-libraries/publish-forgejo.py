@@ -7,7 +7,6 @@ import json
 import os
 import re
 import runpy
-import shutil
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -111,84 +110,6 @@ def mirror_candidates(paths, remote, host, owner, password, kind, helper):
     return selected
 
 
-def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=None):
-    """Copy retained, already-published dependencies into an incomplete mirror."""
-    kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    present = {helper['package_metadata'](path, kind)[0] for path in directory.glob('*.' + package_type)}
-    deferred = []
-    baselines = []
-    for manifest in sorted(cohort.glob('shared-libs-*/baseline/shared-libraries.json')):
-        scoped = [manifest.parent / 'owners' / (owner[0] + '.' + owner[1:]) / 'shared-libraries.json' for owner in owners or []]
-        if scoped and json.loads(manifest.read_text()).get('stream_libraries') and not all(path.is_file() for path in scoped):
-            raise RuntimeError('Missing retained library owner baseline for mirror')
-        baselines.extend(scoped if scoped and all(path.is_file() for path in scoped) else [manifest])
-    for manifest in baselines:
-        baseline = json.loads(manifest.read_text())
-        records = [('php-zts-lib-' + identifier, value, 'published_archive', 'published_archive_sha256')
-                   for identifier, value in baseline.get('libraries', {}).items()]
-        if baseline.get('runtime_layout'):
-            records.append((LAYOUT_PACKAGE, baseline['runtime_layout'], 'archive', 'archive_sha256'))
-        for name, record, archive_key, digest_key in records:
-            relative = record.get(archive_key)
-            if name in present or not relative or not relative.endswith('.' + package_type):
-                continue
-            root = manifest.parent.resolve()
-            archive = (root / relative).resolve()
-            if not archive.is_file() and record.get('download_url'):
-                state = runpy.run_path(str(Path(__file__).with_name('glibc.py')))['repository_state']()
-                archive = state.materialize(root, record, archive_key, digest_key).resolve()
-            if root not in archive.parents or not archive.is_file() or helper['archive_sha256'](archive) != record.get(digest_key):
-                raise RuntimeError('Retained mirror dependency checksum/path mismatch: ' + name)
-            actual_name, version, arch = helper['package_metadata'](archive, kind)
-            normalize = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
-            if (actual_name != name or version != record.get('published_version', record.get('package_version'))
-                    or arch not in ('all', 'noarch') and normalize(arch) != normalize(baseline.get('architecture'))):
-                raise RuntimeError('Retained mirror dependency identity mismatch: ' + name)
-            shutil.copy2(archive, directory / archive.name)
-            present.add(name)
-            debug = record.get('published_debug_archive')
-            if debug and name + '-debuginfo' not in present:
-                deferred.append((name, arch, debug))
-            print(f'Retained primary dependency for mirror: {name} {version} {arch}', flush=True)
-    return deferred
-
-
-def stage_mirror_debug(cohort, directory, package_type, helper, owners, records):
-    kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    normalize = lambda value: {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(value, value)
-    planner = None
-    failures = []
-    for name, arch, debug in records:
-        try:
-            if debug.get('download_url'):
-                planner = planner or runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
-                copied = Path(planner['stage_debug_archive'](debug, directory)['path'])
-                if copied.parent != directory:
-                    shutil.copy2(copied, directory / copied.name)
-                continue
-            password = os.environ.get(debug.get('password_env') or '', '')
-            archives = helper['remote_package_archives'](debug['host'], debug['owner'], password, kind,
-                debug['name'], debug['package_version'], True)
-            matching = [item for item in archives if normalize(item['arch']) == normalize(arch)]
-            if len(matching) != 1:
-                raise RuntimeError('Cannot identify retained primary debuginfo: ' + name)
-            if all(any(item.get('sha256') == matching[0]['sha256'] for item in
-                       helper['get_remote_package_files'](helper['host2'], owner, os.environ['FORGEJO_PASSWORD'],
-                           kind, debug['name'], debug['package_version'])) for owner in (owners or STREAM_OWNERS)):
-                continue
-            if planner is None:
-                planner = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
-            cache = cohort / '.mirror-dependencies' / normalize(arch)
-            cache.mkdir(parents=True, exist_ok=True)
-            copied = Path(planner['stage_debug_archive'](debug, cache, archives=matching, helper=helper)['path'])
-            shutil.copy2(copied, directory / copied.name)
-        except Exception as error:
-            failure = f'Retained primary debuginfo unavailable: {name}: {error}'
-            failures.append(failure)
-            print(failure + '; continuing with runtime packages', flush=True)
-    return failures
-
-
 def verify_debian_indexes(host, password, groups, helper):
     verifier = runpy.run_path(str(Path(__file__).with_name('forgejo-index.py')))
     return verifier['verify_indexes'](host, password, groups, helper)
@@ -260,13 +181,8 @@ def publish(action, host, password, kind, groups, helper, mirror=False):
 
 def publish_mirror(action, cohort, directory, package_type, owners, selected, helper):
     kind = {'deb': 'debian', 'apk': 'alpine'}[package_type]
-    consumers = any(not independent(helper['package_metadata'](path, kind)[0])
-                    for path in directory.glob('*.' + package_type))
-    deferred = stage_mirror_dependencies(cohort, directory, package_type, helper, selected) if consumers else []
     failures = []
     for debug_phase in (False, True):
-        if debug_phase and consumers:
-            failures.extend(stage_mirror_debug(cohort, directory, package_type, helper, selected, deferred))
         groups = package_groups(directory, package_type, owners, helper, selected)
         groups = {owner: [path for path in paths
                          if helper['package_metadata'](path, kind)[0].endswith('-debuginfo') == debug_phase]
