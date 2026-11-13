@@ -42,6 +42,7 @@ class Formats(unittest.TestCase):
                 self.assertFalse(packages[0]['libraries-required'])
                 self.assertIsNone(packages[0]['sdk-artifact'])
             self.assertEqual(matrices[0][1][0]['payload-artifact'], matrices[1][1][0]['payload-artifact'])
+            self.assertEqual(formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'], ['x86_64']), ([], [], []))
 
 
 

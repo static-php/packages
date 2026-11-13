@@ -12,7 +12,11 @@ on:
             build_run_id:
                 type: string
                 required: true
-                description: Completed shared EL8 producer run
+                description: Shared EL8 producer run with successful sealed outputs
+            architectures:
+                type: string
+                default: ""
+                description: Optional x86_64 or arm64 selection
             php_versions:
                 type: string
                 default: ""
@@ -61,6 +65,7 @@ jobs:
                     BUILD_RUN_ID: ${{ inputs.build_run_id }}
                     TYPE: ${{ inputs.format }}
                     PHP_VERSIONS: ${{ inputs.php_versions }}
+                    ARCHITECTURES: ${{ inputs.architectures }}
                     DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
                 run: python3 .github/actions/shared-libraries/format-packages.py >> "$GITHUB_OUTPUT"
 

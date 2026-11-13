@@ -7,19 +7,20 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import time
 
 from publication import api, inspect_run
 from workflow import STREAMS, csv, emit, image_digest, matrix, tls_checks
 
 
-def select(state, plans, jobs, kind, streams):
+def select(state, plans, jobs, kind, streams, architectures=('x86_64', 'arm64')):
     successful = {job['name'].split(' / ')[-1] for job in jobs if job.get('conclusion') == 'success'}
     sdks = {match[2] for name in successful if (match := re.fullmatch(r'(Build libs shared|Repackage libraries) \(([^)]+)\)', name))}
     payloads = {(match[2], match[3]) for name in successful if (match := re.fullmatch(r'(Build|Reuse) payload \(([^ ]+) php([^)]+)\)', name))}
     consumers, targets = matrix(plans, streams, sdks)
     libraries, includes, publishing = [], [], []
     for target in targets:
+        if target['arch'] not in architectures:
+            continue
         identity = target['target']
         selection = target.get('format_selection', {}).get(kind, {})
         if not selection.get('libraries') and not any(request.get('full') or request.get('packages') for request in selection.get('php_requests', {}).values()):
@@ -61,19 +62,15 @@ def main():
         raise RuntimeError('A producer run ID and one native format are required')
     endpoint = f'repos/{repository}/actions/runs/{run_id}'
     run = api(endpoint)
-    for attempt in range(30):
-        if run.get('status') == 'completed':
-            break
-        time.sleep(2)
-        run = api(endpoint)
     artifacts = [item for page in api(endpoint + '/artifacts?per_page=100', True) for item in page['artifacts']]
     state = inspect_run(run, artifacts, repository, os.environ['DEFAULT_BRANCH'], kind)
-    if run['status'] != 'completed':
-        raise RuntimeError('Packaging requires a completed producer')
     plans = Path('plans')
     subprocess.run(['gh', 'run', 'download', run_id, '--repo', repository, '--pattern', 'shared-plans-glibc-*', '--dir', str(plans)], check=True)
     jobs = [job for page in api(endpoint + '/jobs?per_page=100', True) for job in page['jobs']]
-    libraries, packages, publishing = select(state, plans, jobs, kind, csv(os.environ.get('PHP_VERSIONS', ''), STREAMS))
+    architectures = csv(os.environ.get('ARCHITECTURES', ''), ['x86_64', 'arm64'])
+    if not architectures or set(architectures) - {'x86_64', 'arm64'}:
+        raise RuntimeError('Unsupported packaging architecture')
+    libraries, packages, publishing = select(state, plans, jobs, kind, csv(os.environ.get('PHP_VERSIONS', ''), STREAMS), architectures)
     for key, values in [('libraries', libraries), ('packages', packages), ('publish', publishing)]:
         emit(key + '-matrix', {'include': values})
         emit(key + '-any', str(bool(values)).lower())
