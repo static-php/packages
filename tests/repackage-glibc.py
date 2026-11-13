@@ -205,6 +205,9 @@ class Repackage(unittest.TestCase):
         metadata = json.loads((payload / 'build-payload.json').read_text())
         metadata['packaging_selection'] = {'packages': ['imagick'], 'libraries': ['fixture']}
         self.write(payload / 'build-payload.json', metadata)
+        provenance = json.loads((self.stage / 'payload-provenance.json').read_text())
+        provenance['reused_payload'] = True
+        self.write(self.stage / 'payload-provenance.json', provenance)
         for kind in ('rpm', 'deb'):
             self.write(self.stage / kind / 'shared-library-plan.json', {'php_requests': {'8.4': {'packages': ['imagick']}}})
         with patch.object(repackage.glibc, 'run'):
@@ -213,6 +216,14 @@ class Repackage(unittest.TestCase):
         for kind in ('rpm', 'deb'):
             self.write(self.stage / kind / 'shared-library-plan.json', {'php_requests': {'8.4': {'full': True}}})
         with patch.object(repackage.glibc, 'run'), self.assertRaisesRegex(RuntimeError, 'exceeds the retained PHP selection'):
+            repackage.payload()
+
+    def test_incomplete_core_rebuild_is_rejected_before_native_packaging(self):
+        payload = self.payload_fixture()
+        metadata = json.loads((payload / 'build-payload.json').read_text())
+        metadata['packaging_selection'] = {'packages': ['imagick'], 'libraries': ['fixture']}
+        self.write(payload / 'build-payload.json', metadata)
+        with patch.object(repackage.glibc, 'run'), self.assertRaisesRegex(RuntimeError, 'discarded the PHP cohort'):
             repackage.payload()
 
     def test_workflow_skips_all_producer_and_cache_save_steps_for_repackaging(self):

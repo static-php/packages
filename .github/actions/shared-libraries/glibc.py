@@ -639,6 +639,8 @@ def package():
     stream = os.environ['PHPV']
     root = Path(os.environ.get('PACKAGE_ROOT', ROOT / 'build' / stream))
     provenance = read(STAGE / 'payload-provenance.json')
+    if read(root / 'build-payload.json').get('packaging_selection') and provenance.get('reused_payload') is False:
+        raise RuntimeError('Retained artifact discarded the PHP cohort after a core rebuild; select a complete producer run')
     expected = hashlib.sha256((STAGE / kind / 'shared-library-plan.json').read_bytes()).hexdigest()
     if provenance.get('php_stream') != stream or provenance.get('source_run_id') != os.environ['SOURCE_RUN_ID'] or provenance.get('format_plan_sha256', {}).get(kind) != expected:
         raise RuntimeError('PHP payload provenance does not match the selected format plan')

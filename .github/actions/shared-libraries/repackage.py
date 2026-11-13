@@ -149,6 +149,8 @@ def payload():
             'producer_image': os.environ['IMAGE']}.items()):
         raise RuntimeError('Retained payload provenance differs from its producer target')
     selection = record.get('packaging_selection')
+    if selection and provenance.get('reused_payload') is False:
+        raise RuntimeError('Retained artifact discarded the PHP cohort after a core rebuild; select a complete producer run')
     if selection:
         for kind in glibc.FORMATS:
             request = glibc.read(stage / kind / 'shared-library-plan.json')['php_requests'][stream]
