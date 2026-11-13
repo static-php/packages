@@ -303,6 +303,18 @@ class IncrementalLibraryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'refusing a full rebuild'):
                 incremental.main()
 
+    def test_php_selection_ignores_unrelated_snapshot_library_updates(self):
+        incremental.write(self.root / 'downloads/.cache.json', self.changed('base'))
+        incremental.write(self.root / 'downloads/build-plan.json', {'libraries': ['base']})
+        output = self.root / 'plan.json'
+        arguments = ['incremental-build.py', 'plan', '--root', str(self.root), '--compatibility', 'compatible',
+                     '--output', str(output)]
+        for packages, selected in [('ssh2', []), ('', ['base'])]:
+            with mock.patch.object(sys, 'argv', arguments), mock.patch.dict(os.environ, MODE='incremental', PACKAGES=packages), \
+                    mock.patch.object(subprocess, 'check_output', return_value=json.dumps(self.inventory)):
+                incremental.main()
+            self.assertEqual(incremental.read(output)['selected'], selected)
+
     def test_unknown_manual_library_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "Unknown managed library"):
             self.plan(libraries="typo")

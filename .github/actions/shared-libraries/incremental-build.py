@@ -444,7 +444,8 @@ def main():
         if os.environ.get("MODE") == "incremental" and (not isinstance(state, dict) or state.get("schema") != 1):
             raise RuntimeError("No recorded library SDK; refusing a full rebuild for an incremental request")
         plan = selection(inventory, sources, manifest, state, args.compatibility,
-                         args.libraries, invalid_libraries(buildroot, manifest), request.get("libraries", []))
+                         args.libraries, invalid_libraries(buildroot, manifest),
+                         [] if os.environ.get('PACKAGES') else request.get("libraries", []))
         write(args.output, plan)
         print(json.dumps({key: plan[key] for key in ["full", "manual", "requested", "selected", "reused", "reason"]}, sort_keys=True))
     elif args.action == "expand":
