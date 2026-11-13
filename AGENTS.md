@@ -154,8 +154,6 @@ When the user asks to "rerun for X only", they mean these inputs.
 
 ## Operational notes
 
-Keep validation in one place: build receipts bind tested package bytes to their source and plan, native tests cover installation/loading/TLS, and publication checks the selected names for version order and archive identity. Do not add duplicate preflights, repository-wide scans, automatic backfill or packaging-code fingerprints to source planning. Publication-only Alpine commands run as the runner UID and do not recursively change workspace ownership. Install Composer dependencies once per workspace.
-
 Library packaging uses actual SDK rebuilds and published payload changes, not the download snapshot's broad change hints. Missing download comparison state does not establish a packaging metadata change. Selected extension updates rebuild only those extensions against the sealed PHP core. A changed PHP source release rebuilds that PHP stream. Builder and global configuration changes alone do not rebuild cached binaries; a missing partial-build cache fails instead of silently compiling the whole PHP payload. Unchanged libraries are not repackaged without an explicit revision request. DEB/APK streams always have independent published libraries, dependency graphs and native revisions; another stream or architecture must never raise their revisions. RPM library revision selection remains shared across PHP streams within each architecture's EL8 repository.
 
 APK PHP repackaging with `bump=false` compares native package contents and control metadata against checksum-verified published archives. Identical packages reuse the original bytes and revision; changed packages keep their revision and require `bump=true` or an explicit `iteration` before publishing a same-version replacement. Archive timestamps and signatures do not force a rebuild. Broken old archives cannot be reused. Do not use blanket revision bumps to retry a publication repair.
@@ -172,8 +170,6 @@ A broken old state must never block publication of a working replacement. If the
 - `shared-sdk-*` and `shared-payload-*` artifacts use `retention-days: 1` as intermediates. SDK archives are transferred only when the plan requests separate PHP jobs or selected native library packaging; library-only validation consumes native archives and metadata, without restoring sources or an SDK. Package cohorts, validation receipts and target plans are retained for seven days for independent publication. Publish-only runs pin artifact IDs and the recorded builder/packager digests, and share per-format/per-target publication locks with normal builds. Missing or failed PHP streams are skipped independently within each architecture and format; each selected stream must pass every publication guard. Original build-plan and receipt identities remain unchanged when selecting a stream. Publication downloads only native package artifacts, never SDK or source artifacts. Publishing preserves the built versions/revisions and does not populate release caches.
 
 Secondary mirrors use separate per-format/per-target locks so they cannot hold up a new primary publication. They copy only the validated primary cohort; do not backfill other retained libraries or debuginfo.
-
-An explicit mirror-only retry reports its own failures. Only secondary jobs attached to a primary publication are non-blocking.
 
 ## Comments
 

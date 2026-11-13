@@ -99,37 +99,6 @@ class ForgejoPublication(unittest.TestCase):
         self.assertLess(stream.tell(), 256 * 1024)
         self.assertEqual(get.call_count, 3)
 
-    def test_verified_headers_are_reused_across_stream_processes_by_checksum(self):
-        data = apk_bytes('php-zts-lib-ssl', '3.6.0-r1', 'aarch64', signed=True)
-        digest = hashlib.sha256(data).hexdigest()
-        files = [{'id': 42, 'name': 'php-zts-lib-ssl-3.6.0-r1.apk', 'sha256': digest}]
-        archive = response(data=data)
-        archive.raw = io.BytesIO(data)
-        cache = self.root / 'verified-headers'
-        with patch.dict('os.environ', {'SPP_ARCHIVE_HEADER_CACHE': str(cache)}), \
-                patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=files), archive, response(payload=files)]) as get:
-            helper['remote_package_archives']('https://example.com', '85', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
-            helper_globals['ARCHIVE_HEADER_IDENTITIES'].clear()
-            mirrored = helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
-            self.assertEqual(mirrored[0]['arch'], 'aarch64')
-            self.assertEqual(mirrored[0]['owner'], '86')
-            self.assertEqual(get.call_count, 3)
-            record = cache / (digest + '.json')
-            original = record.read_text()
-            value = json.loads(original)
-            value['name'] = 'another-package'
-            record.write_text(json.dumps(value))
-            helper_globals['ARCHIVE_HEADER_IDENTITIES'].clear()
-            with patch.object(helper_globals['requests'], 'get', return_value=response(payload=files)), \
-                    self.assertRaisesRegex(RuntimeError, 'Cached archive header identity differs'):
-                helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
-            record.write_text(original)
-            changed = dict(files[0], sha256='f' * 64)
-            archive.raw = io.BytesIO(data)
-            with patch.object(helper_globals['requests'], 'get', side_effect=[response(payload=[changed]), archive]) as changed_get:
-                helper['remote_package_archives']('https://mirror.test', '86', 'test', 'alpine', 'php-zts-lib-ssl', '3.6.0-r1', True)
-            self.assertEqual(changed_get.call_count, 2)
-
     @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB reader unavailable')
     def test_deb_publication_stops_after_the_control_header(self):
         import os
@@ -270,22 +239,6 @@ class ForgejoPublication(unittest.TestCase):
             records = helper['get_remote_packages_for_owners']('https://example.com', publisher['STREAM_OWNERS'], 'test', 'alpine')
         self.assertEqual([record['owner'] for record in records], list(publisher['STREAM_OWNERS']))
         self.assertEqual(listing.call_count, 5)
-
-    def test_consumer_ownership_ignores_unselected_archives(self):
-        cohort = self.root / 'cohort'
-        selected = None
-        for stream in ('8.3', '8.6'):
-            directory = cohort / ('shared-consumers-apk-x86_64-php' + stream)
-            directory.mkdir(parents=True)
-            path = self.archive(name='php-zts-ssh2', version='1.0_p' + stream.replace('.', '') + '-r0')
-            path.rename(directory / path.name)
-            (directory / 'shared-library-consumers.json').write_text(json.dumps({'consumers': {
-                'php-zts-ssh2': {'php_version': stream}}}))
-            selected = directory / path.name
-        reader = Mock(wraps=helper['package_metadata'])
-        owners = publisher['consumer_owners'](cohort, 'apk', dict(helper, package_metadata=reader), {selected.name})
-        self.assertEqual(owners, {helper['package_metadata'](selected, 'alpine'): '86'})
-        reader.assert_called_once_with(selected, 'alpine')
 
     def test_mixed_mirror_copies_only_selected_packages_without_backfilling_libraries(self):
         names = {'php-zts-runtime-layout', 'php-zts-lib-libaom', 'php-zts-lib-libaom-debuginfo',
@@ -516,29 +469,6 @@ class ForgejoPublication(unittest.TestCase):
         listing.assert_called_once_with('https://example.com', '86', 'test', 'alpine', 'php-zts-lib-ssl')
         upload.assert_not_called()
         link.assert_not_called()
-
-    def test_primary_and_mirror_reuse_timestamp_only_deb_archives(self):
-        fixture = runpy.run_path(str(ROOT / 'tests/package-content.py'))['PackageContent']()
-        published = self.root / 'published.deb'
-        candidate = self.root / 'candidate.deb'
-        fixture.archive(published, 'Thu, 12 Nov 2026 11:55:27 +0000')
-        data = published.read_bytes()
-        downloaded = response(data=data)
-        downloaded.content = data
-        upload = Mock()
-        helpers = dict(helper, package_metadata=lambda *args: ('pie-zts', '1.5.5+php86-1', 'amd64'),
-            get_remote_candidates=lambda *args: [{'name': 'pie-zts', 'version': '1.5.5+php86-1'}],
-            remote_package_archives=lambda *args: [{'arch': 'amd64', 'sha256': hashlib.sha256(data).hexdigest(), 'url': 'https://registry.test/pie.deb'}],
-            registry_request=lambda method, url, **kwargs: kwargs['read'](downloaded),
-            verify_upload_versions=lambda host, owner, password, kind, paths, remote, **kwargs: paths,
-            upload_verified_archive=upload)
-        for mirror in (False, True):
-            fixture.archive(candidate, 'Fri, 13 Nov 2026 11:37:50 +0000')
-            self.assertNotEqual(candidate.read_bytes(), data)
-            with contextlib.redirect_stdout(io.StringIO()):
-                publisher['publish']('https://registry.test', 'test', 'debian', {'86': [candidate]}, helpers, mirror=mirror)
-            self.assertEqual(candidate.read_bytes(), data)
-        self.assertEqual(upload.call_count, 2)
 
     def test_unchanged_archive_is_checked_once_without_upload(self):
         path = self.archive()

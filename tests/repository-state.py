@@ -161,21 +161,28 @@ class RepositoryState(unittest.TestCase):
         archive = Path('dist/deb/zlib.deb')
         archive.parent.mkdir(parents=True)
         archive.write_bytes(b'new published library')
+        debug_archive = archive.with_name('zlib-debuginfo.deb')
+        debug_archive.write_bytes(b'new published debuginfo')
         package = {'name': 'php-zts-lib-zlib', 'version': '2-r0', 'architecture': 'arm64',
                    'publication_url': 'https://example.com/new-zlib.deb',
                    'published_checksum': {'algorithm': 'sha256', 'value': hashlib.sha256(archive.read_bytes()).hexdigest()}}
-        planner = {'archive_identity': lambda *_: (package['name'], package['version'], package['architecture']),
+        debug_package = dict(package, name='php-zts-lib-zlib-debuginfo', publication_url='https://example.com/new-zlib-debuginfo.deb',
+                             published_checksum={'algorithm': 'sha256', 'value': hashlib.sha256(debug_archive.read_bytes()).hexdigest()})
+        planner = {'archive_identity': lambda path, kind: tuple((package if path == archive else debug_package)[field] for field in ('name', 'version', 'architecture')),
                    'native_compare': lambda kind, left, right: (left > right) - (left < right),
                    'archive_runtime_json': lambda *_: {'version': '1.3.2', 'source_hash': 'new-source', 'elf': {}},
                    'METADATA': 'usr/share/php-zts/libraries'}
         def published_inventory(args):
             return None
         freezer = {'published_inventory': published_inventory, 'fetch': lambda *_: None,
-                   'snapshot_inventory': lambda args, refresh=False: {'inventory': [package]}}
+                   'snapshot_inventory': lambda args, refresh=False: {'inventory': [package, debug_package]}}
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
         self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['source_hash'], 'new-source')
+        self.assertTrue(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['published_debug_required'])
         self.assertEqual(state.load('deb', 'arm64', '8.5'), other)
+        debug_archive.unlink()
+        freezer['snapshot_inventory'] = lambda args, refresh=False: {'inventory': [package]}
         package['published_checksum']['value'] = '0' * 64
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             with self.assertRaisesRegex(RuntimeError, 'index differs'):

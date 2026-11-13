@@ -4,6 +4,7 @@ import hashlib
 import io
 from pathlib import Path
 import runpy
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -33,6 +34,7 @@ class PackageContent(unittest.TestCase):
             result.extend(header+data+(b'\n' if len(data)%2 else b''))
         path.write_bytes(result)
 
+    @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB tools unavailable')
     def test_timestamp_only_rebuild_can_reuse_bytes_but_payload_metadata_and_modes_cannot(self):
         with tempfile.TemporaryDirectory() as temporary:
             old,new = (Path(temporary)/name for name in ('old.deb','new.deb'))

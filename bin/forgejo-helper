@@ -4,7 +4,6 @@ import sys
 import gzip
 import hashlib
 import json
-import os
 import requests
 import re
 import subprocess
@@ -319,26 +318,6 @@ def remember_local_archive(path, pkg_type):
 ARCHIVE_HEADER_IDENTITIES = {}
 
 
-def cached_archive_header(key, value=None):
-    directory = os.environ.get('SPP_ARCHIVE_HEADER_CACHE')
-    if not directory:
-        return None
-    kind, name, version, digest = key
-    path = Path(directory) / (digest + '.json')
-    if value is None:
-        if not path.is_file():
-            return None
-        value = json.loads(path.read_text())
-        if (value.get('key') != list(key) or (value.get('name'), value.get('version'), value.get('sha256')) != (name, version, digest)
-                or not isinstance(value.get('arch'), str) or not value['arch']):
-            raise RuntimeError('Cached archive header identity differs from its checksum key')
-        return {field: value[field] for field in ('name', 'version', 'arch', 'sha256')}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as output:
-        json.dump(dict(value, key=list(key)), output)
-    os.replace(output.name, path)
-
-
 def remote_archive_header(response, pkg_type):
     response.raise_for_status()
     if pkg_type == 'alpine':
@@ -389,10 +368,6 @@ def remote_package_archives(host, owner, password, pkg_type, name, version, iden
                 continue
             if identity_only and cache_key is not None:
                 if cache_key not in ARCHIVE_HEADER_IDENTITIES:
-                    saved = cached_archive_header(cache_key)
-                    if saved is not None:
-                        ARCHIVE_HEADER_IDENTITIES[cache_key] = saved
-                if cache_key not in ARCHIVE_HEADER_IDENTITIES:
                     print(f"Reading package header: {host} {owner}/{name} {version} {file['name']}", flush=True)
                     actual_name, actual_version, arch = registry_request('get', url,
                         read=lambda response: remote_archive_header(response, pkg_type),
@@ -400,7 +375,6 @@ def remote_package_archives(host, owner, password, pkg_type, name, version, iden
                     if (actual_name, actual_version) != (name, version):
                         raise RuntimeError(f"Published archive header differs from its registry entry: {owner}/{name}/{version}")
                     ARCHIVE_HEADER_IDENTITIES[cache_key] = dict(name=name, version=version, arch=arch, sha256=registry_digest.lower())
-                    cached_archive_header(cache_key, ARCHIVE_HEADER_IDENTITIES[cache_key])
                 record = dict(ARCHIVE_HEADER_IDENTITIES[cache_key], file_id=file['id'], filename=file['name'], owner=owner, url=url)
                 records.append(record)
                 continue

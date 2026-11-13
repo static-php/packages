@@ -237,15 +237,6 @@ def run_logged(arguments, environment, log):
             raise subprocess.CalledProcessError(process.returncode, arguments)
 
 
-def failure_reason(lines):
-    reasons = [line for line in lines if 'Skipping upload of ' in line or line.startswith('::error::')]
-    if not reasons:
-        reasons = [line for line in lines if line.startswith('RuntimeError:')]
-        if reasons:
-            return reasons[-1].removeprefix('RuntimeError:').strip()[:2400]
-    return ' | '.join(reasons[-8:] if reasons else lines[-4:])[:2400]
-
-
 def publish_available(source, kind, target, mirror=False, selected_php='all', selected_versions=''):
     library = source / f'shared-libs-{kind}-{target}'
     plan = json.loads((library / 'shared-library-plan.json').read_text())
@@ -283,9 +274,7 @@ def publish_available(source, kind, target, mirror=False, selected_php='all', se
                 try:
                     run_logged(arguments, environment, log)
                 except subprocess.CalledProcessError as error:
-                    lines = log.read_text(errors='replace').splitlines()
-                    detail = failure_reason(lines)
-                    raise RuntimeError((detail or str(error)) + f' (details: {log})') from error
+                    raise RuntimeError(f'{arguments[-1]} failed (details: {log})') from error
             try:
                 verify_upgrades(source, library, kind, scope)
                 destination = Path('dist') / kind

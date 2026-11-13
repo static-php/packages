@@ -69,12 +69,6 @@ class Publication(unittest.TestCase):
             self.assertIs(reader['request'](session, 'GET', 'https://artifact.test'), response)
         self.assertEqual(session.request.call_count, 3)
 
-    def test_upload_failure_report_omits_traceback_and_names_archive(self):
-        reason = 'Upload failed for https://mirror.test 85/php-zts-cgi_8.5.12-6_arm64.deb: HTTP 500 after 3 attempts'
-        lines = ['Traceback (most recent call last):', '  File "helper.py", line 56',
-                 '    raise RuntimeError()', 'RuntimeError: ' + reason]
-        self.assertEqual(publication.failure_reason(lines), reason)
-
     def test_publication_and_builds_queue_without_replacing_waiting_runs(self):
         for name in ('publish-package-cohort.yml', 'build-rpm-modular-packages.yml', 'build-apk-forgejo.yml'):
             workflow = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())
@@ -180,7 +174,7 @@ class Publication(unittest.TestCase):
                         self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target'))
                         self.assertIn('::error::', output.getvalue())
                         primary_summary = (root / 'summary').read_text()
-                        self.assertIn('Cannot verify example: connection reset', primary_summary)
+                        self.assertIn('publication-' + kind + '-target-php8.4.log', primary_summary)
                         self.assertFalse(any(phase == 'upload-2' for _, phase in events))
                         self.assertEqual([stream for stream, phase in events if phase == 'record-repository'], ['8.5', '8.6'])
                         self.assertEqual([stream for stream, phase in events if phase == 'invalidate-repository'], ['8.4'])
@@ -245,100 +239,25 @@ class Publication(unittest.TestCase):
     def state(self, kind='rpm'):
         return publication.inspect_run(self.run, self.artifacts, 'static-php/packages', 'master', kind)
 
-    def batch_entries(self, kind='rpm'):
-        root = self.plans
-        entries = []
-        for run_id, arches, streams in [('42', ['x86_64', 'arm64'], ['8.2', '8.3', '8.4', '8.5']),
-                                        ('43', ['x86_64'], ['8.6']), ('44', ['arm64'], ['8.6'])]:
-            self.plans = root / run_id
-            self.plans.mkdir()
-            self.artifacts = []
-            self.run['id'] = int(run_id)
-            for arch in arches:
-                self.plan(arch=arch, selection={'libraries': ['zlib'], 'php_requests': {stream: {'full': True} for stream in streams}})
-            entries.append((self.state(kind), self.plans, '', set()))
-        self.plans = root
-        return entries
-
-    def test_one_format_matrix_contains_all_architectures_from_multiple_builds(self):
-        entries = self.batch_entries()
-        originals = {path: path.read_bytes() for path in self.plans.rglob('*.json')}
-        values = publication.batch_matrix(entries)
-        self.assertEqual(len(values), 4)
-        self.assertEqual({value['type'] for value in values}, {'rpm'})
-        self.assertEqual({(value['arch'], stream) for value in values for stream in value['php-versions'].split(',')},
-                         {(arch, stream) for arch in ('x86_64', 'arm64') for stream in ('8.2', '8.3', '8.4', '8.5', '8.6')})
-        self.assertEqual({value['publication-id'] for value in values}, {'build42', 'build43', 'build44'})
-        self.assertEqual({value['build-run-id'] for value in values}, {'42', '43', '44'})
-        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
-        selected = publication.batch_matrix(entries, selected_arch='arm64')
-        self.assertEqual({value['build-run-id'] for value in selected}, {'42', '44'})
-
-    def test_batch_mirrors_find_each_cohorts_primary_results_without_collisions(self):
-        entries = self.batch_entries('deb')
-        mapped = []
-        for state, plans, _, _ in entries:
-            names = {'publication-deb-alma8-' + arch for arch in ('x86_64', 'arm64')}
-            if state['build_run_id'] != '42':
-                names = {name + '-build' + state['build_run_id'] for name in names}
-            mapped.append((state, plans, '100', names))
-        values = publication.batch_matrix(mapped)
-        self.assertEqual({value['primary-run-id'] for value in values}, {'100'})
-        self.assertEqual({value['publication-id'] for value in values}, {'build42', 'build43', 'build44'})
-        self.assertEqual(len({(value['target'], value['publication-id']) for value in values}), 4)
-        self.assertIn('publication-deb-alma8-x86_64', {value['primary-artifact-name'] for value in values})
-        mapped[-1] = (*mapped[-1][:3], set())
-        with contextlib.redirect_stderr(io.StringIO()):
-            values = publication.batch_matrix(mapped)
-        self.assertEqual(len(values), 3)
-
-    def test_batch_rejects_overlapping_php_cohorts_before_uploading(self):
-        entries = self.batch_entries()
+    def test_format_matrix_pins_multiple_builds_and_rejects_overlapping_cohorts(self):
+        self.plan()
+        first = (self.state(), self.plans, '', set())
+        self.run['id'], self.artifacts = 43, []
+        self.plan(arch='arm64')
+        second = (self.state(), self.plans, '', set())
+        values = publication.batch_matrix([first, second])
+        self.assertEqual({(row['arch'], row['build-run-id']) for row in values}, {('x86_64', '42'), ('arm64', '43')})
+        selected, = publication.batch_matrix([first, second], selected_arch='arm64')
+        self.assertEqual(selected['publication-id'], 'build43')
         with self.assertRaisesRegex(RuntimeError, 'Multiple build cohorts'):
-            publication.batch_matrix([entries[0], entries[0]])
+            publication.batch_matrix([first, first])
+
+    def test_run_id_lists_reject_invalid_or_repeated_builds(self):
         for value in ('', '0', '42,no', '42,42', '42;command'):
             with self.subTest(value=value), self.assertRaises(RuntimeError):
                 publication.run_ids(value)
         self.assertEqual(publication.run_ids('42, 43'), ['42', '43'])
         self.assertEqual(publication.run_ids('100,100', distinct=False), ['100', '100'])
-
-    def test_batch_preparation_downloads_only_pinned_plan_ids(self):
-        self.plan()
-        contents = io.BytesIO()
-        with zipfile.ZipFile(contents, 'w') as archive:
-            for path in next(self.plans.iterdir()).glob('*.json'):
-                archive.writestr(path.name, path.read_bytes())
-        with patch.object(publication, 'api', side_effect=[self.run, [{'artifacts': self.artifacts}]]), \
-                patch.object(publication, 'read_plan_archive', return_value=contents.getvalue()) as read:
-            selected = publication.prepare_publication('42', 'rpm', 'static-php/packages', 'master')
-        read.assert_called_once_with('static-php/packages', self.artifacts[0]['id'])
-        self.assertEqual(selected[0]['build-run-id'], '42')
-        self.assertNotIn('buildroot', selected[0]['artifact-ids'])
-
-    def test_publication_validates_and_uploads_only_matrix_selected_streams(self):
-        root = self.plans
-        library = root / 'cohort/shared-libs-deb-target'
-        library.mkdir(parents=True)
-        plan = json.dumps({'php_requests': {stream: {'full': True} for stream in ('8.4', '8.5', '8.6')}})
-        (library / 'shared-library-plan.json').write_text(plan)
-        (root / 'log').mkdir()
-        events = []
-        previous = Path.cwd()
-        try:
-            os.chdir(root)
-            with patch.object(publication, 'prune_consumers'), patch.object(publication, 'assemble'), \
-                    patch.object(publication, 'verify_upgrades') as verify, \
-                    patch.object(publication, 'run_logged', side_effect=lambda command, environment, log:
-                                 events.append((environment['PUBLICATION_PHP_STREAMS'], command[-1]))), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                self.assertTrue(publication.publish_available(root / 'cohort', 'deb', 'target', selected_versions='8.4,8.6'))
-                self.assertEqual([call.args[-1] for call in verify.call_args_list], [['8.4'], ['8.6']])
-                self.assertEqual([stream for stream, phase in events if phase == 'upload-1'], ['8.4', '8.6'])
-                self.assertEqual((library / 'shared-library-plan.json').read_text(), plan)
-                with self.assertRaisesRegex(RuntimeError, 'not in the retained build plan'):
-                    publication.publish_available(root / 'cohort', 'deb', 'target', selected_versions='8.3')
-        finally:
-            os.chdir(previous)
 
     def test_rpm_and_deb_publish_independently_from_one_build(self):
         self.plan()

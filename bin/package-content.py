@@ -4,7 +4,6 @@
 import gzip
 import hashlib
 import io
-from pathlib import Path
 import re
 import subprocess
 import tarfile
@@ -35,29 +34,8 @@ def tar_contents(data):
 
 
 def deb_contents(path):
-    content = Path(path).read_bytes()
-    if not content.startswith(b'!<arch>\n'):
-        raise RuntimeError('Invalid DEB archive')
-    offset, members = 8, {}
-    while offset < len(content):
-        header = content[offset:offset + 60]
-        if len(header) != 60 or header[58:] != b'`\n':
-            raise RuntimeError('Invalid DEB member header')
-        name, size = header[:16].decode().strip().rstrip('/'), int(header[48:58])
-        data = content[offset + 60:offset + 60 + size]
-        if name in members or len(data) != size:
-            raise RuntimeError('Invalid DEB member: ' + name)
-        members[name] = data
-        offset += 60 + size + size % 2
-    if members.get('debian-binary') != b'2.0\n':
-        raise RuntimeError('Unsupported DEB format')
-    def archive(prefix):
-        selected = [value for name, value in members.items() if name.startswith(prefix + '.tar')]
-        if len(selected) != 1:
-            raise RuntimeError('Missing or ambiguous DEB ' + prefix)
-        return tar_contents(selected[0])
-    files, bodies = archive('data')
-    control, controls = archive('control')
+    files, bodies = tar_contents(subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(path)]))
+    control, controls = tar_contents(subprocess.check_output(['dpkg-deb', '--ctrl-tarfile', str(path)]))
     if 'control' not in controls:
         raise RuntimeError('Missing DEB control metadata')
     checksums = controls.get('md5sums')
@@ -81,40 +59,7 @@ def rpm_contents(path):
     metadata = {tag.attrib['name']: [(value.tag, value.text) for value in tag]
             for tag in ET.fromstring(xml).iter('rpmTag')
             if tag.attrib['name'] not in ignored and not tag.attrib['name'].startswith('Sig')}
-    files, links = {}, {}
-    with subprocess.Popen(['rpm2cpio', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
-        source = process.stdout
-        while True:
-            header = source.read(110)
-            if len(header) != 110 or header[:6] not in (b'070701', b'070702'):
-                raise RuntimeError('Invalid RPM payload')
-            fields = [int(header[offset:offset + 8], 16) for offset in range(6, 110, 8)]
-            inode, mode, uid, gid, nlink, _, size, major, minor, rmajor, rminor, length, _ = fields
-            name = source.read(length)
-            if len(name) != length or not name.endswith(b'\0'):
-                raise RuntimeError('Invalid RPM payload name')
-            name = name[:-1].decode().removeprefix('./')
-            source.read(-(110 + length) % 4)
-            digest = hashlib.sha256()
-            remaining = size
-            while remaining:
-                block = source.read(min(remaining, 1024 * 1024))
-                if not block:
-                    raise RuntimeError('Truncated RPM payload')
-                digest.update(block)
-                remaining -= len(block)
-            source.read(-size % 4)
-            if name == 'TRAILER!!!':
-                break
-            if name in files:
-                raise RuntimeError('Duplicate RPM payload member: ' + name)
-            files[name] = (mode, uid, gid, rmajor, rminor, digest.hexdigest())
-            if nlink > 1 and mode & 0o170000 == 0o100000:
-                links.setdefault((major, minor, inode), []).append(name)
-        source.read()
-        if process.wait():
-            raise RuntimeError('Cannot read RPM payload')
-    return metadata, files, sorted(sorted(names) for names in links.values())
+    return metadata
 
 
 def equivalent(left, right, kind):

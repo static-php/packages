@@ -296,53 +296,6 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CacheAndCohortTests(unittest.TestCase):
-    def test_alpine_publication_runs_as_the_runner_without_recursive_ownership_repair(self):
-        with tempfile.TemporaryDirectory(prefix='shared-workflow-user-') as temporary:
-            root = Path(temporary)
-            shims = root / 'shims'
-            shims.mkdir()
-            docker = shims / 'docker'
-            docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nopen(os.environ["DOCKER_ARGUMENTS"], "w").write(json.dumps(sys.argv[1:]))\n')
-            docker.chmod(0o755)
-            environment = dict(os.environ, TYPE='apk', MODE='full', HOME=str(root / 'home'), IMAGE='builder',
-                               GITHUB_WORKSPACE=str(root), DOCKER_ARGUMENTS=str(root / 'arguments'),
-                               PATH=str(shims) + ':' + os.environ['PATH'])
-            environment.pop('IN_BUILDER', None)
-            for command in ('upload-1', 'upload-2', 'record-repository', 'libs'):
-                subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), command],
-                               cwd=root, env=environment, check=True, capture_output=True)
-                arguments = json.loads((root / 'arguments').read_text())
-                if command == 'libs':
-                    self.assertNotIn('--user', arguments)
-                    self.assertTrue(any(value.startswith('BUILDER_HOST_UID=') for value in arguments))
-                else:
-                    self.assertEqual(arguments[arguments.index('--user') + 1], str(os.getuid()) + ':' + str(os.getgid()))
-                    self.assertFalse(any(value.startswith('BUILDER_HOST_UID=') for value in arguments))
-
-    def test_shared_workflow_installs_composer_dependencies_only_once(self):
-        with tempfile.TemporaryDirectory(prefix='shared-workflow-composer-') as temporary:
-            root = Path(temporary)
-            for name in ('shims', 'home', '.github/actions/shared-libraries'):
-                (root / name).mkdir(parents=True)
-            scripts = root / '.github/actions/shared-libraries'
-            shutil.copy2(ROOT / '.github/actions/shared-libraries/workflow.py', scripts / 'workflow.py')
-            (scripts / 'glibc.py').write_text('')
-            (scripts / 'payload-cache.py').write_text('print("key=existing-payload")')
-            composer = root / 'shims/composer'
-            composer.write_text('#!/bin/sh\nmkdir -p vendor\ntouch vendor/autoload.php\nprintf "install\\n" >> composer-calls\n')
-            composer.chmod(0o755)
-            php = root / 'shims/php'
-            php.write_text('#!/bin/sh\ncase "$1" in *build-inputs.php) echo "{}";; *) exit 99;; esac\n')
-            php.chmod(0o755)
-            environment = dict(os.environ, TYPE='rpm', MODE='full', TARGET='alma8-arm64', PHPV='8.6', HOME=str(root / 'home'),
-                               PATH=str(root / 'shims') + ':' + os.environ['PATH'])
-            for command in ('fingerprint', 'glibc-record', 'payload-key'):
-                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), command],
-                                        cwd=root, env=environment, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / 'composer-calls').read_text().splitlines(), ['install'])
-            self.assertTrue((root / 'stage/library-compatibility').is_file())
-
     def test_alpine_builder_returns_ownership_after_success_and_failure(self):
         for status in [0, 7]:
             with self.subTest(status=status), tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:

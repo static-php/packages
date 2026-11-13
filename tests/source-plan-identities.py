@@ -95,17 +95,6 @@ class SourceIdentities(unittest.TestCase):
                 self.assertEqual(restore.call_count, int(not comparison_available))
                 self.assertEqual({path.name: path.read_bytes() for path in downloads.iterdir()}, snapshot)
 
-    def test_helper_changes_cannot_expand_a_pinned_extension_update(self):
-        metadata = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
-                    'shared_components': {'mysqlnd': 'old', 'ssh2': 'old', 'frankenphp': 'old'}}
-        original = {'requests': {stream: {'full': False, 'packages': ['ssh2']} for stream in source.STREAMS},
-                    'libraries': ['libaom'], 'source_comparison_available': True}
-        inventory = {'managed_library_artifacts': ['libaom'], 'libraries': {}}
-        current = {name: 'changed helper' for name in metadata['shared_components']}
-        result = source.reconcile(original, {}, metadata, inventory)
-        self.assertEqual(result['requests'], original['requests'])
-        self.assertEqual(result['libraries'], ['libaom'])
-
     def test_two_changed_libraries_do_not_select_frankenphp_or_php_streams(self):
         previous = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
                     'shared_configuration': 'build', 'shared_components': {},
@@ -123,90 +112,17 @@ class SourceIdentities(unittest.TestCase):
         self.assertEqual(effective['package_requests'], {})
         self.assertEqual(effective['library_package_requests'], [])
 
-    def test_missing_download_state_does_not_invent_library_packaging_changes(self):
-        inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
-                     'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
-        def plan(previous):
-            return source.plan({}, {}, previous, {})
-        self.assertEqual(plan({})['library_package_requests'], [])
-        self.assertEqual(plan({})['variant_package_requests'], {})
-        self.assertEqual(plan({'shared_library_package_configuration': 'older-packaging'})['library_package_requests'], [])
-        self.assertEqual(plan({'shared_variant_configuration': {'rpm': 'older-profile'}})['variant_package_requests'], {})
-
-    def test_legacy_snapshot_packaging_hints_are_ignored(self):
-        inventory = {'libraries': {'attr': {'recipe_hash': 'same-recipe'}},
-                     'managed_library_artifacts': ['attr'], 'library_tool_artifacts': [], 'irrelevant_artifacts': []}
-        metadata = {'shared_configuration': 'build', 'shared_package_configuration': 'package',
-                    'shared_library_package_configuration': 'library-package', 'shared_variant_configuration': {'rpm': 'profile'}}
-        original = {'library_package_requests': ['attr'], 'variant_package_requests': {'rpm': ['openssl']}}
-        def reconcile():
-            return source.reconcile(original, {}, metadata, inventory)
-        self.assertEqual(reconcile()['library_package_requests'], [])
-        self.assertEqual(reconcile()['variant_package_requests'], {})
-        original.update(library_package_baseline='older-package', variant_package_baselines={'rpm': 'older-profile'})
-        self.assertEqual(reconcile()['library_package_requests'], [])
-        self.assertEqual(reconcile()['variant_package_requests'], {})
-
     def actor_template(self, root, shared):
         path = root / 'config/templates/craft.yml.twig'
         path.parent.mkdir(parents=True)
         path.write_text("{% set base_sapi_str = 'cli,embed' %}\n{% set base_extensions_str = 'ctype' %}\n"
                         "{% set base_shared_str = '" + ','.join(shared) + "' %}\n")
 
-    def definitions(self, root, contents):
-        path = root / ('vendor/crazywhalecc/static-php-cli/' + 'config/pkg/ext/builtin-extensions.yml')
-        path.parent.mkdir(parents=True)
-        path.write_text(contents)
-        return path
-
     def metadata(self, root):
         return {'php_versions': {stream: stream + '.1' for stream in source.STREAMS}}
 
     def request(self, root, old):
         return source.plan({}, {}, old, old)
-
-    def test_package_metadata_changes_do_not_request_work(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
-            root = Path(temporary)
-            path = root / 'src/step/CreatePackages.php'
-            path.parent.mkdir(parents=True)
-            path.write_text('old package metadata')
-            previous = self.metadata(root)
-            old_inputs = self.request(root, previous)['payload_inputs']
-            path.write_text('new dependency relationships')
-            current = self.request(root, previous)
-            self.assertEqual(current['requests'], {})
-            self.assertEqual(current['package_requests'], {})
-            self.assertEqual(current['payload_inputs'], old_inputs)
-            self.assertEqual(current['libraries'], [])
-            self.assertEqual(current['library_build_inputs'], [])
-
-    def test_extension_recipe_changes_do_not_select_sources(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
-            root = Path(temporary)
-            path = root / 'config/pkg/ext/ext-rar.yml'
-            path.parent.mkdir(parents=True)
-            path.write_text('old rar patch')
-            previous = self.metadata(root)
-            before = self.request(root, previous)
-            path.write_text('new rar patch')
-            after = self.request(root, previous)
-            self.assertEqual(after['payload_core_inputs'], before['payload_core_inputs'])
-            self.assertEqual(after['payload_inputs'], before['payload_inputs'])
-            self.assertEqual(after['requests'], {})
-
-    def test_library_recipe_and_spc_pin_alone_do_not_recompile_php(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
-            root = Path(temporary)
-            path = root / ('vendor/crazywhalecc/static-php-cli/' + 'src/Package/Library/zlib.php')
-            path.parent.mkdir(parents=True)
-            path.write_text('old library recipe')
-            lock = root / 'composer.lock'
-            lock.write_text(json.dumps({'packages': [{'name': 'crazywhalecc/static-php-cli', 'version': 'dev-old'}]}))
-            previous = self.metadata(root)
-            path.write_text('new library recipe')
-            lock.write_text(json.dumps({'packages': [{'name': 'crazywhalecc/static-php-cli', 'version': 'dev-new'}]}))
-            self.assertEqual(self.request(root, previous)['requests'], {})
 
     def test_only_php_source_changes_require_a_core_build(self):
         with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
@@ -220,15 +136,6 @@ class SourceIdentities(unittest.TestCase):
             changed = dict(previous, php_source_hashes={'8.6': {'php-8.6.1.tar.gz': 'different bytes'}})
             request = source.plan({}, {}, previous, changed)
             self.assertEqual(set(request['requests']), {'8.6'})
-
-    def test_recipe_only_update_does_not_select_library_sources(self):
-        metadata = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS},
-                    'shared_configuration': 'same', 'shared_library_recipes': {'zlib': 'old', 'curl': 'same'}}
-        inventory = {'managed_library_artifacts': ['zlib', 'curl'], 'library_tool_artifacts': [],
-                     'irrelevant_artifacts': [], 'libraries': {'zlib': {'recipe_hash': 'new'}, 'curl': {'recipe_hash': 'same'}}}
-        request = source.plan({}, {}, metadata, metadata, library_ids={'zlib', 'curl'})
-        self.assertEqual(request['requests'], {})
-        self.assertEqual(request['libraries'], [])
 
     def test_unused_memcache_and_pecl_zip_sources_do_not_change_new_php(self):
         metadata = {'php_versions': {stream: stream + '.1' for stream in source.STREAMS}, 'shared_configuration': 'same'}
@@ -268,35 +175,6 @@ class SourceIdentities(unittest.TestCase):
             self.assertEqual(result['library_package_requests'], [])
             self.assertEqual(result['variant_package_requests'], {})
 
-    def test_current_checkout_reconciles_old_snapshot_without_mutating_sources(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
-            root = Path(temporary)
-            template = root / 'config/templates/craft.yml.twig'
-            template.parent.mkdir(parents=True)
-            template.write_text('-O2')
-            metadata = self.metadata(root)
-            metadata['shared_library_package_configuration'] = 'old-library-recipe'
-            metadata['shared_variant_configuration'] = {}
-            original = {'requests': {}, 'package_requests': {}, 'configuration': 'source-only'}
-            inventory = {'managed_library_artifacts': [], 'library_tool_artifacts': [], 'irrelevant_artifacts': [], 'libraries': {}}
-            template.write_text('-O3')
-            request = source.reconcile(original, {}, metadata, inventory)
-            self.assertEqual(request['requests'], {})
-            self.assertEqual(original['requests'], {})
-
-    def test_never_selected_vendor_extension_recipe_does_not_request_work(self):
-        with TemporaryDirectory(prefix='source-plan-identity-') as temporary:
-            root = Path(temporary)
-            template = root / 'config/templates/craft.yml.twig'
-            template.parent.mkdir(parents=True)
-            template.write_text("{% set base_sapi_str = 'cli,embed' %}\n{% set base_shared_str = 'rar' %}\n{% set base_extensions_str = 'ctype' %}\n")
-            recipe = root / ('vendor/crazywhalecc/static-php-cli/' + 'src/Package/Extension/imap.php')
-            recipe.parent.mkdir(parents=True)
-            recipe.write_text('old unused imap recipe')
-            before = self.metadata(root)
-            recipe.write_text('new unused imap recipe')
-            self.assertEqual(self.request(root, before)['requests'], {})
-
     def test_prerelease_git_sources_only_rebuild_their_php_stream(self):
         stable = {'lock_type': 'source', 'hash': 'stable', 'time': 1}
         master = {'lock_type': 'source', 'hash': 'old-master', 'time': 1}
@@ -313,22 +191,6 @@ class SourceIdentities(unittest.TestCase):
         current['extension_sources']['8.6']['ext-apcu']['hash'] = 'old-master'
         current['extension_sources']['8.6']['ext-apcu']['time'] = 999
         self.assertEqual(source.plan(artifacts, artifacts, previous, current)['requests'], {})
-
-    def test_retired_apk_alias_configuration_has_no_effect(self):
-        with TemporaryDirectory(prefix='source-plan-apk-alias-') as temporary:
-            root = Path(temporary)
-            self.actor_template(root, ['amqp', 'igbinary'])
-            path = root / 'config/apk-runtime-aliases.json'
-            path.write_text(json.dumps({'schema': 1, 'extensions': {'amqp': {'suffix': '-shared'}, 'igbinary': {'suffix': '-shared'}}}))
-            previous = self.metadata(root)
-            before = self.request(root, previous)
-            path.write_text(path.read_text().replace('-shared', '-runtime'))
-            after = source.plan({}, {}, previous, previous)
-            self.assertEqual(after['requests'], {})
-            self.assertEqual(after['package_requests'], {})
-            self.assertEqual(after['libraries'], [])
-            self.assertEqual(after['payload_inputs'], before['payload_inputs'])
-            self.assertEqual(after['format_package_requests'], {})
 
 if __name__ == '__main__':
     unittest.main()

@@ -181,10 +181,10 @@ def record_publication(source, kind, target, stream):
     baseline = value['baseline']
     uploaded_consumers = {}
     version_of = lambda item: (str(item.get('epoch', '0')) + ':' if kind == 'rpm' else '') + item['version']
-    indexed = {(item['name'], version_of(item)): item for item in inventory}
+    packages_by_identity = {(item['name'], version_of(item)): item for item in inventory}
     for archive_path in sorted((Path('dist') / kind).glob('*.' + kind)):
         package_name, version, package_arch = planner['archive_identity'](archive_path, kind)
-        package = indexed.get((package_name, version))
+        package = packages_by_identity.get((package_name, version))
         if package is None:
             package = next((item for item in inventory if item['name'] == package_name
                             and compare(kind, version_of(item), version) == 0), None)
@@ -192,8 +192,8 @@ def record_publication(source, kind, target, stream):
             raise RuntimeError('Published package missing from native repository index: ' + package_name)
         checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
         published = package.get('published_checksum', {})
-        indexed = freezer['apk_control_checksum'](archive_path.read_bytes()) if kind == 'apk' else hashlib.new(published.get('algorithm', 'sha256'), archive_path.read_bytes()).hexdigest()
-        if published.get('value') and indexed != published['value']:
+        index_checksum = freezer['apk_control_checksum'](archive_path.read_bytes()) if kind == 'apk' else hashlib.new(published.get('algorithm', 'sha256'), archive_path.read_bytes()).hexdigest()
+        if published.get('value') and index_checksum != published['value']:
             raise RuntimeError('Published index differs from the uploaded archive: ' + package_name)
         reference = {'download_url': package['publication_url'], 'published_archive': 'archives/' + archive_path.name,
                      'published_archive_sha256': checksum, 'published_archive_filename': archive_path.name,

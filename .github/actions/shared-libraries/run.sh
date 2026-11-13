@@ -9,10 +9,6 @@ fi
 if [[ -n "${LIBRARIES:-}" ]]; then
     export MODE=incremental
 fi
-if [[ "${MODE:-full}" == incremental && ! -f downloads/build-plan.json && "$command" =~ ^(libs|classify|php)$ ]]; then
-    echo 'Incremental builds require downloads/build-plan.json; run spc-download or select full mode' >&2
-    exit 1
-fi
 if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
     mkdir -p "$HOME/.cache/composer"
     owner_args=(-e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)")
@@ -131,7 +127,6 @@ PY
         ;;
     upload-1|upload-2)
         host=${command##*-}
-        export SPP_ARCHIVE_HEADER_CACHE="$PWD/stage/verified-archive-headers"
         cd "dist/$TYPE"
         python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE" "$host"
         ;;
