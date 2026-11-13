@@ -12,7 +12,7 @@ from publication import api, inspect_run
 from workflow import STREAMS, csv, emit, image_digest, matrix, tls_checks
 
 
-def select(state, plans, jobs, kind, streams, architectures=('x86_64', 'arm64')):
+def select(state, plans, jobs, kind, streams, architectures=('x86_64', 'arm64'), reuse_libraries=True):
     successful = {job['name'].split(' / ')[-1] for job in jobs if job.get('conclusion') == 'success'}
     sdks = {match[2] for name in successful if (match := re.fullmatch(r'(Build libs shared|Repackage libraries) \(([^)]+)\)', name))}
     payloads = {(match[2], match[3]) for name in successful if (match := re.fullmatch(r'(Build|Reuse) payload \(([^ ]+) php([^)]+)\)', name))}
@@ -27,12 +27,14 @@ def select(state, plans, jobs, kind, streams, architectures=('x86_64', 'arm64'))
             continue
         metadata = state['artifacts']['shared-sdk-glibc-' + identity]
         sdk = state['artifacts'].get('shared-sdk-buildroot-glibc-' + identity)
-        if selection.get('libraries') and sdk is None:
+        retained = state['artifacts'].get('shared-libs-' + kind + '-' + identity) if reuse_libraries else None
+        if selection.get('libraries') and sdk is None and retained is None:
             print('::warning::Skipping ' + identity + ': no retained library SDK', file=sys.stderr)
             continue
         base = dict(target, type=kind, **{'package-image': target['package_images'][kind],
                     'metadata-artifact': metadata, 'sdk-artifact': sdk,
-                    'libraries-required': bool(selection.get('libraries'))})
+                    'libraries-artifact': retained,
+                    'libraries-required': bool(selection.get('libraries')) and retained is None})
         active = set()
         for value in consumers:
             stream = value['php-version']
@@ -70,7 +72,10 @@ def main():
     architectures = csv(os.environ.get('ARCHITECTURES', ''), ['x86_64', 'arm64'])
     if not architectures or set(architectures) - {'x86_64', 'arm64'}:
         raise RuntimeError('Unsupported packaging architecture')
-    libraries, packages, publishing = select(state, plans, jobs, kind, csv(os.environ.get('PHP_VERSIONS', ''), STREAMS), architectures)
+    reuse = os.environ.get('BUMP', 'false') != 'true' and not os.environ.get('ITERATION')
+    libraries, packages, publishing = select(state, plans, jobs, kind, csv(os.environ.get('PHP_VERSIONS', ''), STREAMS), architectures, reuse)
+    if not libraries:
+        raise RuntimeError('No successful producer target has the retained outputs required for this packaging selection')
     for key, values in [('libraries', libraries), ('packages', packages), ('publish', publishing)]:
         emit(key + '-matrix', {'include': values})
         emit(key + '-any', str(bool(values)).lower())

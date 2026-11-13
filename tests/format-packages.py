@@ -43,6 +43,16 @@ class Formats(unittest.TestCase):
                 self.assertIsNone(packages[0]['sdk-artifact'])
             self.assertEqual(matrices[0][1][0]['payload-artifact'], matrices[1][1][0]['payload-artifact'])
             self.assertEqual(formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'], ['x86_64']), ([], [], []))
+            directory = root / 'alma8-arm64'
+            plan = json.loads((directory / 'shared-library-plan.json').read_text())
+            plan['format_selection']['rpm']['libraries'] = ['fixture']
+            (directory / 'shared-library-plan.json').write_text(json.dumps(plan))
+            artifacts['shared-libs-rpm-alma8-arm64'] = 99
+            libraries, packages, _ = formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'])
+            self.assertEqual(libraries[0]['libraries-artifact'], 99)
+            self.assertFalse(libraries[0]['libraries-required'])
+            self.assertEqual(packages[0]['payload-artifact'], matrices[0][1][0]['payload-artifact'])
+            self.assertEqual(formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'], reuse_libraries=False), ([], [], []))
 
 
 
