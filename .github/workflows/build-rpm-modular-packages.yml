@@ -684,7 +684,13 @@ jobs:
                     name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
             -   name: Extract sealed common payload
                 if: matrix.library-only != true
-                run: zstd -dc php-payload.tar.zst | tar -xpf -
+                run: |
+                    zstd -dc php-payload.tar.zst | tar -xpf -
+                    if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
+                        && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
+                        echo 'PACKAGES=' >> "$GITHUB_ENV"
+                        echo 'TLS_CHECKS=true' >> "$GITHUB_ENV"
+                    fi
             -   name: Download matching library packages
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
@@ -719,7 +725,7 @@ jobs:
                     if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                     else
                         mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/$TYPE/shared-library-plan.json" --php-stream "$PHPV")
-                        if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
+                        if [[ "$mode" == shared && -n "$PACKAGES" ]]; then args+=(--partial-consumers); fi
                     fi
                     python3 tests/migration-upgrade-containers.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts "dist/$TYPE" --baseline-dir stage/published-baseline --report "dist/$TYPE/native-upgrade-receipt.json" --profile "$profile" "${args[@]}"
                     native_args=()

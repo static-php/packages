@@ -142,7 +142,7 @@ class Repackage(unittest.TestCase):
             original[kind] = hashlib.sha256((self.stage / 'repackage' / (kind + '.json')).read_bytes()).hexdigest()
             self.write(self.stage / kind / 'shared-library-plan.json', {'new': kind})
         self.write(self.stage / 'payload-provenance.json', {'target': 'alma8-x86_64', 'php_stream': '8.4',
-            'source_run_id': '11', 'compiled_source_run_id': '10', 'producer_image': self.target['image'],
+            'source_run_id': '11', 'compiled_source_run_id': '10', 'producer_image': self.target['image'], 'reused_payload': False,
             'format_plan_sha256': original})
         return payload
 
@@ -155,6 +155,7 @@ class Repackage(unittest.TestCase):
         self.assertEqual(before, {path: path.read_bytes() for path in before})
         provenance = json.loads((self.stage / 'payload-provenance.json').read_text())
         self.assertEqual(provenance['compiled_source_run_id'], '10')
+        self.assertFalse(provenance['reused_payload'])
         self.assertEqual(provenance['repackaged_from_run_id'], '22')
 
     def test_mismatched_sdk_and_provenance_are_rejected(self):

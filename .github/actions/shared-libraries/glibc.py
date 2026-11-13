@@ -621,7 +621,7 @@ def payload():
             compile_packages = ''
         if compile_requested:
             run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize', '--php'])
-            preflight_consumers(stream, package_type, os.environ.get('PACKAGES') or compile_packages)
+            preflight_consumers(stream, package_type, compile_packages)
             if compile_packages and not (ROOT / 'source/php-src').is_dir():
                 release = read(STAGE / 'consumer-source-versions.json')['candidates'][0]['php_version']
                 run(['python3', '.github/actions/shared-libraries/php-source.py', '--root', '.', '--version', release, '--select'])
@@ -629,7 +629,7 @@ def payload():
             flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + package_type, '--debuginfo']
             if compile_packages:
                 flags += ['--packages=' + compile_packages]
-            environment = dict(os.environ, SPP_PACKAGING_SELECTION=os.environ.get('PACKAGES', '') if os.environ.get('PUBLISH') == 'false' else '')
+            environment = dict(os.environ, SPP_PACKAGING_SELECTION=os.environ.get('PACKAGES', '') if restored and os.environ.get('PUBLISH') == 'false' else '')
             bind_library_sources(ROOT / 'buildroot', ROOT / 'downloads')
             run(['php', 'bin/spp', 'build', *flags], env=environment)
             if not sdk_moved:

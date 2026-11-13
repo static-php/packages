@@ -517,7 +517,8 @@ def package_archive(args):
     if record.get('state') != 'sealed':
         raise RuntimeError('Packaging artifacts require a sealed producer payload')
     manifest = read(payload / 'shared-libraries.json')
-    packages = set(filter(None, args.packages.split(',')))
+    provenance = read(args.root / 'stage/payload-provenance.json')
+    packages = set(filter(None, args.packages.split(','))) if provenance.get('reused_payload', True) or record.get('packaging_selection') else set()
     record, manifest, excluded = packaging_projection(payload, record, manifest, packages)
     replacements = {'build-payload.json': record, 'shared-libraries.json': manifest} if record.get('packaging_selection') else {}
     prefix = str(payload.relative_to(args.root))

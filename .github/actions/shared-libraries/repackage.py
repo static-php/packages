@@ -152,7 +152,7 @@ def payload():
         original = hashlib.sha256((stage / 'repackage' / (kind + '.json')).read_bytes()).hexdigest()
         if provenance.get('format_plan_sha256', {}).get(kind) != original:
             raise RuntimeError('Retained payload was not built against its recorded format plan')
-    provenance.update(repackaged_from_run_id=target['repackage_run_id'], reused_payload=True,
+    provenance.update(repackaged_from_run_id=target['repackage_run_id'],
                       format_plan_sha256={kind: hashlib.sha256((stage / kind / 'shared-library-plan.json').read_bytes()).hexdigest()
                                           for kind in glibc.FORMATS})
     glibc.write(stage / 'payload-provenance.json', provenance)

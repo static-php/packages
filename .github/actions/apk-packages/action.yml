@@ -37,7 +37,13 @@ runs:
             env:
                 EXPORT_PAYLOAD_CACHE: ${{ env.PUBLISH == 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true') }}
             shell: bash
-            run: bash .github/actions/shared-libraries/run.sh php
+            run: |
+                bash .github/actions/shared-libraries/run.sh php
+                if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
+                    && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
+                    echo 'PACKAGES=' >> "$GITHUB_ENV"
+                    echo 'TLS_CHECKS=true' >> "$GITHUB_ENV"
+                fi
         -   name: Save sealed PHP payload cache
             if: ${{ !cancelled() && env.PUBLISH == 'true' && env.LIBRARY_ONLY != 'true' && (env.COMPILE == 'true' || steps.payload-cache.outputs.cache-current != 'true') && hashFiles('php-payload-cache-ready.tar.zst') != '' }}
             uses: ./.github/actions/buildroot-cache
@@ -55,7 +61,7 @@ runs:
                 if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
                 else
                     mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/shared-library-plan.json" --php-stream "$PHPV")
-                    if [[ "$mode" == shared ]]; then args+=(--partial-consumers); fi
+                    if [[ "$mode" == shared && -n "$PACKAGES" ]]; then args+=(--partial-consumers); fi
                 fi
                 python3 tests/migration-upgrade-containers.py --type apk --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts dist/apk --baseline-dir stage/published-baseline --report dist/apk/native-upgrade-receipt.json --profile "$profile" "${args[@]}"
                 native_args=()

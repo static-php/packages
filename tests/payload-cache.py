@@ -176,6 +176,17 @@ class PayloadCache(unittest.TestCase):
             subprocess.run(['php', ROOT / 'bin/build-payload', command, '--root', payload, *extra], check=True, stdout=subprocess.DEVNULL)
         original = (payload / 'build-payload.json').read_bytes()
         cache.write(self.root / 'stage/payload-provenance.json', {'source_run_id': '1234'})
+        cache.write(self.root / 'stage/payload-provenance.json', {'source_run_id': '1234', 'reused_payload': False})
+        complete = self.root / 'complete.tar.zst'
+        cache.package_archive(argparse.Namespace(root=self.root, payload=payload, packages='imagick', output=complete))
+        with subprocess.Popen(['zstd', '-dc', complete], stdout=subprocess.PIPE) as stream:
+            with tarfile.open(fileobj=stream.stdout, mode='r|') as archive:
+                names = [member.name for member in archive]
+            self.assertEqual(stream.wait(), 0)
+        self.assertIn('build/8.6/modules/unselected-zts-86.so', names)
+        self.assertIn('build/8.6/lib/libfixture.so.1', names)
+        self.assertIn('build/8.6/lib/unneeded.a', names)
+        cache.write(self.root / 'stage/payload-provenance.json', {'source_run_id': '1234', 'reused_payload': True})
         archive = self.root / 'package.tar.zst'
         cache.package_archive(argparse.Namespace(root=self.root, payload=payload, packages='imagick', output=archive))
         restored = self.root / 'restored'

@@ -101,7 +101,7 @@ case "$command" in
         if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi
         baseline_args=(--packages "${PACKAGES:-}")
         if [[ "${TLS_CHECKS:-false}" == true ]]; then baseline_args+=(--tls); fi
-        if [[ "${LIBRARY_ONLY:-}" == true ]] || jq -e '.libraries | length > 0' "$baseline_stage/shared-library-plan.json" >/dev/null; then
+        if [[ "${LIBRARY_ONLY:-}" == true ]] || { [[ -n "${PACKAGES:-}" ]] && jq -e '.libraries | length > 0' "$baseline_stage/shared-library-plan.json" >/dev/null; }; then
             baseline_args+=(--library-plan "$baseline_stage/shared-library-plan.json")
         fi
         python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
@@ -129,10 +129,15 @@ case "$command" in
         cp stage/shared-libraries.json buildroot/shared-libraries.json
         mkdir -p dist/"$TYPE"
         if [[ "${LIBRARY_ONLY:-}" == true ]]; then exit 0; fi
+        python3 .github/actions/shared-libraries/glibc.py payload
+        if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
+            && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
+            export PACKAGES= TLS_CHECKS=true
+            bash .github/actions/shared-libraries/run.sh freeze-baseline
+        fi
         flags=(--phpv="$PHPV" --prefix=-zts --type="$TYPE" --debuginfo)
         [[ -n "$PACKAGES" ]] && flags+=(--packages="$PACKAGES")
         if [[ -n "$ITERATION" ]]; then flags+=(--iteration="$ITERATION"); elif [[ "$BUMP" == true ]]; then flags+=(--bump); fi
-        python3 .github/actions/shared-libraries/glibc.py payload
         if [[ "${EXPORT_PAYLOAD_CACHE:-false}" == true && -f stage/payload-cache-key ]]; then
             source_run=$(python3 -c 'import json; print(json.load(open("stage/payload-provenance.json"))["compiled_source_run_id"])')
             python3 .github/actions/shared-libraries/payload-cache.py export --root . --payload "build/$PHPV"                 --compatibility stage/library-compatibility --key "$(cat stage/payload-cache-key)"                 --seed-key "$(cat stage/payload-cache-seed-key)" --source-run-id "$source_run" --output php-payload-cache-export.tar.zst
