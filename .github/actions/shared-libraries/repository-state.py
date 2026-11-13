@@ -213,6 +213,12 @@ def record_publication(source, kind, target, stream):
             baseline['runtime_layout'] = dict(layout, archive=reference['published_archive'], archive_sha256=checksum,
                                               package_version=version, complete=True, download_url=package['publication_url'])
         elif not package_name.endswith(('-debuginfo', '-dbgsym')):
+            if package_name == 'php-zts-cli':
+                cutoffs = planner['archive_migration_cutoffs'](archive_path, kind)
+                if cutoffs:
+                    if cutoffs.get('php_stream') != stream:
+                        raise RuntimeError('Published CLI migration metadata has the wrong PHP stream')
+                    baseline.setdefault('migration_cutoffs', {})[stream] = cutoffs['formats'].get(kind, {})
             metadata = planner['archive_runtime_json'](archive_path, kind, 'usr/share/php-zts/consumers/' + package_name + '.json')
             if metadata:
                 dependencies = planner['consumer_dependencies'](metadata, package_name, stream, arch)

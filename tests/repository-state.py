@@ -180,6 +180,13 @@ class RepositoryState(unittest.TestCase):
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             with self.assertRaisesRegex(RuntimeError, 'index differs'):
                 state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
+        package.update(name='php-zts-cli', version='8.6.0~rc7-1')
+        package['published_checksum']['value'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        planner['archive_runtime_json'] = lambda *_: None
+        planner['archive_migration_cutoffs'] = lambda *_: {'php_stream': '8.6', 'formats': {'deb': {'legacy': 5}}}
+        with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
+            state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
+        self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['migration_cutoffs'], {'8.6': {'legacy': 5}})
 
 
 if __name__ == '__main__':
