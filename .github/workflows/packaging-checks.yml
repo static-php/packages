@@ -64,6 +64,8 @@ jobs:
                         python3 tests/payload-profile.py
                         python3 tests/payload-cache.py
                         python3 tests/repackage-glibc.py
+                        python3 tests/repository-state.py
+                        python3 tests/format-packages.py
                         python3 tests/openssl-variants.py
                         python3 tests/pinned-library-sources.py
                         python3 tests/incremental-library-builds.py

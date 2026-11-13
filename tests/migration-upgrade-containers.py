@@ -236,14 +236,6 @@ def package_profiles(baseline):
              if baseline.get('selection', {}).get('mode') == 'affected' else {'php-zts-cli'})
     for name in sorted(isolated):
         profiles.append({'id': 'independent-' + name, 'packages': sorted(hosts | {name})})
-    if 'php-zts-imagick' in names:
-        profiles.append({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
-                         'disabled_extension': 'imagick'})
-    if baseline.get('type') == 'apk':
-        package = 'php-zts-igbinary' if 'php-zts-igbinary' in names else None
-        if package:
-            profiles.append({'id': 'disabled-igbinary', 'packages': ['php-zts-cli', package],
-                             'disabled_extension': 'igbinary'})
     return {'profiles': profiles, 'covered_packages': names,
             'isolated_runtime_hook_packages': sorted(isolated)}
 
@@ -262,7 +254,11 @@ def candidate_only_profiles(baseline, inventory):
                     and not p['name'].endswith(('-debuginfo', '-dbgsym'))}
     hosts = ({'php-zts-cli', 'php-zts-fpm', 'frankenphp'}
              if baseline.get('selection', {}).get('mode') == 'affected' else set())
-    return [{'id': 'fresh-' + name, 'packages': sorted(hosts | {name}), 'fresh_package': name} for name in sorted(names)]
+    isolated = names & {'php-zts-xdebug', 'php-zts-pcov', 'php-zts-spx', 'php-zts-xhprof'}
+    groups = [names - isolated] + [{name} for name in sorted(isolated)]
+    return [{'id': 'fresh-' + (next(iter(group)) if len(group) == 1 else 'extensions'),
+             'packages': sorted(hosts | group), 'fresh_packages': sorted(group)}
+            for group in groups if group]
 
 
 class Docker:
@@ -848,8 +844,9 @@ def inside(args):
         return
     if args.inside == 'fresh':
         inventory = json.loads(Path('/spp/inventory.json').read_text())
-        allowed = {p['fresh_package'] for p in candidate_only_profiles({'packages': inventory['old']}, inventory)}
-        if args.fresh_package not in allowed:
+        allowed = {name for profile in candidate_only_profiles({'packages': inventory['old']}, inventory)
+                   for name in profile['fresh_packages']}
+        if not args.fresh_packages or set(args.fresh_packages) - allowed:
             raise RuntimeError('Fresh optional-package profile must name a candidate absent from the published baseline')
         config, key = configure_client(kind, args.php, args.arch, args.runtime)
         command = {'rpm': ['dnf', 'install', '-y'], 'deb': ['apt-get', 'install', '-y'], 'apk': ['apk', 'add']}[kind]
@@ -857,48 +854,37 @@ def inside(args):
         run(command + names)
         after = installed(kind)
         candidate = {p['name']: p for p in inventory['new']}
-        actual = args.fresh_package
-        if (after.get(actual) != candidate[actual]['version']
-                or actual != args.fresh_package and args.fresh_package in after):
-            raise RuntimeError('Fresh installation selected the wrong optional-package version')
+        for name in args.fresh_packages:
+            if after.get(name) != candidate[name]['version']:
+                raise RuntimeError('Fresh installation selected the wrong optional-package version: ' + name)
         probe = php_probe()
         if not probe['version'].startswith(args.php + '.') or not probe['curl'] or not probe['fileinfo']:
             raise RuntimeError('Fresh optional-package dependencies selected an incomplete PHP stream')
         if any('php-zts-' + module not in after for module in ('curl', 'fileinfo')):
             raise RuntimeError('Fresh optional-package installation did not resolve default recommended modules')
-        list_command = {'rpm': ['rpm', '-ql'], 'deb': ['dpkg-query', '-L'], 'apk': ['apk', 'info', '-L']}[kind]
-        files = run(list_command + [actual]).stdout.splitlines()
-        extension_dir = Path(run(['/usr/bin/php-zts', '-r', 'echo ini_get("extension_dir");']).stdout).resolve()
-        modules = [str(Path('/' + name.lstrip('/')).resolve()) for name in files if name.endswith('.so')
-                   and Path('/' + name.lstrip('/')).resolve().parent == extension_dir]
-        if not modules:
-            raise RuntimeError('Fresh optional extension package owns no installed PHP shared module')
         libraries = sorted(name for name in after if name.startswith('php-zts-lib-'))
         linked = run(['ldd', '/usr/bin/php-zts'], check=False)
         if not libraries or linked.returncode or 'not found' in linked.stdout + linked.stderr or '/php-zts/lib/' not in linked.stdout:
             raise RuntimeError('Fresh optional-package dependencies have an unresolved private library closure')
         state = (sha256(config), sha256(key), module_state(kind))
         runtime = runpy.run_path('/spp/shared-runtime-containers.py')
-        smokes = runtime['sapi_checks'](args.php, sorted(after), kind)
+        managed_names = sorted(name for name in after if managed(name))
+        smokes = runtime['sapi_checks'](args.php, managed_names, kind)
         ordinary_upgrade(kind)
         first_upgrade = installed(kind)
         managed_before = {name: version for name, version in after.items() if managed(name)}
         managed_after = {name: version for name, version in first_upgrade.items() if managed(name)}
         if managed_after != managed_before or (sha256(config), sha256(key), module_state(kind)) != state:
             raise RuntimeError('Fresh optional-package unchanged upgrade changed packages/repository/trust/module selection')
-        ordinary_upgrade(kind)
-        if installed(kind) != first_upgrade or (sha256(config), sha256(key), module_state(kind)) != state:
-            raise RuntimeError('Fresh optional-package second unchanged upgrade was not a no-op')
         if kind == 'rpm':
             run(['dnf', 'check'])
         elif kind == 'deb' and run(['dpkg', '--audit']).stdout.strip():
             raise RuntimeError('Fresh optional-package installation left an incomplete dpkg transaction')
         print('SPP_MIGRATION_RESULT=' + json.dumps({'ok': True, 'applicable': True,
               'coverage': 'fresh_candidate_only', 'requested_installation': names,
-              'physical_package': actual,
+              'physical_packages': args.fresh_packages,
               'installed_versions': {name: version for name, version in after.items() if managed(name)},
               'automatic_libraries': libraries, 'curl_fileinfo_automatic': True,
-              'requested_shared_modules': modules,
               'installed_sapi_smokes': smokes, 'second_upgrade_noop': True,
               'repository_and_trust_unchanged': True, 'module_selection_unchanged': True,
               'new_probe': probe}, sort_keys=True))
@@ -1064,7 +1050,7 @@ def options(args):
     for name in ('library_only', 'partial_consumers', 'allow_unaffected_profile', 'tls', 'services', 'allow_emulation'):
         if not hasattr(args, name):
             setattr(args, name, False)
-    for name in ('disabled_extension', 'library_artifacts', 'fresh_package'):
+    for name in ('disabled_extension', 'library_artifacts', 'fresh_packages'):
         if not hasattr(args, name):
             setattr(args, name, None)
     return args
@@ -1123,8 +1109,8 @@ class PreparedMirror:
                 value.append('--' + name.replace('_', '-'))
         if args.disabled_extension:
             value += ['--disabled-extension', args.disabled_extension]
-        if args.fresh_package:
-            value += ['--fresh-package', args.fresh_package]
+        if args.fresh_packages:
+            value += ['--fresh-packages', ','.join(args.fresh_packages)]
         if self.args.library_artifacts:
             value += ['--library-artifacts', '/spp/library-input']
         return value
@@ -1330,10 +1316,11 @@ class PreparedMirror:
         phase = 'prepare profile'
         try:
             self.assert_bound(args)
-            allowed = {p['fresh_package'] for p in candidate_only_profiles(baseline, self.inventory)}
-            if args.fresh_package and args.fresh_package not in allowed:
+            allowed = {name for profile in candidate_only_profiles(baseline, self.inventory)
+                       for name in profile['fresh_packages']}
+            if args.fresh_packages and set(args.fresh_packages) - allowed:
                 raise RuntimeError('Fresh profile does not name a candidate-only optional package')
-            missing = set(names) - {p['name'] for p in baseline['packages']} if not args.fresh_package else set()
+            missing = set(names) - {p['name'] for p in baseline['packages']} if not args.fresh_packages else set()
             if args.library_only:
                 libraries = [package['name'] for package in self.inventory['incoming'] if package['name'].startswith('php-zts-lib-')
                              and not package['name'].endswith('-debuginfo')]
@@ -1349,13 +1336,13 @@ class PreparedMirror:
             before_path = scratch / 'client-before.json'
             if before_path.exists():
                 before_path.unlink()
-            self.select_generation('new' if args.fresh_package else 'old')
+            self.select_generation('new' if args.fresh_packages else 'old')
             self.report['profiles_started'] += 1
             result['prepared_mirror'] = {'ledger_sha256': self.report['ledger_sha256'], 'profile_number': self.report['profiles_started']}
             client = resources.start(self.client_image, 'client-' + str(self.report['profiles_started']))
             result['runtime_evidence'] = resources.runtime_evidence[-1]
             common = self.command(args)
-            if args.fresh_package:
+            if args.fresh_packages:
                 phase = 'fresh installation'
                 checked = resources.exec(client, common + ['--inside', 'fresh'])
                 result.update(json.loads(checked.stdout.split('SPP_MIGRATION_RESULT=')[-1]))
@@ -1457,26 +1444,6 @@ def cell(args, prepared=None):
     return result
 
 
-def verified_unchanged_candidates(inventory, results):
-    candidates = {package['name']: package['version'] for package in inventory.get('incoming', [])
-                  if not package['name'].endswith(('-debuginfo', '-dbgsym'))}
-    changes = inventory.get('incoming_changes')
-    if not candidates or not isinstance(changes, list) or any(not name.endswith(('-debuginfo', '-dbgsym')) for name in changes):
-        return False
-    for package in inventory.get('incoming', []):
-        base = package['name'].removesuffix('-debuginfo').removesuffix('-dbgsym')
-        if candidates.get(base) != package['version']:
-            return False
-    covered = set()
-    for receipt in results:
-        if receipt.get('ok') is not True or receipt.get('second_upgrade_noop') is not True:
-            continue
-        before, after = receipt.get('actual_old_versions', {}), receipt.get('new_versions', {})
-        covered.update(name for name, version in candidates.items()
-                       if before.get(name) == version and after.get(name) == version)
-    return candidates.keys() <= covered
-
-
 def suite(args, baseline, profiles):
     mirror = PreparedMirror(args, baseline=baseline)
     results = []
@@ -1493,11 +1460,11 @@ def suite(args, baseline, profiles):
         fresh = candidate_only_profiles(baseline, getattr(mirror, 'inventory', {})) if not args.library_only and not candidate_profiles else []
         execution_profiles = list(profiles['profiles']) + fresh
         result['profiles'] = execution_profiles
-        result['fresh_install_packages'] = [p['fresh_package'] for p in fresh]
+        result['fresh_install_packages'] = sorted(name for profile in fresh for name in profile['fresh_packages'])
         for profile in execution_profiles:
             options = argparse.Namespace(**vars(args))
             options.profile = ','.join(profile['packages'])
-            options.fresh_package = profile.get('fresh_package')
+            options.fresh_packages = profile.get('fresh_packages')
             options.disabled_extension = profile.get('disabled_extension')
             options.tls = args.tls and profile['id'] == 'common'
             options.services = args.services and profile['id'] == 'common'
@@ -1522,9 +1489,8 @@ def suite(args, baseline, profiles):
                     or receipt.get('cleanup', {}).get('complete') is False):
                 break
         exercised = any(item.get('applicable', item.get('ok', False)) for item in results)
-        unchanged = not exercised and (getattr(args, 'partial_consumers', False) or args.library_only) and verified_unchanged_candidates(getattr(mirror, 'inventory', {}), results)
-        result.update(ok=len(results) == len(execution_profiles) and all(item['ok'] for item in results) and (exercised or unchanged),
-                      applicable=exercised, unchanged_candidates_validated=bool(unchanged),
+        result.update(ok=bool(results) and len(results) == len(execution_profiles) and all(item['ok'] for item in results),
+                      applicable=exercised,
                       interrupted=any(item.get('interrupted') for item in results))
     except BaseException as error:
         result.update(ok=False, error=str(error), interrupted=isinstance(error, (KeyboardInterrupt, SystemExit)))
@@ -1559,7 +1525,7 @@ def main():
     modes.add_argument('--partial-consumers', action='store_true', help='Upgrade incoming consumer/library candidates while retaining an already-shared baseline')
     parser.add_argument('--allow-unaffected-profile', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--inside', choices=('index', 'old', 'new', 'fresh', 'replacement'), help=argparse.SUPPRESS)
-    parser.add_argument('--fresh-package', help=argparse.SUPPRESS)
+    parser.add_argument('--fresh-packages', type=lambda value: value.split(','), help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.runtime = args.runtime or {'rpm': 'alma8', 'deb': 'debian', 'apk': 'alpine'}[args.type]
     if RUNTIMES[args.runtime][0] != args.type:

@@ -396,7 +396,7 @@ jobs:
         needs: [setup-matrix, compute-build-matrix, build]
         if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
         permissions:
-            contents: read
+            contents: write
             packages: read
             actions: read
         strategy:

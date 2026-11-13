@@ -564,6 +564,9 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_builds_stage_and_publication_checks_the_whole_cohort(self):
         for name, data in self.workflows():
+            if 'rpm' in name:
+                packaging = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())
+                data['jobs'].update({key: value for key, value in packaging['jobs'].items() if key not in data['jobs']})
             for job_name in (['build-libs', 'build-payload', 'package'] if 'rpm' in name else ['build-libs', 'build']):
                 runs = '\n'.join(step.get('run', '') for step in data['jobs'][job_name]['steps'])
                 self.assertNotIn(' upload ', runs, name)
@@ -615,7 +618,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual({value['alma'] for value in values}, {'8'})
         self.assertEqual({value['arch'] for value in values}, {'x86_64', 'arm64'})
         self.assertTrue(all('rhel-8' in value['image'] for value in values))
-        data = dict(self.workflows())['build-rpm-modular-packages.yml']
+        data = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())
         script = '\n'.join(step.get('run', '') for step in data['jobs']['package']['steps'])
         self.assertIn('glibc-package', script)
         self.assertNotIn('bin/spp all', script)
@@ -624,18 +627,19 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_glibc_validation_only_cannot_publish_or_save_release_caches(self):
         data = dict(self.workflows())['build-rpm-modular-packages.yml']
-        self.assertIn('inputs.publish == true', data['jobs']['publish']['if'])
+        packaging = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())
+        self.assertIn('inputs.publish == true', packaging['jobs']['publish']['if'])
         runner = (ROOT / '.github/actions/shared-libraries/run.sh').read_text()
         self.assertNotIn('--baseline-directory', runner)
         self.assertIn('--remote-directory \"$RPM_DIRECTORY\"', runner)
         cache = next(step for step in data['jobs']['build-libs']['steps'] if step['name'] == 'Save buildroot cache')
         self.assertIn('inputs.publish == true', cache['if'])
         self.assertEqual(data['jobs']['build-libs']['env']['BUMP'], '${{ inputs.bump || false }}')
-        self.assertEqual(data['jobs']['package']['env']['TLS_CHECKS'], '${{ matrix.tls-checks }}')
-        publish = self.publication_steps(data)
+        self.assertEqual(packaging['jobs']['package']['env']['TLS_CHECKS'], '${{ matrix.tls-checks }}')
+        publish = self.publication_steps(packaging)
         names = [step['name'] for step in publish]
         self.assertLess(names.index('Verify selected build target'), names.index('Publish each validated PHP stream independently'))
-        self.assertTrue(any(step.get('run', '').endswith('publication.py publish-available') for step in self.publication_steps(data)))
+        self.assertTrue(any(step.get('run', '').endswith('publication.py publish-available') for step in self.publication_steps(packaging)))
 
     def test_alpine_keeps_actions_on_glibc_host(self):
         data = dict(self.workflows())['build-apk-forgejo.yml']

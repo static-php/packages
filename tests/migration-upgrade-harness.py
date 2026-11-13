@@ -428,8 +428,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
                     patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
                 self.assertEqual(harness['main'](), 0)
             self.assertTrue(json.loads(report.read_text())['complete'])
-        self.assertEqual(calls, [{'frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-imagick'},
-                                 {'php-zts-cli', 'php-zts-imagick'}])
+        self.assertEqual(calls, [{'frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-imagick'}])
 
     def test_affected_profiles_load_selected_instrumentation_under_runtime_hosts(self):
         names = ['php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-xdebug', 'php-zts-lib-zlib']
@@ -446,7 +445,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
     def test_new_optional_extension_is_exercised_with_retained_runtime_hosts(self):
         baseline = {'selection': {'mode': 'affected'}, 'packages': [{'name': 'php-zts-cli'}]}
         profiles = harness['candidate_only_profiles'](baseline, {'incoming': [{'name': 'php-zts-new-extension'}]})
-        self.assertEqual(profiles, [{'id': 'fresh-php-zts-new-extension', 'fresh_package': 'php-zts-new-extension',
+        self.assertEqual(profiles, [{'id': 'fresh-php-zts-new-extension', 'fresh_packages': ['php-zts-new-extension'],
                                     'packages': ['frankenphp', 'php-zts-cli', 'php-zts-fpm', 'php-zts-new-extension']}])
 
     def test_scoped_library_profiles_keep_other_instrumentation_out(self):
@@ -513,8 +512,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
         covered = {name for profile in plan['profiles'] for name in profile['packages']}
         self.assertEqual(covered, {'php-zts-cli', 'php-zts-imagick', 'php-zts-xdebug', 'php-zts-pcov'})
         self.assertEqual(plan['profiles'][0]['packages'], ['php-zts-cli', 'php-zts-imagick'])
-        self.assertIn({'id': 'disabled-imagick', 'packages': ['php-zts-cli', 'php-zts-imagick'],
-                       'disabled_extension': 'imagick'}, plan['profiles'])
+        self.assertEqual(len(plan['profiles']), 3)
         self.assertNotIn('independent-php-zts-imagick', [p['id'] for p in plan['profiles']])
 
     def test_representative_baseline_uses_candidate_profile_coverage(self):
@@ -547,7 +545,7 @@ class MigrationUpgradeHarness(unittest.TestCase):
             'php-zts-grpc-debuginfo', 'php-zts-devel', 'frankenphp']]}
         self.assertEqual(harness['candidate_only_profiles'](baseline, inventory),
                          [{'id': 'fresh-php-zts-grpc', 'packages': ['php-zts-grpc'],
-                           'fresh_package': 'php-zts-grpc'}])
+                           'fresh_packages': ['php-zts-grpc']}])
         baseline['published_packages'] = [{'name': 'php-zts-grpc'}]
         self.assertEqual(harness['candidate_only_profiles'](baseline, inventory), [])
         baseline.pop('published_packages')
@@ -560,24 +558,80 @@ class MigrationUpgradeHarness(unittest.TestCase):
         inventory = {'old': [package], 'incoming': [package], 'incoming_changes': ['php-zts-ssh2']}
         self.assertEqual(harness['candidate_only_profiles'](baseline, inventory),
                          [{'id': 'fresh-php-zts-ssh2', 'packages': ['php-zts-ssh2'],
-                           'fresh_package': 'php-zts-ssh2'}])
+                           'fresh_packages': ['php-zts-ssh2']}])
         inventory['incoming_changes'] = []
         self.assertEqual(harness['candidate_only_profiles'](baseline, inventory), [])
+
+    def test_fresh_extensions_share_one_install_with_instrumentation_isolated(self):
+        extensions = ['php-zts-' + name for name in ('grpc', 'ssh2', 'imagick', 'igbinary', 'redis')]
+        instrumentation = ['php-zts-pcov', 'php-zts-xdebug']
+        baseline = {'selection': {'mode': 'affected'}, 'packages': [{'name': 'php-zts-cli'}]}
+        profiles = harness['candidate_only_profiles'](baseline, {
+            'incoming': [{'name': name} for name in extensions + instrumentation]})
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]['fresh_packages'], sorted(extensions))
+        self.assertEqual(profiles[0]['packages'], sorted(extensions + ['php-zts-cli', 'php-zts-fpm', 'frankenphp']))
+        self.assertEqual([profile['fresh_packages'] for profile in profiles[1:]], [[name] for name in instrumentation])
+
+    def test_grouped_fresh_install_checks_every_version_loading_and_unchanged_upgrade(self):
+        targets = ['php-zts-grpc', 'php-zts-ssh2']
+        versions = {name: '1-r0' for name in targets + ['php-zts-cli', 'php-zts-curl', 'php-zts-fileinfo', 'php-zts-lib-zlib']}
+        for failure in (None, 'version', 'loading', 'upgrade'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'inventory.json').write_text(json.dumps({'old': [],
+                    'incoming': [{'name': name} for name in targets],
+                    'new': [{'name': name, 'version': version} for name, version in versions.items()]}))
+                (root / 'selected.json').write_text(json.dumps(targets))
+                args = harness['options'](SimpleNamespace(type='apk', php='8.6', arch='x86_64', runtime='alpine',
+                    inside='fresh', fresh_packages=targets))
+                packages = dict(versions)
+                if failure == 'version':
+                    packages[targets[-1]] = '0-r0'
+                loads, upgrades = [], []
+                def mapped(path):
+                    return root / Path(path).name if str(path).startswith('/spp/') else Path(path)
+                def smokes(php, names, kind):
+                    loads.append(set(names))
+                    if failure == 'loading':
+                        raise RuntimeError('module failed to load')
+                    return {}
+                def upgrade(kind):
+                    upgrades.append(kind)
+                    if failure == 'upgrade':
+                        packages[targets[-1]] = '2-r0'
+                with patch.dict(scope, {'Path': mapped, 'configure_client': lambda *a, **k: ('config', 'key'),
+                        'run': lambda *a, **k: subprocess.CompletedProcess([], 0, '/usr/lib/php-zts/lib/libz.so', ''),
+                        'installed': lambda *_: dict(packages), 'ordinary_upgrade': upgrade,
+                        'php_probe': lambda: {'version': '8.6.0RC7', 'curl': True, 'fileinfo': True},
+                        'sha256': lambda *_: 'fixed', 'module_state': lambda *_: None}), \
+                        patch.object(scope['runpy'], 'run_path', return_value={'sapi_checks': smokes}), \
+                        patch('sys.stdout', new_callable=io.StringIO) as output:
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, {'version': targets[-1], 'loading': 'module failed', 'upgrade': 'unchanged upgrade'}[failure]):
+                            harness['inside'](args)
+                    else:
+                        harness['inside'](args)
+                        result = json.loads(output.getvalue().split('SPP_MIGRATION_RESULT=')[-1])
+                        self.assertTrue(result['ok'])
+                        self.assertEqual(result['physical_packages'], targets)
+                        self.assertEqual(loads, [set(versions)])
+                        self.assertEqual(upgrades, ['apk'])
 
     def test_candidate_only_profile_is_appended_to_shared_mirror_suite_and_counted_separately(self):
         calls = []
         class Shared(PreparedStub):
             inventory = {'incoming': [{'name': 'php-zts-grpc'}]}
         def check(args, prepared=None):
-            calls.append((args.profile, args.fresh_package))
-            return {'ok': True, 'applicable': bool(args.fresh_package),
-                    'coverage': 'fresh_candidate_only' if args.fresh_package else 'published_upgrade'}
+            calls.append((args.profile, args.fresh_packages))
+            return {'ok': True, 'applicable': bool(args.fresh_packages),
+                    'coverage': 'fresh_candidate_only' if args.fresh_packages else 'published_upgrade'}
         args = SimpleNamespace(tls=False, services=False, library_only=False, partial_consumers=True)
         profiles = {'profiles': [{'id': 'common', 'packages': ['php-zts-cli']}]}
         with patch.dict(scope, {'PreparedMirror': Shared, 'cell': check}), patch('sys.stdout', new_callable=io.StringIO):
             result = harness['suite'](args, {'packages': [{'name': 'php-zts-cli'}]}, profiles)
         self.assertTrue(result['ok'])
-        self.assertEqual(calls, [('php-zts-cli', None), ('php-zts-grpc', 'php-zts-grpc')])
+        self.assertEqual(calls, [('php-zts-cli', None), ('php-zts-grpc', ['php-zts-grpc'])])
         self.assertEqual(result['fresh_install_packages'], ['php-zts-grpc'])
         self.assertEqual(result['cells'][1]['coverage'], 'fresh_candidate_only')
         self.assertEqual(len(profiles['profiles']), 1)
@@ -704,50 +758,22 @@ class MigrationUpgradeHarness(unittest.TestCase):
             self.assertEqual(calls, ['php-zts-cli'])
             self.assertTrue(json.loads(report.read_text())['interrupted'])
 
-    def test_verified_unchanged_partial_candidates_complete_without_claiming_an_update(self):
+    def test_passing_native_checks_accept_unchanged_packages_and_failures_still_block(self):
         baseline = {'selection': {'profile': 'all', 'complete': True},
-                    'packages': [{'name': name} for name in ('php-zts-cli', 'php-zts-fpm', 'frankenphp', 'php-zts-xdebug')]}
-        class Unchanged(PreparedStub):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.inventory = {'incoming_changes': ['frankenphp-debuginfo', 'php-zts-xdebug-debuginfo'], 'incoming': [
-                    {'name': name + suffix, 'version': '1.2.3-r2'} for name in ('frankenphp', 'php-zts-xdebug')
-                    for suffix in ('', '-debuginfo')]}
-                if defect == 'mismatched-debug':
-                    self.inventory['incoming'][-1]['version'] = '1.2.3-r3'
-                if defect == 'changed-runtime':
-                    self.inventory['incoming_changes'].append('php-zts-xdebug')
-        for defect in (None, 'wrong-version', 'missing-coverage', 'second-upgrade', 'mismatched-debug', 'changed-runtime'):
-            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                    'packages': [{'name': name} for name in ('php-zts-cli', 'php-zts-fpm', 'php-zts-xdebug')]}
+        for failed_profile in (None, 'php-zts-cli,php-zts-fpm', 'php-zts-cli,php-zts-xdebug'):
+            with self.subTest(failed=failed_profile), tempfile.TemporaryDirectory() as directory:
                 report = Path(directory) / 'report.json'
                 arguments = ['migration-upgrade-containers.py', '--type', 'apk', '--php', '8.5', '--arch', 'x86_64',
                     '--baseline-dir', '/unused', '--artifacts', '/unused', '--profile', 'all', '--partial-consumers', '--report', str(report)]
                 def checked(args, prepared=None):
-                    versions = {name: '1.2.3-r2' for name in args.profile.split(',')}
-                    after = dict(versions)
-                    if defect == 'wrong-version':
-                        after['php-zts-xdebug'] = '1.2.3-r1'
-                    if defect == 'missing-coverage':
-                        versions.pop('php-zts-xdebug', None)
-                    return {'ok': True, 'applicable': False, 'second_upgrade_noop': defect != 'second-upgrade',
-                            'actual_old_versions': versions, 'new_versions': after}
-                with patch.dict(scope, {'load_baseline': lambda *args: baseline, 'cell': checked, 'PreparedMirror': Unchanged}), \
+                    return {'ok': args.profile != failed_profile, 'applicable': False}
+                with patch.dict(scope, {'load_baseline': lambda *args: baseline, 'cell': checked, 'PreparedMirror': PreparedStub}), \
                         patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
-                    self.assertEqual(harness['main'](), 0 if defect is None else 1)
+                    self.assertEqual(harness['main'](), 0 if failed_profile is None else 1)
                 result = json.loads(report.read_text())
                 self.assertFalse(result['applicable'])
-                self.assertEqual(result['unchanged_candidates_validated'], defect is None)
-
-    def test_unaffected_profiles_do_not_claim_a_successful_partial_update(self):
-        baseline = {'selection': {'profile': 'all', 'complete': True}, 'packages': [{'name': 'php-zts-cli'}]}
-        with tempfile.TemporaryDirectory(prefix='spp-migration-unaffected-') as directory:
-            report = Path(directory) / 'report.json'
-            arguments = ['migration-upgrade-containers.py', '--type', 'rpm', '--php', '8.6', '--arch', 'x86_64',
-                         '--baseline-dir', '/unused', '--artifacts', '/unused', '--profile', 'all', '--partial-consumers', '--report', str(report)]
-            with patch.dict(scope, {'load_baseline': lambda *args: baseline,
-                                   'cell': lambda *args, **kwargs: {'ok': True, 'applicable': False}, 'PreparedMirror': PreparedStub}), patch.object(sys, 'argv', arguments), patch('sys.stdout', new_callable=io.StringIO):
-                self.assertEqual(harness['main'](), 1)
-            self.assertFalse(json.loads(report.read_text())['applicable'])
+                self.assertEqual(result['ok'], failed_profile is None)
 
     def test_successful_package_manager_exit_cannot_hide_held_packages(self):
         before = {'php-zts-cli': '1-7.el8', 'php-zts-imagick': '1-4.el8', 'unrelated-os-package': '1'}

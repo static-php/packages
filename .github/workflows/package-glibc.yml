@@ -1,0 +1,329 @@
+name: Package shared EL8 payloads
+run-name: Package ${{ inputs.format }} from EL8 build ${{ inputs.build_run_id }}
+
+on:
+    workflow_dispatch:
+        inputs:
+            format:
+                type: choice
+                options: [rpm, deb]
+                required: true
+                description: Native package format
+            build_run_id:
+                type: string
+                required: true
+                description: Completed shared EL8 producer run
+            php_versions:
+                type: string
+                default: ""
+                description: Optional PHP stream selection
+            mode:
+                type: string
+                default: incremental
+                description: Recorded build request mode
+            iteration:
+                type: string
+                default: ""
+                description: Optional package revision override
+            bump:
+                type: boolean
+                default: false
+                description: Raise selected package revisions
+            publish:
+                type: boolean
+                default: false
+                description: Publish validated packages
+
+permissions:
+    contents: read
+    packages: read
+    actions: read
+
+jobs:
+    prepare:
+        runs-on: ubuntu-24.04
+        outputs:
+            libraries-matrix: ${{ steps.select.outputs.libraries-matrix }}
+            libraries-any: ${{ steps.select.outputs.libraries-any }}
+            packages-matrix: ${{ steps.select.outputs.packages-matrix }}
+            packages-any: ${{ steps.select.outputs.packages-any }}
+            publish-matrix: ${{ steps.select.outputs.publish-matrix }}
+            publish-any: ${{ steps.select.outputs.publish-any }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Select successful producer outputs
+                id: select
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                    BUILD_RUN_ID: ${{ inputs.build_run_id }}
+                    TYPE: ${{ inputs.format }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                    DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+                run: python3 .github/actions/shared-libraries/format-packages.py >> "$GITHUB_OUTPUT"
+
+    libraries:
+        name: Package libraries (${{ matrix.type }} ${{ matrix.target }})
+        needs: prepare
+        if: ${{ !cancelled() && needs.prepare.outputs.libraries-any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        strategy:
+            fail-fast: false
+            max-parallel: 2
+            matrix: ${{ fromJson(needs.prepare.outputs.libraries-matrix) }}
+        env:
+            IMAGE: ${{ matrix.image }}
+            TYPE: ${{ matrix.type }}
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            SOURCE_RUN_ID: ${{ matrix.source_run_id }}
+            PUBLISH: ${{ inputs.publish }}
+            BUMP: ${{ inputs.bump }}
+            ITERATION: ${{ inputs.iteration }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            GITHUB_TOKEN: ${{ github.token }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Download recorded SDK metadata
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.build_run_id }}
+                    artifact-ids: ${{ matrix.metadata-artifact }}
+                    merge-multiple: true
+                    path: stage
+            -   name: Download SDK only for selected library packages
+                if: matrix.libraries-required
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.build_run_id }}
+                    artifact-ids: ${{ matrix.sdk-artifact }}
+                    merge-multiple: true
+            -   name: Package retained library binaries
+                if: matrix.libraries-required
+                env:
+                    PACKAGING_IMAGE: ${{ matrix.package-image }}
+                    ACTOR: ${{ github.actor }}
+                run: |
+                    printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+                    zstd -dc buildroot.tar.zst | tar -xpf -
+                    docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
+                        -e IMAGE -e TYPE -e TARGET -e MATRIX_ARCH -e SOURCE_RUN_ID -e PUBLISH -e BUMP -e ITERATION \
+                        -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
+                        "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-libraries
+            -   name: Reuse unchanged library metadata
+                if: matrix.libraries-required != true
+                run: python3 .github/actions/shared-libraries/glibc.py libraries
+            -   name: Stage native library packages and plan
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-libs-${{ matrix.type }}-${{ matrix.target }}
+                    path: stage/${{ matrix.type }}
+                    retention-days: 7
+            -   name: Stage target plan
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: shared-plans-glibc-${{ matrix.target }}
+                    path: |
+                        stage/shared-library-plan.json
+                        stage/target.json
+                    retention-days: 7
+
+    ready:
+        name: Select successful library targets
+        needs: [prepare, libraries]
+        if: ${{ !cancelled() && needs.prepare.outputs.libraries-any == 'true' }}
+        runs-on: ubuntu-24.04
+        permissions:
+            actions: read
+        outputs:
+            packages-matrix: ${{ steps.filter.outputs.packages-matrix }}
+            packages-any: ${{ steps.filter.outputs.packages-any }}
+            publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
+            publish-any: ${{ steps.filter.outputs.publish-any }}
+        steps:
+            -   name: Filter successful native library jobs
+                id: filter
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                    PACKAGES_MATRIX: ${{ needs.prepare.outputs.packages-matrix }}
+                    PUBLISH_MATRIX: ${{ needs.prepare.outputs.publish-matrix }}
+                run: |
+                    gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+                        --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last' > successful-jobs
+                    python3 - <<'PY' >> "$GITHUB_OUTPUT"
+                    import json, os, re
+                    from pathlib import Path
+                    targets = {match[1] for name in Path('successful-jobs').read_text().splitlines()
+                               if (match := re.fullmatch(r'Package libraries \((?:rpm|deb) ([^)]+)\)', name))}
+                    for kind in ('packages', 'publish'):
+                        values = [value for value in json.loads(os.environ[kind.upper() + '_MATRIX'])['include'] if value['target'] in targets]
+                        print(kind + '-matrix=' + json.dumps({'include': values}))
+                        print(kind + '-any=' + str(bool(values)).lower())
+                    PY
+
+    package:
+        name: Package and upgrade (${{ matrix.type }} ${{ matrix.target }} php${{ matrix.php-version }})
+        needs: [prepare, ready]
+        if: ${{ !cancelled() && needs.ready.outputs.packages-any == 'true' }}
+        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
+        permissions:
+            contents: read
+            packages: read
+            actions: read
+        strategy:
+            fail-fast: false
+            max-parallel: 4
+            matrix: ${{ fromJson(needs.ready.outputs.packages-matrix) }}
+        env:
+            IMAGE: ${{ matrix.image }}
+            PACKAGING_IMAGE: ${{ matrix.package-image }}
+            SOURCE_RUN_ID: ${{ matrix.source_run_id }}
+            TYPE: ${{ matrix.type }}
+            TARGET: ${{ matrix.target }}
+            MATRIX_ARCH: ${{ matrix.arch }}
+            PHPV: ${{ matrix.php-version }}
+            PACKAGES: ${{ matrix.packages }}
+            TLS_CHECKS: ${{ matrix.tls-checks }}
+            MODE: ${{ inputs.mode || 'full' }}
+            ITERATION: ${{ inputs.iteration || '' }}
+            BUMP: ${{ inputs.bump || false }}
+            PUBLISH: ${{ inputs.publish || false }}
+            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Log in to packaging registry
+                env:
+                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    ACTOR: ${{ github.actor }}
+                run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+            -   name: Download shared SDK metadata
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.build_run_id }}
+                    artifact-ids: ${{ matrix.metadata-artifact }}
+                    merge-multiple: true
+                    path: stage
+            -   name: Download common PHP payload
+                if: matrix.library-only != true
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    github-token: ${{ github.token }}
+                    run-id: ${{ inputs.build_run_id }}
+                    artifact-ids: ${{ matrix.payload-artifact }}
+                    merge-multiple: true
+            -   name: Extract sealed common payload
+                if: matrix.library-only != true
+                run: |
+                    zstd -dc php-payload.tar.zst | tar -xpf -
+                    if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
+                        && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
+                        echo 'PACKAGES=' >> "$GITHUB_ENV"
+                        echo 'TLS_CHECKS=true' >> "$GITHUB_ENV"
+                    fi
+            -   name: Download matching library packages
+                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                with:
+                    name: shared-libs-${{ matrix.type }}-${{ matrix.target }}
+                    path: library-stage
+            -   name: Copy matching library archives
+                run: |
+                    python3 .github/actions/shared-libraries/workflow.py stage-libraries --source library-stage \
+                        --destination "dist/$TYPE" --type "$TYPE" --php-stream "$PHPV" --manifest-output "stage/$TYPE/shared-libraries.json"
+            -   name: Prepare native baseline comparison tools
+                run: |
+                    sudo apt-get update
+                    sudo apt-get install -y python3-rpm rpm2cpio zstd
+            -   name: Freeze actual published baseline
+                env:
+                    LIBRARY_ONLY: ${{ matrix.library-only }}
+                uses: ./.github/actions/native-baseline
+            -   name: Package sealed payload without compilation
+                if: matrix.library-only != true
+                run: |
+                    docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
+                        -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \
+                        -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
+                        "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package
+            -   name: Verify ordinary package upgrade
+                env:
+                    LIBRARY_ONLY: ${{ matrix.library-only }}
+                run: |
+                    args=()
+                    if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
+                    profile=auto
+                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
+                    else
+                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/$TYPE/shared-library-plan.json" --php-stream "$PHPV")
+                        if [[ "$mode" == shared && -n "$PACKAGES" ]]; then args+=(--partial-consumers); fi
+                    fi
+                    python3 tests/migration-upgrade-containers.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts "dist/$TYPE" --baseline-dir stage/published-baseline --report "dist/$TYPE/native-upgrade-receipt.json" --profile "$profile" "${args[@]}"
+                    native_args=()
+                    if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
+                    python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type "$TYPE" --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report "dist/$TYPE/native-upgrade-receipt.json" --plan "stage/$TYPE/shared-library-plan.json" --packages "dist/$TYPE" --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output "dist/$TYPE/shared-library-upgrade-receipt.json" "${native_args[@]}"
+            -   name: Stage validated consumer packages
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    overwrite: true
+                    name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-${{ matrix.type }}-${{ matrix.target }}-php${{ matrix.php-version }}
+                    path: dist/${{ matrix.type }}
+                    retention-days: 7
+            -   name: Stage failed validation receipt
+                if: failure()
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                with:
+                    name: failed-upgrade-${{ matrix.type }}-${{ matrix.target }}-php${{ matrix.php-version }}
+                    path: |
+                        dist/${{ matrix.type }}/native-upgrade-receipt.json
+                        stage/published-baseline/baseline.json
+                    retention-days: 1
+
+    publish:
+        name: Publish (${{ matrix.type }} ${{ matrix.target }})
+        needs: [prepare, ready, package]
+        if: ${{ !cancelled() && inputs.publish == true && needs.ready.outputs.publish-any == 'true' }}
+        permissions:
+            contents: write
+            packages: read
+            actions: read
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJson(needs.ready.outputs.publish-matrix) }}
+        uses: ./.github/workflows/publish-package-cohort.yml
+        with:
+            format: ${{ matrix.type }}
+            target: ${{ matrix.target }}
+            arch: ${{ matrix.arch }}
+            image: ${{ matrix.image }}
+            package-image-digest: ${{ matrix.package-image-digest }}
+            source-run-id: ${{ matrix.source_run_id }}
+        secrets: inherit
+
+    mirror:
+        name: Queue secondary mirror
+        needs: [prepare, publish]
+        if: ${{ !cancelled() && inputs.publish == true && inputs.format == 'deb' && needs.prepare.outputs.publish-any == 'true' }}
+        runs-on: ubuntu-24.04
+        continue-on-error: true
+        permissions:
+            actions: write
+        steps:
+            -   name: Queue mirror independently of the producer lock
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: |
+                    gh workflow run publish-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+                        -f format=deb -f build_run_id="$GITHUB_RUN_ID" -f mirror_run_id="$GITHUB_RUN_ID"

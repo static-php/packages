@@ -17,7 +17,7 @@ from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, ver
 
 
 WORKFLOWS = {
-    'glibc': {'.github/workflows/build-rpm-modular-packages.yml', '.github/workflows/build-deb-forgejo.yml'},
+    'glibc': {'.github/workflows/build-rpm-modular-packages.yml', '.github/workflows/build-deb-forgejo.yml', '.github/workflows/package-glibc.yml'},
     'apk': {'.github/workflows/build-apk-forgejo.yml'},
 }
 
@@ -185,6 +185,7 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
         scopes = [scope for scope in scopes if (','.join(scope) if scope else 'libraries') in published]
     with tempfile.TemporaryDirectory(prefix='spp-signed-rpms-') as signed:
         for scope in scopes:
+            uploading = False
             label = ','.join(scope) if scope else 'libraries'
             environment = dict(os.environ, PUBLICATION_PHP_STREAMS=','.join(scope or []), SIGNED_RPM_CACHE=signed, PYTHONUNBUFFERED='1')
             log = Path('log') / (f'publication-{kind}-{target}-php{label}' + ('-mirror.log' if mirror else '.log'))
@@ -224,10 +225,17 @@ def publish_available(source, kind, target, mirror=False, selected_php='all'):
                     if kind == 'rpm':
                         run('bash', '.github/actions/shared-libraries/sign-rpm.sh')
                     run('bash', '.github/actions/shared-libraries/run.sh', 'publish')
+                    uploading = True
                     run('bash', '.github/actions/shared-libraries/run.sh', 'publish-rpm' if kind == 'rpm' else 'upload-1')
+                    run('bash', '.github/actions/shared-libraries/run.sh', 'record-repository')
                     results.append((label, 'published'))
                     outcomes.write_text(json.dumps([stream for stream, state in results if state == 'published']) + '\n')
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+                if uploading and not mirror:
+                    try:
+                        run('bash', '.github/actions/shared-libraries/run.sh', 'invalidate-repository')
+                    except (RuntimeError, OSError, subprocess.CalledProcessError) as invalidation:
+                        print(f'::warning::Could not invalidate repository state: {invalidation}', flush=True)
                 results.append((label, 'failed: ' + str(error)))
                 level = 'warning' if mirror else 'error'
                 print(f'::{level}::{kind} PHP {label}: {error}; continuing with other streams', flush=True)

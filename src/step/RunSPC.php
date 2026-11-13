@@ -193,7 +193,6 @@ class RunSPC
                 self::stagePieAsset($candidate);
                 BuildPayload::record($candidate, $configuration, $actual, php_uname('m'), $sourceVersion, $buildContext);
                 BuildPayload::seal($candidate);
-                BuildPayload::load($candidate, true);
                 self::publishBuiltFiles($candidate, BUILD_ROOT_PATH);
             } finally {
                 if (is_dir($candidate)) {

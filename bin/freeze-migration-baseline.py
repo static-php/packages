@@ -91,6 +91,8 @@ def rpm_index(base, architecture, php):
     metadata = {'repomd.xml': repomd}
     primary = None
     for entry in root.findall('r:data', ns):
+        if entry.get('type') != 'primary':
+            continue
         href = entry.find('r:location', ns).get('href')
         content = fetch(urllib.parse.urljoin(base, href))
         checksum = entry.find('r:checksum', ns)
@@ -312,7 +314,12 @@ def published_inventory(args):
     return base, inventory, metadata, keys
 
 
-def snapshot_inventory(args):
+def snapshot_inventory(args, refresh=False):
+    if not refresh:
+        state = runpy.run_path(str(Path(__file__).resolve().parents[1] / '.github/actions/shared-libraries/glibc.py'))['repository_state']()
+        cached = state.snapshot(args.type, args.arch, args.php)
+        if cached is not None:
+            return cached
     base, inventory, metadata, keys = published_inventory(args)
     return {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
             'base': base, 'inventory': inventory,

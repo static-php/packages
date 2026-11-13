@@ -83,17 +83,23 @@ class Repackage(unittest.TestCase):
         result = self.inspection(plan={'php_requests': {'8.4': {'full': False, 'packages': ['imagick']}}})
         self.assertEqual(result['matrix']['include'][0]['repackage_payload_artifacts'], {'8.4': 4})
 
+    def test_unchanged_retained_payload_uses_sdk_metadata_without_a_binary_archive(self):
+        self.target['sdk_metadata_only'] = True
+        result = self.inspection(plan={'php_requests': {'8.4': {'packages': ['ssh2']}}, 'libraries': []})
+        self.assertEqual(result['matrix']['include'][0]['repackage_sdk_artifact'], '')
+
     def library_repackaging(self, partial=False):
         sdk = self.root / 'buildroot'
         self.write(sdk / 'build-payload.json', {'kind': 'sdk', 'state': 'sealed'})
         self.write(sdk / 'shared-libraries.json', self.manifest)
         for kind in ('rpm', 'deb'):
+            self.write(self.stage / 'common' / kind / 'shared-libraries.json', self.manifest)
             self.write(self.stage / 'common' / kind / 'shared-library-plan.json',
                        {'php_requests': {'8.4': {'full': False, 'packages': ['imagick']}}, 'libraries': ['fixture']}
-                       if partial else {'original': kind})
+                       if partial else {'php_requests': {'8.4': {'full': True}}, 'libraries': ['fixture']})
         calls = []
-        def baseline(kind, directory, consumers=False):
-            self.assertTrue(consumers)
+        def baseline(kind, directory, consumers=False, libraries=None):
+            self.assertFalse(consumers)
             value = copy.deepcopy(self.manifest)
             value['libraries']['fixture']['published_version'] = '1.0-7'
             if partial:
@@ -113,7 +119,7 @@ class Repackage(unittest.TestCase):
                 patch.object(repackage.glibc, 'capture_native_inventories'), \
                 patch.object(repackage.glibc, 'package_libraries') as package:
             repackage.libraries()
-        self.assertEqual(package.call_count, 2)
+        package.assert_not_called()
         plan = json.loads((self.stage / 'common/shared-library-plan.json').read_text())
         self.assertEqual(plan['libraries'], ['fixture'])
         self.assertEqual(plan['php_requests']['8.4']['full'], not partial)
@@ -127,6 +133,28 @@ class Repackage(unittest.TestCase):
 
     def test_partial_repackaging_retains_only_the_recorded_php_requests(self):
         self.library_repackaging(partial=True)
+
+    def test_php_revision_retry_does_not_select_unchanged_libraries_or_require_sdk_bytes(self):
+        common = self.stage / 'common'
+        self.write(common / 'sdk-shared-libraries.json', self.manifest)
+        for kind in ('rpm', 'deb'):
+            self.write(common / kind / 'shared-library-plan.json', {'php_requests': {'8.4': {'full': True}}, 'libraries': []})
+            self.write(common / kind / 'shared-libraries.json', self.manifest)
+            baseline = copy.deepcopy(self.manifest)
+            baseline['libraries']['fixture']['published_version'] = '1.0-7'
+            self.write(common / kind / 'baseline/shared-libraries.json', baseline)
+        def run(arguments, **kwargs):
+            self.assertNotEqual(arguments[:2], ['php', 'bin/build-payload'])
+            subprocess.run([str(value) for value in arguments], check=True, cwd=ROOT)
+        with patch.object(repackage.glibc, 'run', run), patch.object(repackage.glibc, 'baseline') as baseline, \
+                patch.object(repackage.glibc, 'capture_native_inventories'), patch.object(repackage.glibc, 'package_libraries') as package:
+            repackage.libraries()
+        baseline.assert_not_called()
+        package.assert_not_called()
+        plan = json.loads((common / 'shared-library-plan.json').read_text())
+        self.assertEqual(plan['libraries'], [])
+        self.assertTrue(plan['php_requests']['8.4']['full'])
+        self.assertFalse(plan['php_requests']['8.4']['compile'])
 
     def payload_fixture(self):
         payload = self.root / 'build/8.4'

@@ -23,6 +23,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
         -e COMPILE -e COMPILE_PACKAGES -e ABI_REBUILD_LIBRARIES -e LIBRARY_ONLY -e EXPORT_PAYLOAD_CACHE \
         -e IMAGE -e SOURCE_RUN_ID -e CACHE_KEY -e ALMA \
         -e FORGEJO_PASSWORD -e GITHUB_TOKEN -e TARGET -e MATRIX_ARCH \
+        -e GITHUB_ACTIONS -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
         -e PUBLICATION_PHP_STREAMS -e TLS_CHECKS \
         "$IMAGE" bash .github/actions/shared-libraries/run.sh "$command"
 fi
@@ -57,10 +58,26 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
 fi
 
 case "$command" in
+    record-repository|invalidate-repository)
+        export REPOSITORY_STATE_ACTION="$command"
+        python3 - <<'PY'
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, '.github/actions/shared-libraries')
+import glibc
+state = glibc.repository_state()
+for stream in filter(None, (os.environ.get('PUBLICATION_PHP_STREAMS') or '8.5').split(',')):
+    if os.environ['REPOSITORY_STATE_ACTION'] == 'invalidate-repository':
+        state.invalidate(os.environ['TYPE'], os.environ['MATRIX_ARCH'], stream)
+    else:
+        state.record_publication(Path('cohort'), os.environ['TYPE'], os.environ['TARGET'], stream)
+PY
+        ;;
     native-inventories)
         python3 .github/actions/shared-libraries/glibc.py native-inventories
         ;;
-    classify|glibc-classify|glibc-record|glibc-payload|glibc-package)
+    classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-libraries)
         git config --global --add safe.directory "$PWD"
         composer install --no-interaction --prefer-dist --no-progress
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"

@@ -711,7 +711,7 @@ def fixture_package(kind, directory, name, version, files, depends=(), provides=
                 (top / part).mkdir(parents=True)
             spec = top / 'SPECS' / 'fixture.spec'
             fields = [f'Name: {name}', f'Version: {version}', 'Release: 1', 'Summary: SPP local upgrade fixture',
-                      'License: MIT', 'BuildArch: x86_64', 'AutoReqProv: no', '%global debug_package %{nil}',
+                      'License: MIT', 'AutoReqProv: no', '%global debug_package %{nil}',
                       '%global _build_id_links none']
             fields += ['Requires: ' + x.replace(' (>= ', ' >= ').replace(')', '') for x in depends]
             fields += ['Provides: ' + x for x in provides]

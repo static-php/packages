@@ -182,6 +182,8 @@ class Publication(unittest.TestCase):
                         primary_summary = (root / 'summary').read_text()
                         self.assertIn('Cannot verify example: connection reset', primary_summary)
                         self.assertFalse(any(phase == 'upload-2' for _, phase in events))
+                        self.assertEqual([stream for stream, phase in events if phase == 'record-repository'], ['8.5', '8.6'])
+                        self.assertEqual([stream for stream, phase in events if phase == 'invalidate-repository'], ['8.4'])
                         if kind != 'rpm':
                             output.seek(0)
                             output.truncate()
@@ -310,7 +312,8 @@ class Publication(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(publication.publish_available(source, 'apk', 'arm64', selected_php='8.2'))
             verify.assert_called_once_with(source, library, 'apk', ['8.2'])
-            self.assertEqual([call.args[1]['PUBLICATION_PHP_STREAMS'] for call in run.call_args_list], ['8.2', '8.2'])
+            self.assertEqual([call.args[1]['PUBLICATION_PHP_STREAMS'] for call in run.call_args_list], ['8.2', '8.2', '8.2'])
+            self.assertEqual(run.call_args_list[-1].args[0][-1], 'record-repository')
             self.assertEqual(json.loads((self.plans / 'log/publication-apk-arm64.json').read_text()), ['8.2'])
         finally:
             os.chdir(previous)
@@ -473,7 +476,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(download['with']['run-id'], '${{ inputs.primary-run-id || github.run_id }}')
         declared = self.publisher[True]['workflow_call']['inputs']
         required = {name for name, value in declared.items() if value.get('required')}
-        for name in ['build-rpm-modular-packages.yml', 'build-apk-forgejo.yml', 'publish-packages.yml']:
+        for name in ['package-glibc.yml', 'build-apk-forgejo.yml', 'publish-packages.yml']:
             jobs = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']
             job = jobs['publish']
             mirror = jobs['mirror']
@@ -496,6 +499,8 @@ class WorkflowContracts(unittest.TestCase):
                 self.assertEqual(job['with']['build-run-id'], '${{ inputs.build_run_id }}')
                 self.assertEqual(job['with']['artifact-ids'], '${{ matrix.artifact-ids }}')
                 self.assertEqual(job['with']['source-run-id'], '${{ matrix.source-run-id }}')
+            elif name == 'package-glibc.yml':
+                self.assertEqual(job['with']['source-run-id'], '${{ matrix.source_run_id }}')
             else:
                 self.assertEqual(job['with']['source-run-id'], '${{ needs.setup-matrix.outputs.downloads-run-id }}')
             if name != 'build-apk-forgejo.yml':
@@ -508,7 +513,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(self.publisher['jobs']['publish-glibc']['steps'], self.publisher['jobs']['publish-apk']['steps'])
 
     def test_producers_queue_mirrors_without_holding_the_producer_lock(self):
-        for name, kind in [('build-rpm-modular-packages.yml', 'deb'), ('build-apk-forgejo.yml', 'apk')]:
+        for name, kind in [('package-glibc.yml', 'deb'), ('build-apk-forgejo.yml', 'apk')]:
             job = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']['mirror']
             step = job['steps'][0]
             self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')

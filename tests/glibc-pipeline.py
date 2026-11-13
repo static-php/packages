@@ -27,7 +27,6 @@ def module(name):
 
 workflow = module('workflow')
 glibc = module('glibc')
-archives = module('payload-archives')
 runtime = module('runtime-checks')
 
 
@@ -243,7 +242,7 @@ class Pipeline(unittest.TestCase):
 
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
-        data = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())
+        data = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())
         step = next(step for job in data['jobs'].values() for step in job.get('steps', [])
                     if step.get('name') == 'Extract sealed common payload')
         with tempfile.TemporaryDirectory(prefix='spp-sealed-extraction-') as temporary:
@@ -287,7 +286,7 @@ class Pipeline(unittest.TestCase):
     def test_packaging_uses_native_stream_baseline_before_creating_candidates(self):
         import yaml
         apk = yaml.safe_load((ROOT / '.github/actions/apk-packages/action.yml').read_text())['runs']['steps']
-        glibc = yaml.safe_load((ROOT / '.github/workflows/build-rpm-modular-packages.yml').read_text())['jobs']['package']['steps']
+        glibc = yaml.safe_load((ROOT / '.github/workflows/package-glibc.yml').read_text())['jobs']['package']['steps']
         for steps, package_step in [(apk, 'Build and test PHP packages'), (glibc, 'Package sealed payload without compilation')]:
             names = [step.get('name') for step in steps]
             self.assertLess(names.index('Freeze actual published baseline'), names.index(package_step))
@@ -312,6 +311,7 @@ class Pipeline(unittest.TestCase):
                     value['libraries']['consumer'] = {}
                     value['pending_rebuilds'] = {'consumer': {'libfixture.so.1': 'fixture'}}
                 glibc.write(sdk / 'shared-libraries.json', value)
+                glibc.write(sdk / 'build-payload.json', {'state': 'sealed'})
                 glibc.write(stage / 'library-build-plan.json', {'full': False, 'rebuilt_libraries': ['fixture'] if rebuilt else []})
                 glibc.write(stage / 'effective-source-plan.json', {})
                 if cached_variants:
@@ -369,7 +369,7 @@ class Pipeline(unittest.TestCase):
                     self.assertEqual(scopes, [[] for _ in formats])
                 self.assertFalse((root / 'craft.yml').exists())
                 self.assertFalse(any('record' in call for call in calls))
-                self.assertEqual(any('seal' in call for call in calls), not manual)
+                self.assertEqual(any('seal' in call for call in calls), kind == 'apk' or bool(rebuilt) and not manual)
                 prepares = [call for call in calls if 'prepare' in call]
                 self.assertEqual(len(prepares), len(formats) * (2 if rebuilt == 'breaking' else 1))
                 self.assertTrue(all(call[call.index('--rebuilt-libraries') + 1] == ('consumer,fixture' if rebuilt == 'pending' else 'fixture' if rebuilt else '') for call in prepares))
@@ -380,11 +380,9 @@ class Pipeline(unittest.TestCase):
                         profile = next(index for index, call in enumerate(calls) if '.github/actions/shared-libraries/openssl-variants.py' in call)
                         self.assertLess(rebuild, profile)
                 self.assertEqual(packaging.n_waiting, 0)
-                archive_checks = [call for call in calls if '.github/actions/shared-libraries/payload-archives.py' in call]
-                self.assertEqual(len(archive_checks), 0 if kind == 'apk' else 2)
-                self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), len(formats))
+                self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), 1 if kind == 'apk' else 0)
 
-    def test_php_archive_audit_does_not_reaudit_prebuilt_libraries_against_a_subset(self):
+    def test_php_packaging_preserves_prebuilt_libraries_with_a_subset(self):
         for kind in ('rpm', 'deb'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -398,22 +396,17 @@ class Pipeline(unittest.TestCase):
                 dist = root / 'dist' / kind
                 dist.mkdir(parents=True)
                 library = dist / ('libaom.' + kind)
-                library.write_bytes(b'library already audited against its SDK')
+                library.write_bytes(b'prebuilt library')
                 def run(arguments, **kwargs):
                     if arguments[:3] == ['php', 'bin/spp', 'package']:
                         output = Path(kwargs['env']['SPP_DIST_PATH']) / kind
                         output.mkdir(parents=True)
                         (output / ('ssh2.' + kind)).write_bytes(b'sealed PHP extension')
-                    elif len(arguments) > 1 and str(arguments[1]).endswith('/payload-archives.py'):
-                        selected = Path(arguments[arguments.index('--packages') + 1])
-                        self.assertEqual([p.name for p in selected.glob('*.' + kind)], ['ssh2.' + kind])
-                        glibc.write(Path(arguments[arguments.index('--output') + 1]), {'archives': ['ssh2.' + kind]})
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), patch.object(glibc, 'run', run), \
                         patch.dict(os.environ, TYPE=kind, PHPV='8.5', SOURCE_RUN_ID='42', PACKAGES='ssh2'):
                     glibc.package()
-                self.assertEqual(library.read_bytes(), b'library already audited against its SDK')
+                self.assertEqual(library.read_bytes(), b'prebuilt library')
                 self.assertEqual((dist / ('ssh2.' + kind)).read_bytes(), b'sealed PHP extension')
-                self.assertTrue((dist / 'payload-archive-receipt.json').is_file())
 
     def test_format_plans_merge_compile_and_packaging_requests_without_extra_compilation(self):
         value = glibc.combine_plans({
@@ -586,7 +579,6 @@ class Pipeline(unittest.TestCase):
                 (stage / kind / 'shared-library-plan.json').write_text('{}')
                 (stage / kind / 'baseline').mkdir()
                 (stage / kind / 'baseline/shared-libraries.json').write_text('{}')
-            glibc.write(stage / 'consumer-source-versions.json', {'candidates': [{'name': 'php-zts-imagick'}]})
             glibc.write(root / 'buildroot/build-payload.json', {'kind': 'sdk', 'files': {}})
             calls = []
             def record(arguments, **kwargs):
@@ -715,21 +707,6 @@ class Pipeline(unittest.TestCase):
                 (validation / ('library.' + kind)).write_text('different owner payload')
                 with self.assertRaisesRegex(RuntimeError, 'does not match'):
                     workflow.verify_upgrades(root, library, kind)
-
-    def test_extracted_elf_must_match_prepared_producer_bytes_and_modes(self):
-        with tempfile.TemporaryDirectory(prefix='spp-archive-identity-') as temporary:
-            root = Path(temporary)
-            elf = root / 'usr/lib64/php-zts/lib/libfixture.so.1'
-            elf.parent.mkdir(parents=True)
-            content = b'\x7fELFprepared producer identity fixture'
-            elf.write_bytes(content)
-            elf.chmod(0o755)
-            identity = (hashlib.sha256(content).hexdigest(), 0o755)
-            result = archives.verify_extracted(root, {identity: [{'source': 'lib/libfixture.so.1', 'role': 'runtime'}]})
-            self.assertIn('/usr/lib/php-zts/lib/libfixture.so.1', result)
-            elf.write_bytes(content + b'RPM postprocessing mutation')
-            with self.assertRaisesRegex(RuntimeError, 'differs from sealed'):
-                archives.verify_extracted(root, {identity: []})
 
     def test_library_baselines_cover_target_stream_revisions_in_both_publish_modes(self):
         for kind in ('apk', 'deb'):

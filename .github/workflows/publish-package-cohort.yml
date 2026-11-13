@@ -46,7 +46,7 @@ on:
                 default: ""
 
 permissions:
-    contents: read
+    contents: write
     packages: read
     actions: read
 

@@ -47,11 +47,15 @@ def inspect(run_id, architectures, streams):
                 selection = plan.get('format_selection', {}).get(kind, plan)
                 if any(not (selection.get('php_requests', {}).get(stream, {}).get('full') or selection.get('php_requests', {}).get(stream, {}).get('packages')) for stream in selected_php):
                     raise RuntimeError('Repackaging requires recorded PHP selections: ' + target_name)
-            required = ['shared-sdk-glibc-' + target_name, 'shared-sdk-buildroot-glibc-' + target_name]
+            required = ['shared-sdk-glibc-' + target_name]
+            sdk_name = 'shared-sdk-buildroot-glibc-' + target_name
+            sdk_required = bool(plan.get('libraries')) or not target.get('sdk_metadata_only')
+            if sdk_required:
+                required.append(sdk_name)
             required += ['shared-payload-glibc-' + target_name + '-php' + stream for stream in selected_php]
             if any(name not in available for name in required):
                 raise RuntimeError('Required sealed SDK or PHP payload is missing or expired: ' + target_name)
-            target.update(repackage_sdk_artifact=available[required[1]],
+            target.update(repackage_sdk_artifact=available[sdk_name] if sdk_required else '',
                           repackage_metadata_artifact=available[required[0]],
                           repackage_payload_artifacts={stream: available['shared-payload-glibc-' + target_name + '-php' + stream]
                                                        for stream in selected_php})
@@ -72,31 +76,39 @@ def packaging_requests(plan):
 def libraries():
     root, stage = glibc.ROOT, glibc.STAGE
     sdk = root / 'buildroot'
-    glibc.run(['php', 'bin/build-payload', 'verify', '--root', sdk])
-    record = glibc.read(sdk / 'build-payload.json')
-    if record.get('kind') != 'sdk' or record.get('state') != 'sealed' or record.get('packaging_selection'):
-        raise RuntimeError('Repackaging requires a complete sealed library SDK')
     common = stage / 'common'
+    if (sdk / 'build-payload.json').is_file():
+        glibc.run(['php', 'bin/build-payload', 'verify', '--root', sdk])
+        record = glibc.read(sdk / 'build-payload.json')
+        if record.get('kind') != 'sdk' or record.get('state') != 'sealed' or record.get('packaging_selection'):
+            raise RuntimeError('Repackaging requires a complete sealed library SDK')
+        sdk_manifest = glibc.read(sdk / 'shared-libraries.json')
+    else:
+        if any(glibc.read(common / kind / 'shared-library-plan.json').get('libraries') for kind in glibc.FORMATS):
+            raise RuntimeError('Selected library packages require the retained SDK')
+        sdk_manifest = glibc.read(common / 'sdk-shared-libraries.json')
     retained = common / 'repackage'
-    glibc.write(retained / 'shared-libraries.json', glibc.read(sdk / 'shared-libraries.json'))
+    glibc.write(retained / 'shared-libraries.json', sdk_manifest)
     plans = {}
     for kind in glibc.FORMATS:
         directory = stage / kind
         directory.mkdir(exist_ok=True)
         shutil.copy2(common / kind / 'shared-library-plan.json', retained / (kind + '.json'))
-        selected_sdk = stage / ('sdk-' + kind)
-        glibc.copy_tree(sdk, selected_sdk)
-        glibc.run(glibc.variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
-        glibc.baseline(kind, directory / 'baseline', consumers=True)
+        baseline = common / kind / 'baseline'
+        if baseline.is_dir():
+            glibc.copy_tree(baseline, directory / 'baseline')
+        else:
+            glibc.baseline(kind, directory / 'baseline', consumers=False,
+                           libraries=glibc.read(retained / (kind + '.json')).get('libraries', []))
         original = glibc.read(retained / (kind + '.json'))
         requests = original.get('php_requests', {})
-        partial = any(entry.get('packages') and not entry.get('full') for entry in requests.values())
         request = retained / (kind + '-request.json')
-        glibc.write(request, {'requests': requests})
+        glibc.write(request, {'requests': requests,
+                    'library_package_requests': original.get('libraries', []) if glibc.revision_flags() else []})
         glibc.run(['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
-                   '--manifest', selected_sdk / 'shared-libraries.json', '--baseline', directory / 'baseline',
-                   '--mode', 'incremental' if partial else 'full', '--request', request,
-                   '--rebuilt-libraries', ','.join(original.get('libraries', [])) if partial else '',
+                   '--manifest', common / kind / 'shared-libraries.json', '--baseline', directory / 'baseline',
+                   '--mode', 'incremental', '--request', request,
+                   '--rebuilt-libraries', ','.join(original.get('libraries', [])),
                    '--php-versions', os.environ.get('PHP_VERSIONS', ''),
                    '--output', directory / 'shared-library-plan.json',
                    '--manifest-output', directory / 'shared-libraries.json', *glibc.revision_flags()])
@@ -104,7 +116,6 @@ def libraries():
         glibc.write(directory / 'shared-library-plan.json', plan)
     glibc.capture_native_inventories()
     for kind in glibc.FORMATS:
-        glibc.package_libraries(kind)
         directory = stage / kind
         plans[kind] = glibc.read(directory / 'shared-library-plan.json')
         for name in ('shared-library-plan.json', 'shared-libraries.json'):

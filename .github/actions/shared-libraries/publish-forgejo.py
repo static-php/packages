@@ -132,6 +132,9 @@ def stage_mirror_dependencies(cohort, directory, package_type, helper, owners=No
                 continue
             root = manifest.parent.resolve()
             archive = (root / relative).resolve()
+            if not archive.is_file() and record.get('download_url'):
+                state = runpy.run_path(str(Path(__file__).with_name('glibc.py')))['repository_state']()
+                archive = state.materialize(root, record, archive_key, digest_key).resolve()
             if root not in archive.parents or not archive.is_file() or helper['archive_sha256'](archive) != record.get(digest_key):
                 raise RuntimeError('Retained mirror dependency checksum/path mismatch: ' + name)
             actual_name, version, arch = helper['package_metadata'](archive, kind)
@@ -155,6 +158,12 @@ def stage_mirror_debug(cohort, directory, package_type, helper, owners, records)
     failures = []
     for name, arch, debug in records:
         try:
+            if debug.get('download_url'):
+                planner = planner or runpy.run_path(str(Path(__file__).resolve().parents[3] / 'bin/shared-library-plan'))
+                copied = Path(planner['stage_debug_archive'](debug, directory)['path'])
+                if copied.parent != directory:
+                    shutil.copy2(copied, directory / copied.name)
+                continue
             password = os.environ.get(debug.get('password_env') or '', '')
             archives = helper['remote_package_archives'](debug['host'], debug['owner'], password, kind,
                 debug['name'], debug['package_version'], True)

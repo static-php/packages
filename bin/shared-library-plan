@@ -344,7 +344,11 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
             relative = selected['published_archive']
             output = rooted(destination, relative)
             output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(rooted(source, relative), output)
+            archive = rooted(source, relative)
+            if archive.is_file():
+                shutil.copyfile(archive, output)
+            elif not selected.get('download_url'):
+                raise RuntimeError('Missing published library archive: ' + relative)
     merged['consumers'] = {stream: sorted(set().union(*(set(value.get('consumers', {}).get(stream, [])) for value, _ in baselines))) for stream in STREAMS}
     merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete', 'consumers' in value) for value, _ in baselines)
     merged['consumer_versions'] = {stream: {} for stream in STREAMS}
@@ -401,7 +405,11 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
         merged['runtime_layout'] = dict(selected, complete=all(layout and layout.get('complete', True) and layout['archive_sha256'] == selected['archive_sha256'] for layout, _ in layouts))
         output = rooted(destination, selected['archive'])
         output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(rooted(source, selected['archive']), output)
+        archive = rooted(source, selected['archive'])
+        if archive.is_file():
+            shutil.copyfile(archive, output)
+        elif not selected.get('download_url'):
+            raise RuntimeError('Missing published runtime layout archive')
     return merged, divergent
 
 
@@ -662,7 +670,15 @@ def stage_debug_archive(record, destination, archives=None, helper=None):
     with tempfile.TemporaryDirectory(prefix='shared-library-debug-retry-') as temporary:
         path = Path(temporary) / ('archive.' + kind)
         filename = None
-        if kind == 'rpm':
+        if record.get('download_url'):
+            freezer = runpy.run_path(str(ROOT / 'freeze-migration-baseline.py'))
+            path.write_bytes(freezer['fetch'](record['download_url']))
+            filename = PurePosixPath(urllib.parse.urlsplit(record['download_url']).path).name
+            checksum = record.get('checksum', {})
+            actual = freezer['apk_control_checksum'](path.read_bytes()) if kind == 'apk' else hashlib.new(checksum.get('algorithm', 'sha256'), path.read_bytes()).hexdigest()
+            if checksum.get('value') and actual != checksum['value']:
+                raise RuntimeError('Published debuginfo checksum mismatch')
+        elif kind == 'rpm':
             relative = relative_path(record['location'])
             if record.get('base_url'):
                 url = record['base_url'].rstrip('/') + '/' + str(relative)
@@ -786,7 +802,8 @@ def stage_publication_retries(args):
             package = baseline['libraries'].get(identifier, {})
             if package.get('published_archive_sha256') != retry.get('published_archive_sha256') or not package.get('published_archive'):
                 continue
-            source = rooted(root, package['published_archive'])
+            state = runpy.run_path(str(ROOT.parent / '.github/actions/shared-libraries/glibc.py'))['repository_state']()
+            source = state.materialize(root, package)
             if source.is_file() and file_sha256(source) == retry['published_archive_sha256']:
                 selected = source
                 selected_metadata = package
@@ -819,7 +836,8 @@ def stage_publication_retries(args):
         layout_required = True
     if not layout_required and not all(layout and layout.get('complete', True) and layout.get('archive_sha256') == matching[0][0]['archive_sha256'] for layout, _ in layouts):
         layout, root = matching[0]
-        source = rooted(root, layout['archive'])
+        state = runpy.run_path(str(ROOT.parent / '.github/actions/shared-libraries/glibc.py'))['repository_state']()
+        source = state.materialize(root, layout, 'archive', 'archive_sha256')
         if file_sha256(source) != layout['archive_sha256']:
             raise RuntimeError('Runtime layout retry archive checksum mismatch')
         name, version, arch = archive_identity(source, kind)

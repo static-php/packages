@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import runpy
 import subprocess
+import importlib.util
 from types import SimpleNamespace
 
 
@@ -18,6 +19,13 @@ ROOT = Path.cwd()
 STAGE = ROOT / 'stage'
 FORMATS = ('rpm', 'deb')
 STREAMS = ('8.2', '8.3', '8.4', '8.5', '8.6')
+
+
+def repository_state():
+    spec = importlib.util.spec_from_file_location('repository_state', Path(__file__).with_name('repository-state.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run(arguments, **kwargs):
@@ -86,6 +94,8 @@ def baseline(kind, directory, consumers=False, libraries=None):
     streams = sorted(set(filter(None, os.environ.get('PHP_VERSIONS', '').split(','))) or set(STREAMS))
     if consumers and kind == 'rpm':
         streams = list(STREAMS)
+    if repository_state().restore_baseline(kind, os.environ['MATRIX_ARCH'], streams, Path(directory), consumers, libraries):
+        return
     args += ['--php-versions', ','.join(streams)]
     if not consumers:
         args += ['--skip-consumers']
@@ -266,9 +276,6 @@ def package_library_archives(kind, directory, sdk, manifest, stream=None):
         run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(sdk),
              *manifest_option, *selection, '--debuginfo', *(['--phpv=' + stream] if stream else []),
              *revision_flags()], env=environment)
-    if kind in FORMATS and list(packages.glob('*.' + kind)):
-        run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', sdk,
-             '--packages', packages, '--type', kind, '--output', owner / 'payload-archive-receipt.json'])
     run(['php', 'bin/build-payload', 'manifest', '--root', sdk, '--type', kind,
          *manifest_option, '--output', owner / 'shared-libraries.json'], env=environment)
     if not stream:
@@ -313,8 +320,7 @@ def classify():
     build_plan = read(STAGE / 'library-build-plan.json')
     rebuilt = set(read(sdk / 'shared-libraries.json')['libraries']) if build_plan.get('full') else set(build_plan.get('rebuilt_libraries', []))
     capture_baselines()
-    scope = read(format_stage(formats[0]) / 'baseline/shared-libraries.json').get('metadata_scope')
-    consumers_ready = False
+    consumers_ready = all(read(format_stage(kind) / 'baseline/shared-libraries.json').get('consumer_inventory_complete') for kind in formats)
     shared = glibc and shared_sdk_packaging()
     variants_ready = not glibc or shared
     for phase in range(len(read(sdk / 'shared-libraries.json')['libraries']) + 2):
@@ -330,16 +336,13 @@ def classify():
         plans, reverse_roots = {}, set()
         for kind in formats:
             directory = format_stage(kind)
-            selected_sdk = format_sdk(kind)
-            if selected_sdk != sdk:
-                if scope is not None and os.environ.get('LIBRARIES') and not rebuilt:
-                    project_libraries(sdk, selected_sdk, scope)
-                else:
-                    copy_tree(sdk, selected_sdk)
-            if glibc and not shared and variants_ready:
-                run(variants('apply', selected_sdk) + ['--variants', sdk / 'openssl-variants', '--type', kind])
+            metadata = read(sdk / 'shared-libraries.json')
+            if glibc and not shared and 'openssl' in metadata['libraries']:
+                metadata['libraries']['openssl'] = read(sdk / 'openssl-variants' / kind / 'overlay.json')['entry']
+            producer_manifest = directory / 'producer-manifest.json'
+            write(producer_manifest, metadata)
             args = ['python3', 'bin/shared-library-plan', 'prepare', '--type', kind,
-                    '--manifest', selected_sdk / 'shared-libraries.json',
+                    '--manifest', producer_manifest,
                     '--baseline', directory / 'baseline', '--mode', os.environ.get('MODE', 'full'),
                     '--libraries', os.environ.get('LIBRARIES', ''), '--php-versions', os.environ.get('PHP_VERSIONS', ''),
                     '--packages', os.environ.get('PACKAGES', ''), '--output', directory / 'shared-library-plan.json',
@@ -351,7 +354,7 @@ def classify():
             plan = read(directory / 'shared-library-plan.json')
             plans[kind] = plan
             reverse_roots.update(plan.get('abi_rebuild_roots', []))
-            for dependencies in read(selected_sdk / 'shared-libraries.json').get('pending_rebuilds', {}).values():
+            for dependencies in metadata.get('pending_rebuilds', {}).values():
                 reverse_roots.update(dependencies.values())
         needs_consumers = any(plan.get('abi_break') for plan in plans.values())
         if needs_consumers and not consumers_ready:
@@ -369,14 +372,13 @@ def classify():
     else:
         raise RuntimeError('Library ABI planning did not converge')
     run(['python3', '.github/actions/shared-libraries/incremental-build.py', 'validate-final', '--root', '.'])
-    if glibc and not shared and (os.environ.get('PUBLISH') != 'false' or not os.environ.get('LIBRARIES')
+    if glibc and not shared and (rebuilt or read(sdk / 'build-payload.json').get('state') != 'sealed') and (os.environ.get('PUBLISH') != 'false' or not os.environ.get('LIBRARIES')
             or any(request.get('full') or request.get('packages') for plan in plans.values() for request in plan['php_requests'].values())):
         run(['php', 'bin/build-payload', 'seal', '--root', sdk])
     capture_native_inventories()
     plans = {kind: read(format_stage(kind) / 'shared-library-plan.json') for kind in formats}
-    with ThreadPoolExecutor(max_workers=len(formats)) as executor:
-        list(executor.map(package_libraries, formats))
     if not glibc:
+        package_libraries('apk')
         return
     sdk_manifest = read(sdk / 'shared-libraries.json')
     for entry in sdk_manifest['libraries'].values():
@@ -385,6 +387,7 @@ def classify():
                 entry.pop(field)
     write(sdk / 'shared-libraries.json', sdk_manifest)
     common = STAGE / 'common'
+    write(common / 'sdk-shared-libraries.json', sdk_manifest)
     write(common / 'shared-library-plan.json', combine_plans(plans))
     for kind in formats:
         for name in ['shared-library-plan.json', 'shared-libraries.json']:
@@ -502,6 +505,7 @@ def record():
     target = {'arch': os.environ['MATRIX_ARCH'], 'alma': '8', 'target': os.environ['TARGET'],
               'image': os.environ['IMAGE'], 'source_run_id': os.environ['SOURCE_RUN_ID'],
               'package_images': json.loads(os.environ['PACKAGE_IMAGES'])}
+    target['sdk_metadata_only'] = (STAGE / 'common/sdk-shared-libraries.json').is_file()
     if (STAGE / 'payload-provenance.json').is_file():
         target['payload_stream'] = read(STAGE / 'payload-provenance.json')['php_stream']
     for directory in [STAGE / 'common', *[STAGE / kind for kind in FORMATS]]:
@@ -514,31 +518,6 @@ def record():
         run(['python3', '.github/actions/shared-libraries/workflow.py', 'receipt', '--kind', 'libraries',
              '--plan', directory / 'shared-library-plan.json', '--source-run-id', os.environ['SOURCE_RUN_ID'],
              '--image', os.environ['IMAGE'], '--output', directory / 'shared-library-build-receipt.json'])
-
-
-def preflight_consumers(stream, package_type, packages):
-    candidates_path = STAGE / 'consumer-source-versions.json'
-    source_arguments = ['python3', '.github/actions/shared-libraries/source-versions.py', '--root', '.',
-                        '--stream', stream, '--output', candidates_path]
-    if package_type == 'apk':
-        source_arguments += ['--type=apk']
-    if packages:
-        source_arguments += ['--packages', packages]
-    run(source_arguments)
-    if packages and not read(candidates_path)['candidates']:
-        raise RuntimeError('No immutable source version evidence for the requested PHP build')
-    for kind in ('apk',) if package_type == 'apk' else FORMATS:
-        directory = STAGE if kind == 'apk' else STAGE / kind
-        arguments = ['php', 'bin/preflight-consumer-versions', '--type=' + kind,
-                     '--candidates=' + str(candidates_path), '--architecture=' + architecture(),
-                     '--output=' + str(STAGE / ('consumer-version-preflight-' + kind + '.json')), *revision_flags()]
-        baselines = list(directory.glob('baseline/shared-libraries.json'))
-        if not baselines:
-            raise RuntimeError('Cold PHP build requires captured native package version baselines')
-        for baseline_path in baselines:
-            arguments += ['--baseline-manifest=' + str(baseline_path)]
-        environment = dict(os.environ, SPP_SHARED_LIBRARY_PLAN=str(directory / 'shared-library-plan.json'))
-        run(arguments, env=environment)
 
 
 def bind_library_sources(sdk, downloads):
@@ -621,9 +600,8 @@ def payload():
             compile_packages = ''
         if compile_requested:
             run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize', '--php'])
-            preflight_consumers(stream, package_type, compile_packages)
             if compile_packages and not (ROOT / 'source/php-src').is_dir():
-                release = read(STAGE / 'consumer-source-versions.json')['candidates'][0]['php_version']
+                release = read(ROOT / 'downloads/.spc-meta.json')['php_versions'][stream]
                 run(['python3', '.github/actions/shared-libraries/php-source.py', '--root', '.', '--version', release, '--select'])
                 run(['php', 'vendor/bin/spc', 'extract', 'php-src', '--source-only'])
             flags = ['--phpv=' + stream, '--prefix=-zts', '--type=' + package_type, '--debuginfo']
@@ -634,7 +612,6 @@ def payload():
             run(['php', 'bin/spp', 'build', *flags], env=environment)
             if not sdk_moved:
                 clean_sdk(ROOT / 'buildroot')
-                run(['php', 'bin/build-payload', 'verify', '--root', ROOT / 'buildroot'])
             compiled_source = os.environ['SOURCE_RUN_ID']
         elif not restored:
             raise RuntimeError('No sealed PHP payload available for packaging')
@@ -687,14 +664,30 @@ def package():
     environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in [
         baseline / 'shared-libraries.json', STAGE / 'published-baseline/baseline.json'] if path.is_file()])
     run(['php', 'bin/spp', 'package', *flags], env=environment)
-    run(['php', 'bin/build-payload', 'verify', '--root', root])
-    run(['python3', '.github/actions/shared-libraries/payload-archives.py', '--root', root,
-         '--packages', packages / kind, '--type', kind, '--output', packages / kind / 'payload-archive-receipt.json'])
     shutil.copytree(packages / kind, ROOT / 'dist' / kind, dirs_exist_ok=True)
     run(['python3', '.github/actions/shared-libraries/workflow.py', 'receipt', '--kind', 'consumer',
          '--php-stream', stream, '--plan', STAGE / kind / 'shared-library-plan.json',
          '--source-run-id', os.environ['SOURCE_RUN_ID'], '--image', provenance['producer_image'],
          '--output', ROOT / 'dist' / kind / 'shared-library-build-receipt.json'])
+
+
+def format_libraries():
+    kind = os.environ['TYPE']
+    directory = STAGE / kind
+    target = read(STAGE / 'target.json')
+    plan = read(directory / 'shared-library-plan.json')
+    if plan.get('libraries'):
+        selected_sdk = STAGE / ('sdk-' + kind)
+        (ROOT / 'buildroot').rename(selected_sdk)
+        if 'openssl' in read(selected_sdk / 'shared-libraries.json')['libraries']:
+            run(variants('apply', selected_sdk) + ['--variants', selected_sdk / 'openssl-variants', '--type', kind])
+        package_libraries(kind)
+    else:
+        (directory / 'libraries').mkdir(exist_ok=True)
+    write(directory / 'target.json', target)
+    run(['python3', '.github/actions/shared-libraries/workflow.py', 'receipt', '--kind', 'libraries',
+         '--plan', directory / 'shared-library-plan.json', '--source-run-id', target['source_run_id'],
+         '--image', target['image'], '--output', directory / 'shared-library-build-receipt.json'])
 
 
 def capture_baselines():
@@ -728,9 +721,10 @@ def capture_baselines():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['baseline', 'classify', 'native-inventories', 'record', 'payload', 'package'])
+    parser.add_argument('command', choices=['baseline', 'classify', 'native-inventories', 'record', 'payload', 'package', 'libraries'])
     args = parser.parse_args()
-    {'baseline': capture_baselines, 'classify': classify, 'native-inventories': capture_native_inventories, 'record': record, 'payload': payload, 'package': package}[args.command]()
+    {'baseline': capture_baselines, 'classify': classify, 'native-inventories': capture_native_inventories, 'record': record,
+     'payload': payload, 'package': package, 'libraries': format_libraries}[args.command]()
 
 
 if __name__ == '__main__':

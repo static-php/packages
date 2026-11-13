@@ -29,7 +29,8 @@ class SharedGlibcEntrypoints(unittest.TestCase):
         self.assertEqual(job['secrets'], 'inherit')
         self.assertNotIn('steps', job)
         inputs = events['workflow_dispatch']['inputs']
-        self.assertEqual(set(job['with']), set(inputs))
+        self.assertEqual(set(job['with']), set(inputs) | {'formats'})
+        self.assertEqual(job['with']['formats'], 'deb')
         for name in inputs:
             self.assertEqual(job['with'][name], '${{ inputs.' + name + ' }}')
         self.assertFalse(inputs['bump']['default'])
@@ -77,8 +78,6 @@ class SharedGlibcEntrypoints(unittest.TestCase):
         cases = [
             ('compute-build-matrix', 'Build libs shared', False),
             ('compute-build-matrix', 'Repackage libraries', False),
-            ('compute-package-matrix', 'Build payload', True),
-            ('compute-package-matrix', 'Reuse payload', True),
         ]
         for job, label, payload in cases:
             with self.subTest(job=job, label=label):
@@ -105,7 +104,7 @@ class SharedGlibcEntrypoints(unittest.TestCase):
                 self.assertEqual(tuples.stdout.splitlines(), expected)
 
     def test_optional_mirror_cannot_bypass_cohort_validation(self):
-        data, _ = workflow('build-rpm-modular-packages.yml')
+        data, _ = workflow('package-glibc.yml')
         publisher = data['jobs']['publish']['uses']
         steps = yaml.safe_load((ROOT / publisher).read_text())['jobs']['publish-glibc']['steps']
         publish = next(step for step in steps if step.get('name') == 'Publish each validated PHP stream independently')

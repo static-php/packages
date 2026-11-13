@@ -1,4 +1,4 @@
-name: Build shared EL8 RPM and DEB packages
+name: Build shared EL8 payloads
 
 on:
     workflow_dispatch:
@@ -277,7 +277,7 @@ jobs:
                 if: inputs.repackage_run_id == ''
                 run: bash .github/actions/shared-libraries/run.sh libs
             -   name: Download retained library SDK
-                if: inputs.repackage_run_id != ''
+                if: inputs.repackage_run_id != '' && matrix.repackage_sdk_artifact != ''
                 uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
                 with:
                     github-token: ${{ github.token }}
@@ -300,8 +300,10 @@ jobs:
                     REPACKAGE_PAYLOAD_ARTIFACTS: ${{ toJson(matrix.repackage_payload_artifacts) }}
                     CACHE_KEY: repackage-${{ inputs.repackage_run_id }}-${{ matrix.target }}
                 run: |
-                    zstd -dc buildroot.tar.zst | tar -xf -
-                    composer install --no-interaction --prefer-dist --no-progress
+                    if [[ -f buildroot.tar.zst ]]; then
+                        zstd -dc buildroot.tar.zst | tar -xf -
+                        composer install --no-interaction --prefer-dist --no-progress
+                    fi
                     python3 .github/actions/shared-libraries/repackage.py libraries
             -   name: Classify ABI and package shared libraries
                 id: classification
@@ -309,6 +311,7 @@ jobs:
                     if [[ -z "$REPACKAGE_RUN_ID" ]]; then
                         bash .github/actions/shared-libraries/run.sh glibc-classify
                     fi
+                    echo "libraries-required=$(jq '(.libraries | length) > 0' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     echo "php-required=$(jq 'any(.php_requests[]; .full or (.packages | length > 0))' stage/common/shared-library-plan.json)" >> "$GITHUB_OUTPUT"
                     if [[ -z "$REPACKAGE_RUN_ID" ]]; then
                         python3 .github/actions/shared-libraries/workflow.py inline --plan stage/common/shared-library-plan.json >> "$GITHUB_OUTPUT"
@@ -327,7 +330,7 @@ jobs:
                     ABI_BREAK: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-break }}
                     ABI_CORE_REBUILD: ${{ fromJson(steps.classification.outputs.inline-request || '{}').abi-core-rebuild }}
             -   name: Pack buildroot
-                if: inputs.repackage_run_id == '' && (inputs.publish == true || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''))
+                if: inputs.repackage_run_id == '' && (hashFiles('buildroot.tar.zst') == '' || hashFiles('stage/sdk-rebuilt') != '') && (inputs.publish == true || steps.classification.outputs.libraries-required == 'true' || (steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''))
                 run: tar -cf - buildroot | zstd -f -o buildroot.tar.zst
             -   name: Save buildroot cache
                 if: inputs.repackage_run_id == '' && inputs.publish == true && (steps.cache.outputs.cache-current != 'true' || hashFiles('stage/sdk-rebuilt') != '')
@@ -359,7 +362,7 @@ jobs:
                     path: stage/common
                     retention-days: 1
             -   name: Stage common SDK buildroot
-                if: inputs.repackage_run_id == '' && steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == ''
+                if: steps.classification.outputs.libraries-required == 'true' || (inputs.repackage_run_id == '' && steps.classification.outputs.php-required == 'true' && steps.classification.outputs.inline-stream == '')
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
                     overwrite: true
@@ -367,20 +370,6 @@ jobs:
                     path: buildroot.tar.zst
                     compression-level: 0
                     retention-days: 1
-            -   name: Stage RPM library packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-libs-rpm-${{ matrix.target }}
-                    path: stage/rpm
-                    retention-days: 7
-            -   name: Stage DEB library packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: shared-libs-deb-${{ matrix.target }}
-                    path: stage/deb
-                    retention-days: 7
             -   name: Upload logs on failure
                 if: ${{ failure() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -419,10 +408,7 @@ jobs:
         outputs:
             matrix: ${{ steps.filter.outputs.matrix }}
             any: ${{ steps.filter.outputs.any }}
-            publish-matrix: ${{ steps.filter.outputs.publish-matrix }}
             publish-any: ${{ steps.filter.outputs.publish-any }}
-            package-matrix: ${{ steps.filter.outputs.package-matrix }}
-            package-any: ${{ steps.filter.outputs.package-any }}
         steps:
             -   name: Checkout code
                 uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -447,9 +433,6 @@ jobs:
                         | sed -E 's/^(Build libs shared|Repackage libraries) \(([^)]+)\)$/\2/' | sort -u)
                     python3 .github/actions/shared-libraries/workflow.py matrix --plans plans \
                         --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" >> "$GITHUB_OUTPUT"
-                    python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
-                        --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded '' --sdk-succeeded "$succeeded" \
-                        | sed -E 's/^(matrix|any)=/package-\1=/' >> "$GITHUB_OUTPUT"
 
     build-payload:
         name: ${{ inputs.repackage_run_id != '' && 'Reuse payload' || 'Build payload' }} (${{ matrix.target }} php${{ matrix.php-version }})
@@ -597,190 +580,28 @@ jobs:
                     path: ~/.cache/composer
                     key: ${{ steps.composer-cache.outputs.cache-primary-key }}
 
-    compute-package-matrix:
-        needs: [compute-build-matrix, build-payload]
-        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.any == 'true' }}
+    package-formats:
+        name: Queue independent format runs
+        needs: [setup-matrix, build-libs, compute-build-matrix, build-payload]
+        if: ${{ !cancelled() && needs.compute-build-matrix.outputs.publish-any == 'true' }}
         runs-on: ubuntu-24.04
-        permissions:
-            actions: read
-            contents: read
-        outputs:
-            matrix: ${{ steps.filter.outputs.matrix }}
-            any: ${{ steps.filter.outputs.any }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Download target plans
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                continue-on-error: true
-                with:
-                    pattern: shared-plans-glibc-*
-                    path: plans
-            -   name: Select successful common payloads
-                id: filter
-                env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    PHP_VERSIONS: ${{ inputs.php_versions }}
-                    FORMATS: ${{ inputs.formats || 'rpm,deb' }}
-                run: |
-                    set -euo pipefail
-                    jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
-                        --jq '.jobs[] | select(.conclusion == "success") | .name | split(" / ") | last')
-                    succeeded=$(printf '%s\n' "$jobs" | sed -nE 's/^(Build|Reuse) payload \(([^ ]+) php([^)]+)\)$/\2 \3/p' | sort -u)
-                    sdks=$(printf '%s\n' "$jobs" | sed -nE 's/^(Build libs shared|Repackage libraries) \(([^)]+)\)$/\2/p' | sort -u)
-                    python3 .github/actions/shared-libraries/workflow.py packages --plans plans \
-                        --php-versions "$PHP_VERSIONS" --formats "$FORMATS" --succeeded "$succeeded" --sdk-succeeded "$sdks" >> "$GITHUB_OUTPUT"
-
-    package:
-        name: Package and upgrade (${{ matrix.type }} ${{ matrix.target }} php${{ matrix.php-version }})
-        needs: [setup-matrix, compute-build-matrix, compute-package-matrix]
-        if: ${{ !cancelled() && (needs.compute-package-matrix.outputs.any == 'true' || needs.compute-build-matrix.outputs.package-any == 'true') }}
-        runs-on: ubuntu-24.04${{ matrix.arch == 'arm64' && '-arm' || '' }}
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        strategy:
-            fail-fast: false
-            max-parallel: 4
-            matrix: ${{ fromJson(needs.compute-package-matrix.outputs.matrix || needs.compute-build-matrix.outputs.package-matrix) }}
-        env:
-            IMAGE: ${{ matrix.image }}
-            PACKAGING_IMAGE: ${{ matrix.package-image }}
-            SOURCE_RUN_ID: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-            TYPE: ${{ matrix.type }}
-            TARGET: ${{ matrix.target }}
-            MATRIX_ARCH: ${{ matrix.arch }}
-            PHPV: ${{ matrix.php-version }}
-            PACKAGES: ${{ matrix.packages }}
-            TLS_CHECKS: ${{ matrix.tls-checks }}
-            MODE: ${{ inputs.mode || 'full' }}
-            ITERATION: ${{ inputs.iteration || '' }}
-            BUMP: ${{ inputs.bump || false }}
-            PUBLISH: ${{ inputs.publish || false }}
-            FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        steps:
-            -   name: Checkout code
-                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-                with:
-                    persist-credentials: false
-            -   name: Log in to packaging registry
-                env:
-                    REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    ACTOR: ${{ github.actor }}
-                run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-            -   name: Download shared SDK metadata
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: shared-sdk-glibc-${{ matrix.target }}
-                    path: stage
-            -   name: Download common PHP payload
-                if: matrix.library-only != true
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: shared-payload-glibc-${{ matrix.target }}-php${{ matrix.php-version }}
-            -   name: Extract sealed common payload
-                if: matrix.library-only != true
-                run: |
-                    zstd -dc php-payload.tar.zst | tar -xpf -
-                    if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
-                        && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
-                        echo 'PACKAGES=' >> "$GITHUB_ENV"
-                        echo 'TLS_CHECKS=true' >> "$GITHUB_ENV"
-                    fi
-            -   name: Download matching library packages
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    name: shared-libs-${{ matrix.type }}-${{ matrix.target }}
-                    path: library-stage
-            -   name: Copy matching library archives
-                run: |
-                    python3 .github/actions/shared-libraries/workflow.py stage-libraries --source library-stage \
-                        --destination "dist/$TYPE" --type "$TYPE" --php-stream "$PHPV" --manifest-output "stage/$TYPE/shared-libraries.json"
-            -   name: Prepare native baseline comparison tools
-                run: |
-                    sudo apt-get update
-                    sudo apt-get install -y python3-rpm rpm2cpio zstd
-            -   name: Freeze actual published baseline
-                env:
-                    LIBRARY_ONLY: ${{ matrix.library-only }}
-                uses: ./.github/actions/native-baseline
-            -   name: Package sealed payload without compilation
-                if: matrix.library-only != true
-                run: |
-                    docker run --rm -v "$GITHUB_WORKSPACE":/build -w /build \
-                        -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \
-                        -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
-                        "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package
-            -   name: Verify ordinary package upgrade
-                env:
-                    LIBRARY_ONLY: ${{ matrix.library-only }}
-                run: |
-                    args=()
-                    if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
-                    profile=auto
-                    if [[ "$LIBRARY_ONLY" == true ]]; then args+=(--library-only);
-                    else
-                        mode=$(python3 .github/actions/shared-libraries/workflow.py upgrade-mode --plan "stage/$TYPE/shared-library-plan.json" --php-stream "$PHPV")
-                        if [[ "$mode" == shared && -n "$PACKAGES" ]]; then args+=(--partial-consumers); fi
-                    fi
-                    python3 tests/migration-upgrade-containers.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --artifacts "dist/$TYPE" --baseline-dir stage/published-baseline --report "dist/$TYPE/native-upgrade-receipt.json" --profile "$profile" "${args[@]}"
-                    native_args=()
-                    if [[ "$LIBRARY_ONLY" == true ]]; then native_args+=(--library-only); fi
-                    python3 .github/actions/shared-libraries/workflow.py upgrade-receipt --type "$TYPE" --php-stream "$PHPV" --architecture "$MATRIX_ARCH" --report "dist/$TYPE/native-upgrade-receipt.json" --plan "stage/$TYPE/shared-library-plan.json" --packages "dist/$TYPE" --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" --output "dist/$TYPE/shared-library-upgrade-receipt.json" "${native_args[@]}"
-            -   name: Stage validated consumer packages
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    overwrite: true
-                    name: ${{ matrix.library-only && 'shared-validation' || 'shared-consumers' }}-${{ matrix.type }}-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: dist/${{ matrix.type }}
-                    retention-days: 7
-            -   name: Stage failed validation receipt
-                if: failure()
-                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-                with:
-                    name: failed-upgrade-${{ matrix.type }}-${{ matrix.target }}-php${{ matrix.php-version }}
-                    path: |
-                        dist/${{ matrix.type }}/native-upgrade-receipt.json
-                        stage/published-baseline/baseline.json
-                    retention-days: 1
-
-    publish:
-        name: Publish (${{ matrix.type }} ${{ matrix.target }})
-        needs: [setup-matrix, compute-build-matrix, package]
-        if: ${{ !cancelled() && inputs.publish == true && needs.compute-build-matrix.outputs.publish-any == 'true' }}
-        permissions:
-            contents: read
-            packages: read
-            actions: read
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.compute-build-matrix.outputs.publish-matrix) }}
-        uses: ./.github/workflows/publish-package-cohort.yml
-        with:
-            format: ${{ matrix.type }}
-            target: ${{ matrix.target }}
-            arch: ${{ matrix.arch }}
-            image: ${{ matrix.image }}
-            package-image-digest: ${{ matrix.package-image-digest }}
-            source-run-id: ${{ needs.setup-matrix.outputs.downloads-run-id }}
-        secrets: inherit
-
-    mirror:
-        name: Queue secondary mirror
-        needs: [compute-build-matrix, publish]
-        if: ${{ !cancelled() && inputs.publish == true && contains(inputs.formats, 'deb') && needs.compute-build-matrix.outputs.publish-any == 'true' }}
-        runs-on: ubuntu-24.04
-        continue-on-error: true
         permissions:
             actions: write
+            contents: read
         steps:
-            -   name: Queue mirror independently of the producer lock
+            -   name: Start RPM and DEB packaging independently
                 env:
                     GH_TOKEN: ${{ github.token }}
+                    FORMATS: ${{ inputs.formats || 'rpm,deb' }}
+                    MODE: ${{ inputs.mode || 'full' }}
+                    PHP_VERSIONS: ${{ inputs.php_versions }}
+                    ITERATION: ${{ inputs.iteration }}
+                    BUMP: ${{ inputs.bump || false }}
+                    PUBLISH: ${{ inputs.publish || false }}
                 run: |
-                    gh workflow run publish-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-                        -f format=deb -f build_run_id="$GITHUB_RUN_ID" -f mirror_run_id="$GITHUB_RUN_ID"
+                    IFS=, read -ra formats <<< "$FORMATS"
+                    for format in "${formats[@]}"; do
+                        gh workflow run package-glibc.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+                            -f format="$format" -f build_run_id="$GITHUB_RUN_ID" -f mode="$MODE" \
+                            -f php_versions="$PHP_VERSIONS" -f iteration="$ITERATION" -f bump="$BUMP" -f publish="$PUBLISH"
+                    done

@@ -82,7 +82,7 @@ jobs:
         needs: prepare
         if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && inputs.mirror_run_id == '' }}
         permissions:
-            contents: read
+            contents: write
             packages: read
             actions: read
         strategy:
@@ -106,7 +106,7 @@ jobs:
         needs: [prepare, publish]
         if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && (inputs.mirror_run_id != '' || !inputs.skip_mirror) }}
         permissions:
-            contents: read
+            contents: write
             packages: read
             actions: read
         strategy:
