@@ -342,6 +342,23 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertFalse(requests['8.5']['full'])
         self.assertEqual(requests['8.5']['packages'], [])
 
+    def test_partial_consumer_name_inventory_cannot_hide_known_abi_consumers(self):
+        value = manifest()
+        value['consumer_inventory_complete'] = True
+        value['consumers'] = {'8.4': ['php-zts-ssh2']}
+        value['consumer_dependencies'] = {'8.4': {'php-zts-ssh2': [], 'php-zts-grpc': ['fixture']}}
+        value['consumer_components'] = {'8.4': {'php-zts-grpc': 'grpc'}}
+        requests = planner['abi_consumers'](value, ['fixture'])
+        self.assertFalse(requests['8.4']['full'])
+        self.assertEqual(requests['8.4']['consumers'], ['php-zts-grpc'])
+        self.assertEqual(requests['8.4']['packages'], ['grpc'])
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            merged, _ = planner['merge_baselines']([(value, directory)], 'rpm', directory / 'merged')
+        self.assertIn('php-zts-grpc', merged['consumers']['8.4'])
+        self.assertEqual(merged['consumer_dependencies']['8.4']['php-zts-grpc'], ['fixture'])
+        self.assertEqual(planner['abi_consumers'](merged, ['fixture'])['8.4']['packages'], ['grpc'])
+
     def test_manual_bump_leaves_compatible_unselected_seed_changes_unpublished(self):
         plan = self.manual_plan(changed=('other',))
         self.assertEqual(plan['libraries'], ['fixture'])

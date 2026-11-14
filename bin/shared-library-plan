@@ -246,6 +246,10 @@ def consumer_dependencies(value, name, stream, architecture):
     return sorted(dependencies)
 
 
+def consumer_names(value, stream):
+    return set(value.get('consumers', {}).get(stream, [])) | set(value.get('consumer_dependencies', {}).get(stream, {}))
+
+
 def abi_consumers(value, roots, candidate=None):
     result = {}
     for stream in STREAMS:
@@ -256,8 +260,8 @@ def abi_consumers(value, roots, candidate=None):
                        and (identifier not in candidate['libraries']
                             or library_names(previous[identifier]) != library_names(candidate['libraries'][identifier]))}
         affected_libraries = set(reverse_closure(dict(value, libraries=previous) if previous is not None else value, changed))
-        names = set(value.get('consumers', {}).get(stream, []))
         known = value.get('consumer_dependencies', {}).get(stream, {})
+        names = consumer_names(value, stream)
         missing = names - known.keys() if changed else set()
         affected = sorted(name for name in names if affected_libraries.intersection(known.get(name, [])))
         inventory_missing = bool(changed) and not value.get('consumer_inventory_complete', 'consumers' in value)
@@ -349,7 +353,7 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
                 shutil.copyfile(archive, output)
             elif not selected.get('download_url'):
                 raise RuntimeError('Missing published library archive: ' + relative)
-    merged['consumers'] = {stream: sorted(set().union(*(set(value.get('consumers', {}).get(stream, [])) for value, _ in baselines))) for stream in STREAMS}
+    merged['consumers'] = {stream: sorted(set().union(*(consumer_names(value, stream) for value, _ in baselines))) for stream in STREAMS}
     merged['consumer_inventory_complete'] = all(value.get('consumer_inventory_complete', 'consumers' in value) for value, _ in baselines)
     merged['consumer_versions'] = {stream: {} for stream in STREAMS}
     merged['stream_libraries'] = {stream: copy.deepcopy(libraries)
@@ -380,7 +384,7 @@ def merge_baselines(baselines, kind, destination, independent_streams=False):
     for stream, names in merged['consumers'].items():
         for name in names:
             records = [value.get('consumer_dependencies', {}).get(stream, {}).get(name)
-                       for value, _ in baselines if name in value.get('consumers', {}).get(stream, [])]
+                       for value, _ in baselines if name in consumer_names(value, stream)]
             if records and all(isinstance(record, list) for record in records):
                 merged['consumer_dependencies'][stream][name] = sorted(set().union(*(set(record) for record in records)))
     merged['migration_cutoffs'] = {}
