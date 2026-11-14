@@ -339,7 +339,7 @@ def prepare(resources, name, kind, helper=False):
                 resources.exec(name, ['dnf', 'clean', 'metadata'])
 
     elif kind == 'deb':
-        resources.exec(name, ['sh', '-ec', "sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list; apt-get update"])
+        resources.exec(name, ['sh', '-ec', "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries; sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list; apt-get update"])
         resources.exec(name, ['apt-get', 'install', '-y', '--no-install-recommends', 'python3', 'binutils', 'ca-certificates', 'gnupg'] + (['dpkg-dev', 'apt-utils'] if helper else []))
     else:
         resources.exec(name, ['apk', 'add', '--no-cache', 'python3', 'binutils', 'ca-certificates', 'openssl'] + (['abuild'] if helper else []))
