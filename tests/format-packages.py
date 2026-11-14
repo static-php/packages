@@ -53,6 +53,17 @@ class Formats(unittest.TestCase):
             self.assertFalse(libraries[0]['libraries-required'])
             self.assertEqual(packages[0]['payload-artifact'], matrices[0][1][0]['payload-artifact'])
             self.assertEqual(formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'], reuse_libraries=False), ([], [], []))
+            plan['format_selection']['rpm']['library_streams'] = ['8.2', '8.6']
+            (directory / 'shared-library-plan.json').write_text(json.dumps(plan))
+            original = (directory / 'shared-library-plan.json').read_bytes()
+            _, packages, _ = formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'])
+            self.assertEqual([entry['php-version'] for entry in packages], ['8.6'])
+            self.assertEqual((directory / 'shared-library-plan.json').read_bytes(), original)
+            plan['format_selection']['rpm'].update(php_requests={}, library_streams=[])
+            (directory / 'shared-library-plan.json').write_text(json.dumps(plan))
+            _, packages, _ = formats.select({'artifacts': artifacts}, root, jobs, 'rpm', ['8.6'])
+            self.assertEqual([entry['php-version'] for entry in packages], ['8.6'])
+            self.assertTrue(packages[0]['library-only'])
 
 
 

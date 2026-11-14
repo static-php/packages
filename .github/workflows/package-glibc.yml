@@ -346,6 +346,7 @@ jobs:
             image: ${{ matrix.image }}
             package-image-digest: ${{ matrix.package-image-digest }}
             source-run-id: ${{ matrix.source_run_id }}
+            php-versions: ${{ inputs.php_versions }}
         secrets: inherit
 
     mirror:

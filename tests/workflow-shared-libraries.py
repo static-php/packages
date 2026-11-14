@@ -703,6 +703,7 @@ class IndependentFormatWorkflows(unittest.TestCase):
         sdk = next(step for step in packaging['jobs']['libraries']['steps'] if step.get('name') == 'Download SDK only for selected library packages')
         self.assertEqual(sdk['if'], 'matrix.libraries-required')
         self.assertNotIn('concurrency', packaging)
+        self.assertEqual(packaging['jobs']['publish']['with']['php-versions'], '${{ inputs.php_versions }}')
 
 if __name__ == '__main__':
     unittest.main()

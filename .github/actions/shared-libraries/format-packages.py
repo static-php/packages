@@ -48,7 +48,9 @@ def select(state, plans, jobs, kind, streams, architectures=('x86_64', 'arm64'),
             includes.append(dict(base, **{'php-version': stream, 'packages': '' if request.get('full') else ','.join(request['packages']),
                                          'payload-artifact': payload, 'library-only': False}))
         requested = {stream for stream, request in selection.get('php_requests', {}).items() if request.get('full') or request.get('packages')}
-        probes = selection.get('library_streams') or (['8.5'] if not requested and selection.get('libraries') else [])
+        default_probe = ['8.5' if '8.5' in streams else sorted(streams)[-1]] if streams else []
+        probes = selection.get('library_streams') or (default_probe if not requested and selection.get('libraries') else [])
+        probes = set(probes).intersection(streams)
         for stream in set(probes) - requested:
             includes.append(dict(base, **{'php-version': stream, 'packages': '', 'library-only': True}))
         if active or set(probes) - requested:
