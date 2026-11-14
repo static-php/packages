@@ -11,10 +11,10 @@ on:
                 required: false
                 default: false
             publish:
-                description: "Publish downstream packages after a manual source update"
+                description: "Publish downstream packages (disable for build/test only)"
                 type: boolean
                 required: false
-                default: false
+                default: true
             build_packages:
                 description: "Dispatch package builds when source inputs change"
                 type: boolean
@@ -279,7 +279,7 @@ jobs:
                 if: steps.diff.outputs.any_change == 'true' && (github.event_name == 'schedule' || inputs.build_packages)
                 env:
                     GH_TOKEN: ${{ secrets.GH_PAT }}
-                    PUBLISH: ${{ inputs.publish || false }}
+                    PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
                     BUMP: ${{ inputs.bump || false }}
                 run: |
                     set -euo pipefail

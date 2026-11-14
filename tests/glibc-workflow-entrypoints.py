@@ -43,9 +43,9 @@ class SharedGlibcEntrypoints(unittest.TestCase):
         steps = [step for job in data['jobs'].values() for step in job.get('steps', [])]
         trigger = next(step for step in steps if step.get('name') == 'Trigger downstream workflows')
         dispatch = trigger['run']
-        self.assertFalse(events['workflow_dispatch']['inputs']['publish']['default'])
+        self.assertTrue(events['workflow_dispatch']['inputs']['publish']['default'])
         self.assertFalse(events['workflow_dispatch']['inputs']['bump']['default'])
-        self.assertEqual(trigger['env']['PUBLISH'], "${{ inputs.publish || false }}")
+        self.assertEqual(trigger['env']['PUBLISH'], "${{ github.event_name == 'schedule' || inputs.publish }}")
         self.assertEqual(trigger['env']['BUMP'], "${{ inputs.bump || false }}")
         self.assertIn('build-rpm-modular-packages.yml build-apk-forgejo.yml', dispatch)
         self.assertNotIn('build-deb-forgejo.yml', dispatch)

@@ -669,7 +669,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_daily_downloads_do_not_force_calendar_rebuilds(self):
         data = yaml.safe_load((ROOT / '.github/workflows/spc-download.yml').read_text())
-        self.assertEqual(data[True]['schedule'], [{'cron': '0 0 * * *'}])
+        self.assertEqual(data[True]['schedule'], [{'cron': '0 22 * * *'}])
         step = next(step for step in data['jobs']['download']['steps'] if step['name'] == 'Diff state and compute triggers')
         self.assertEqual(step['env']['FORCE_FULL'], '${{ inputs.force_full }}')
         for name in ['build-apk-forgejo.yml', 'build-rpm-modular-packages.yml']:
