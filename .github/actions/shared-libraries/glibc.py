@@ -402,13 +402,13 @@ def classify():
 
 
 def scope_abi_consumers(plan, snapshot, stream, requested=()):
-    abi = plan.get('abi_consumer_requests', {}).get(stream, {})
+    abi = plan.get('abi_consumer_requests', {}).get(stream)
     inventory = snapshot.get('inventory', snapshot.get('published_packages'))
-    if (snapshot.get('error') or inventory is None or abi.get('full')
+    if (abi is None or snapshot.get('error') or inventory is None or abi.get('full')
             or snapshot.get('type') != plan.get('type') or snapshot.get('php_stream') != stream):
         return False
     consumers, components = abi.get('consumers', []), abi.get('packages', [])
-    if not consumers or len(consumers) != len(components):
+    if len(consumers) != len(components):
         return False
     planner = runpy.run_path(str(ROOT / 'bin/shared-library-plan'))
     compare = lru_cache(maxsize=None)(planner['native_compare'])
@@ -435,14 +435,14 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
     native = planner['abi_consumers']({'libraries': {name: {'elf': {}} for name in libraries},
         'stream_libraries': {stream: previous} if previous is not None else {},
         'consumers': {stream: list(dependencies)}, 'consumer_dependencies': {stream: dependencies},
-        'consumer_inventory_complete': True}, set(plan.get('abi_rebuild_roots', libraries)) if previous is not None else libraries,
+        'consumer_inventory_complete': True}, set(plan.get('abi_rebuild_roots', libraries)),
         {'libraries': plan.get('expected_libraries', {})} if previous is not None else None)[stream]
     if native['full']:
         raise RuntimeError('Cannot map native ABI consumers for PHP ' + stream)
     pairs = {name: component for name, component in zip(consumers, components) if name in latest}
     pairs.update(zip(native['consumers'], native['packages']))
     before = json.dumps([abi, plan['php_requests'][stream], plan.get('expected_consumers', {}).get(stream),
-                         plan.get('published_consumers', {}).get(stream)], sort_keys=True)
+                         plan.get('published_consumers', {}).get(stream), plan.get('abi_core_rebuild_streams', [])], sort_keys=True)
     removed = set(components) - set(pairs.values()) - set(requested)
     request = plan['php_requests'][stream]
     for field in ('packages', 'compile_packages'):
@@ -452,12 +452,19 @@ def scope_abi_consumers(plan, snapshot, stream, requested=()):
         request['packages'] = sorted(set(request.get('packages', [])) | set(pairs.values()))
         if not request.get('compile_full'):
             request['compile_packages'] = sorted(set(request.get('compile_packages', [])) | set(pairs.values()))
+    if pairs:
+        request.update(compile=True, reuse_payload=False)
+        if set(pairs.values()).intersection({'cli', 'cgi', 'fpm', 'embed', 'devel', 'phpdbg'}):
+            request['compile_full'] = True
+            request['compile_packages'] = []
+            plan['abi_core_rebuild_streams'] = sorted(set(plan.get('abi_core_rebuild_streams', [])) | {stream})
     abi['consumers'] = sorted(pairs)
     abi['packages'] = [pairs[name] for name in abi['consumers']]
     if stream in plan.get('expected_consumers', {}):
         plan['expected_consumers'][stream] = sorted((set(plan['expected_consumers'][stream]) - set(consumers)) | set(pairs))
     plan.setdefault('published_consumers', {})[stream] = {name: version(latest[name]) for name in pairs if latest[name].get('version')}
-    changed = before != json.dumps([abi, request, plan.get('expected_consumers', {}).get(stream), plan['published_consumers'][stream]], sort_keys=True)
+    changed = before != json.dumps([abi, request, plan.get('expected_consumers', {}).get(stream),
+                                    plan['published_consumers'][stream], plan.get('abi_core_rebuild_streams', [])], sort_keys=True)
     if changed:
         print('PHP ' + stream + ' ABI consumers from native inventory: ' + ', '.join(abi['consumers']), flush=True)
     return changed
@@ -479,6 +486,8 @@ def capture_native_inventories():
                    if (request.get('full') or request.get('packages'))
                    and (stream in wanted or plan.get('abi_break'))]
         streams = sorted(set(streams) | set(plan.get('library_streams', [])))
+        if kind == 'rpm' and plan.get('abi_break'):
+            streams = list(STREAMS)
         if not streams and plan.get('libraries'):
             streams = ['8.5']
         for stream in streams:

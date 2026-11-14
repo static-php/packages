@@ -152,6 +152,8 @@ class RepositoryState(unittest.TestCase):
     def test_publication_updates_only_its_owner_and_requires_matching_native_bytes(self):
         before = self.fixture()
         before['baseline']['libraries']['zlib']['published_version'] = '1-r0'
+        before['baseline']['consumer_native_metadata'] = {'8.6': {'php-zts-ssh2': {
+            'name': 'php-zts-ssh2', 'version': '1.0-1', 'requires': []}}}
         state.save(before)
         other = self.fixture(stream='8.5')
         state.save(other)
@@ -175,11 +177,15 @@ class RepositoryState(unittest.TestCase):
         def published_inventory(args):
             return None
         freezer = {'published_inventory': published_inventory, 'fetch': lambda *_: None,
-                   'snapshot_inventory': lambda args, refresh=False: {'inventory': [package, debug_package]}}
+                   'snapshot_inventory': lambda args, refresh=False: {'inventory': [package, debug_package,
+                       {'name': 'php-zts-grpc', 'version': '1.85.1-5', 'requires': ['php-zts-lib-grpc']}]}}
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
         self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['source_hash'], 'new-source')
         self.assertTrue(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['published_debug_required'])
+        baseline = state.load('deb', 'arm64', '8.6')['baseline']
+        self.assertEqual(baseline['consumers']['8.6'], ['php-zts-grpc', 'php-zts-ssh2'])
+        self.assertEqual(baseline['consumer_dependencies']['8.6']['php-zts-grpc'], ['grpc'])
         self.assertEqual(state.load('deb', 'arm64', '8.5'), other)
         debug_archive.unlink()
         freezer['snapshot_inventory'] = lambda args, refresh=False: {'inventory': [package]}
@@ -199,7 +205,8 @@ class RepositoryState(unittest.TestCase):
         planner['native_compare'] = lambda kind, left, right: 0 if left == right else (_ for _ in ()).throw(AssertionError('Unchanged historical packages must not be rescanned'))
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
-        self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['consumer_versions']['8.6'], {'php-zts-cli': package['version']})
+        self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['consumer_versions']['8.6'],
+            {'php-zts-cli': package['version'], 'php-zts-grpc': '1.85.1-5', 'php-zts-ssh2': '1.0-1'})
 
 
 if __name__ == '__main__':

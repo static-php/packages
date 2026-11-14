@@ -238,7 +238,9 @@ def record_publication(source, kind, target, stream):
         retained = baseline.get('consumer_inventory_complete') and isinstance(known, dict)
         latest = dict(known) if retained else {}
         if retained:
-            consumers = uploaded_consumers.values() if selected == stream else ()
+            uploaded = uploaded_consumers if selected == stream else {}
+            consumers = [item for item in consumers if item['name'] not in latest and item['name'] not in uploaded]
+            consumers.extend(uploaded.values())
         for item in consumers:
             if item['name'] not in latest or version_of(item) != version_of(latest[item['name']]) and compare(kind, version_of(item), version_of(latest[item['name']])) > 0:
                 latest[item['name']] = item

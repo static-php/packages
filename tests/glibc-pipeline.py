@@ -223,7 +223,7 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(plan, original)
         self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.6', ['swoole']))
         self.assertEqual(plan['php_requests']['8.6']['packages'], ['cli', 'swoole'])
-        self.assertEqual(plan['php_requests']['8.6']['compile_packages'], ['cli', 'swoole'])
+        self.assertEqual(plan['php_requests']['8.6']['compile_packages'], [])
         self.assertEqual(plan['expected_consumers']['8.6'], ['php-zts-cli'])
         self.assertEqual(plan['abi_consumer_requests']['8.6']['packages'], ['cli'])
         self.assertTrue(plan['php_requests']['8.6']['compile_full'])
@@ -285,6 +285,55 @@ class Pipeline(unittest.TestCase):
         glibc.scope_abi_consumers(plan, snapshot, '8.3')
         self.assertEqual(plan['php_requests']['8.3']['packages'], ['cli'])
         self.assertEqual(plan['abi_consumer_requests']['8.3']['consumers'], ['php-zts-cli'])
+
+    def test_native_inventory_recovers_consumers_missing_from_a_partial_recorded_baseline(self):
+        for kind in ('rpm', 'deb', 'apk'):
+            for component in ('grpc', 'cli'):
+                with self.subTest(kind=kind, component=component):
+                    plan = {'type': kind, 'libraries': ['grpc', 'libssh2'], 'abi_rebuild_roots': ['grpc'],
+                        'php_requests': {'8.2': {'full': False, 'packages': [], 'compile': False,
+                            'compile_full': False, 'compile_packages': [], 'reuse_payload': True}},
+                        'abi_consumer_requests': {'8.2': {'full': False, 'consumers': [], 'packages': []}}}
+                    snapshot = {'type': kind, 'php_stream': '8.2', 'architecture': 'arm64', 'inventory': [
+                        {'name': 'php-zts-' + component, 'version': '1.0-1', 'requires': ['php-zts-lib-grpc']},
+                        {'name': 'php-zts-ssh2', 'version': '1.0-1', 'requires': ['php-zts-lib-libssh2']}]}
+                    self.assertTrue(glibc.scope_abi_consumers(plan, snapshot, '8.2'))
+                    request = plan['php_requests']['8.2']
+                    self.assertEqual(request['packages'], [component])
+                    self.assertTrue(request['compile'])
+                    self.assertFalse(request['reuse_payload'])
+                    self.assertEqual(request['compile_full'], component == 'cli')
+                    self.assertEqual(request['compile_packages'], [] if component == 'cli' else ['grpc'])
+                    self.assertEqual(plan.get('abi_core_rebuild_streams', []), ['8.2'] if component == 'cli' else [])
+                    self.assertEqual(plan['abi_consumer_requests']['8.2']['consumers'], ['php-zts-' + component])
+                    self.assertFalse(glibc.scope_abi_consumers(plan, snapshot, '8.2'))
+
+    def test_rpm_abi_break_captures_empty_stream_requests_before_emitting_the_build_matrix(self):
+        freezer = glibc.runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))
+        captured = []
+        def snapshot(args):
+            captured.append(args.php)
+            return {'type': args.type, 'php_stream': args.php, 'architecture': args.arch, 'inventory': [
+                {'name': 'php-zts-grpc', 'version': '1.0-1', 'requires': ['php-zts-lib-grpc']}]}
+        freezer['snapshot_inventory'] = snapshot
+        run_path = glibc.runpy.run_path
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            plan = {'type': 'rpm', 'abi_break': True, 'libraries': ['grpc'], 'abi_rebuild_roots': ['grpc'],
+                'php_requests': {s: {'full': False, 'packages': [], 'compile': False} for s in glibc.STREAMS},
+                'abi_consumer_requests': {s: {'full': False, 'consumers': [], 'packages': []} for s in glibc.STREAMS}}
+            glibc.write(stage / 'rpm/shared-library-plan.json', plan)
+            glibc.write(stage / 'deb/shared-library-plan.json', {'php_requests': {}})
+            with patch.object(glibc, 'STAGE', stage), patch.object(glibc.runpy, 'run_path',
+                    side_effect=lambda path: freezer if str(path).endswith('freeze-migration-baseline.py') else run_path(path)), \
+                    patch.dict(os.environ, TYPE='rpm', MATRIX_ARCH='arm64', PHP_VERSIONS='8.6', PACKAGES=''):
+                glibc.capture_native_inventories()
+            self.assertEqual(captured, list(glibc.STREAMS))
+            for stream, request in glibc.read(stage / 'rpm/shared-library-plan.json')['php_requests'].items():
+                self.assertEqual(request['packages'], ['grpc'])
+                self.assertTrue(request['compile'])
+            common = glibc.read(stage / 'common/shared-library-plan.json')
+            self.assertEqual(common['php_requests']['8.2']['compile_packages'], ['grpc'])
 
     def test_host_extraction_preserves_recorded_payload_asset_modes(self):
         import yaml
