@@ -87,7 +87,7 @@ class MemoryBackend:
         return result
 
 
-class ReleaseCacheTests(unittest.TestCase):
+class CacheFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="buildroot-cache-test-")
         self.root = Path(self.temporary.name)
@@ -106,6 +106,8 @@ class ReleaseCacheTests(unittest.TestCase):
     def restore(self, key=None, seed=None, required=False):
         return cache.ReleaseCache(self.backend, key or self.key, self.path, self.seed if seed is None else seed).restore(required)
 
+
+class ReleaseCacheTests(CacheFixture):
     def test_save_uses_one_readable_archive_and_one_receipt(self):
         value = self.store()
         events = [event for event in self.backend.events if event[0] == "upload"]
@@ -331,6 +333,22 @@ class ReleaseCacheTests(unittest.TestCase):
 
 
 class GitHubDownloadTests(unittest.TestCase):
+    def test_api_errors_preserve_github_validation_details(self):
+        body = json.dumps({'message': 'Validation Failed', 'errors': [{'field': 'size', 'code': 'too_large'}]}).encode()
+        error = cache.urllib.error.HTTPError('https://uploads.github.com/assets', 422, 'Unprocessable Entity', {}, io.BytesIO(body))
+        with mock.patch.object(cache.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaisesRegex(cache.CacheError, 'HTTP 422: Validation Failed.*too_large'):
+                cache.GitHub('owner/repository').request('https://uploads.github.com/assets')
+
+    def test_oversized_asset_fails_before_sending_any_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'archive'
+            path.write_bytes(b'too large')
+            with mock.patch.object(cache, 'MAX_ASSET_SIZE', path.stat().st_size), mock.patch.object(cache.GitHub, 'request') as request:
+                with self.assertRaisesRegex(cache.CacheError, 'smaller than 2 GiB'):
+                    cache.GitHub('owner/repository').upload({'id': 1}, 'archive', path)
+            request.assert_not_called()
+
     def test_missing_release_and_empty_release_do_not_request_download_urls(self):
         for release, calls in [(None, 1), ({"id": 17}, 2)]:
             with self.subTest(release=release):
@@ -421,6 +439,113 @@ class UploadRaceTests(unittest.TestCase):
             with self.assertRaises(cache.CacheError):
                 github.upload({"id": 1}, "seed.json", path)
             self.assertEqual(github.uploads, 4)
+
+
+class MultipartCacheTests(CacheFixture):
+    def setUp(self):
+        super().setUp()
+        self.limit = mock.patch.object(cache, 'MAX_ASSET_SIZE', 20)
+        self.part_size = mock.patch.object(cache, 'ASSET_PART_SIZE', 10)
+        self.limit.start()
+        self.part_size.start()
+        self.addCleanup(self.limit.stop)
+        self.addCleanup(self.part_size.stop)
+
+    def multipart(self, key=None, body=b'0123456789abcdefghijKLMNO'):
+        return super().store(key, body=body)
+
+    def test_multipart_roundtrip_and_metadata_only_reuse(self):
+        value = self.multipart()
+        self.assertNotIn('asset_id', value)
+        self.assertEqual([part['size'] for part in value['parts']], [10, 10, 5])
+        self.assertEqual(len(self.backend.assets), 4)
+        self.assertEqual(self.restore()['cache-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'0123456789abcdefghijKLMNO')
+        self.backend.events = []
+        updated = self.multipart(self.key.replace('a' * 32, 'b' * 32))
+        self.assertEqual(updated['parts'], value['parts'])
+        self.assertEqual(len([event for event in self.backend.events if event[0] == 'upload']), 1)
+
+    def test_exact_asset_limit_is_split_and_smaller_archive_is_not(self):
+        self.store(body=b'0123456789abcdefghi')
+        receipt = cache.cache_names(self.key)[1]
+        self.assertNotIn('parts', json.loads(self.backend.assets['cache', receipt]))
+        value = self.multipart(body=b'0123456789abcdefghij')
+        self.assertEqual([part['size'] for part in value['parts']], [10, 10])
+        self.assertEqual(self.restore()['cache-hit'], 'true')
+
+    def test_complete_archive_checksum_is_verified_after_part_checksums(self):
+        value = self.multipart()
+        part = value['parts'][0]
+        self.backend.assets['cache', part['asset']] = b'X' * part['size']
+        part['sha256'] = hashlib.sha256(b'X' * part['size']).hexdigest()
+        receipt = cache.cache_names(self.key)[1]
+        self.backend.assets['cache', receipt] = json.dumps(value).encode()
+        with self.assertRaisesRegex(cache.CacheError, 'cache checksum mismatch'):
+            self.restore()
+
+    def test_missing_or_tampered_part_preserves_local_archive(self):
+        for missing in [False, True]:
+            with self.subTest(missing=missing):
+                value = self.multipart()
+                key = ('cache', value['parts'][1]['asset'])
+                if missing:
+                    del self.backend.assets[key]
+                else:
+                    self.backend.assets[key] = b'tampered'
+                self.path.write_bytes(b'keep local archive')
+                with self.assertRaises(cache.CacheError):
+                    self.restore()
+                self.assertEqual(self.path.read_bytes(), b'keep local archive')
+
+    def test_malformed_part_receipts_are_rejected(self):
+        value = self.multipart()
+        mutations = [
+            lambda v: v.update(asset_id=17),
+            lambda v: v.update(parts=[]),
+            lambda v: v['parts'][0].update(asset='other-target'),
+            lambda v: v['parts'][0].update(size=0),
+            lambda v: v['parts'][0].update(size=20),
+            lambda v: v['parts'][0].update(sha256='bad'),
+            lambda v: v['parts'][1].update(asset_id=v['parts'][0]['asset_id']),
+            lambda v: v.update(size=v['size'] + 1),
+        ]
+        receipt = cache.cache_names(self.key)[1]
+        for mutation in mutations:
+            broken = copy.deepcopy(value)
+            mutation(broken)
+            self.backend.assets['cache', receipt] = json.dumps(broken).encode()
+            with self.assertRaises(cache.CacheError):
+                self.restore()
+
+    def test_multipart_replacement_survives_each_interruption(self):
+        for initial_parts in [False, True]:
+            self.backend = MemoryBackend()
+            self.multipart() if initial_parts else self.store(body=b'old SDK')
+            original = copy.deepcopy(self.backend)
+            newer = self.key.replace('a' * 32, 'b' * 32)
+            for boundary in range(1, 13):
+                with self.subTest(initial_parts=initial_parts, boundary=boundary):
+                    self.backend = copy.deepcopy(original)
+                    self.backend.events = []
+                    self.backend.interrupt_after = boundary
+                    try:
+                        self.multipart(newer, body=b'new SDK contents larger than limit')
+                    except InterruptedError:
+                        pass
+                    self.backend.interrupt_after = None
+                    result = self.restore(newer)
+                    self.assertTrue(result['cache-hit'] == 'true' or result['seed-hit'] == 'true')
+                    self.assertIn(self.path.read_bytes(), [b'old SDK', b'0123456789abcdefghijKLMNO', b'new SDK contents larger than limit'])
+                    self.multipart(newer, body=b'new SDK contents larger than limit')
+                    self.assertEqual(len(self.backend.assets), 5)
+
+    def test_small_replacement_removes_previous_parts(self):
+        self.multipart()
+        self.store(body=b'small SDK')
+        self.assertEqual(len(self.backend.assets), 2)
+        self.assertEqual(self.restore()['cache-hit'], 'true')
+        self.assertEqual(self.path.read_bytes(), b'small SDK')
 
 
 if __name__ == "__main__":

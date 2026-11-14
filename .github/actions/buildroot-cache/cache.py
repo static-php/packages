@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import urllib.error
@@ -13,6 +14,10 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+MAX_ASSET_SIZE = 2 * 1024 ** 3
+ASSET_PART_SIZE = 1024 ** 3
 
 
 class CacheError(RuntimeError):
@@ -68,7 +73,16 @@ class GitHub:
         except urllib.error.HTTPError as error:
             if missing and error.code == 404:
                 return None
-            raise CacheError("GitHub cache request failed: HTTP " + str(error.code)) from error
+            try:
+                details = json.loads(error.read(65536))
+                message = str(details.get('message', ''))
+                if details.get('errors'):
+                    message += ' ' + json.dumps(details['errors'])
+            except (ValueError, TypeError, AttributeError):
+                message = ''
+            finally:
+                error.close()
+            raise CacheError("GitHub cache request failed: HTTP " + str(error.code) + (': ' + message if message else '')) from error
 
     def api(self, suffix, **kwargs):
         return self.request("https://api.github.com/repos/" + self.repository + suffix, **kwargs)
@@ -139,6 +153,9 @@ class GitHub:
     def upload(self, release, name, path, immutable=False):
         url = "https://uploads.github.com/repos/" + self.repository + "/releases/" + str(release["id"]) + "/assets?name=" + urllib.parse.quote(name, safe="")
         path = Path(path)
+        if path.stat().st_size >= MAX_ASSET_SIZE:
+            raise CacheError('Release asset must be smaller than 2 GiB: ' + name + ' (' + str(path.stat().st_size) + ' bytes)')
+        print('Uploading cache asset ' + name + ' (' + str(path.stat().st_size) + ' bytes)', flush=True)
         for attempt in range(4):
             asset = self.find_asset(release, name)
             if asset is not None:
@@ -190,11 +207,38 @@ class ReleaseCache:
             raise CacheError("Cache metadata has no valid digest/size")
         if 'asset_id' in value and (type(value['asset_id']) is not int or value['asset_id'] < 1):
             raise CacheError('Cache metadata has an invalid asset ID')
+        if 'parts' in value:
+            parts = value['parts']
+            if 'asset_id' in value or not isinstance(parts, list) or not 1 <= len(parts) <= 1000:
+                raise CacheError('Invalid multipart cache metadata')
+            ids = set()
+            for index, part in enumerate(parts, 1):
+                if (not isinstance(part, dict) or part.get('asset') != self.asset + '.part-' + str(index).zfill(4)
+                        or type(part.get('asset_id')) is not int or part['asset_id'] < 1 or part['asset_id'] in ids
+                        or type(part.get('size')) is not int or not 0 < part['size'] < MAX_ASSET_SIZE
+                        or not isinstance(part.get('sha256'), str) or not re.fullmatch(r'[a-f0-9]{64}', part['sha256'])):
+                    raise CacheError('Invalid multipart cache part')
+                ids.add(part['asset_id'])
+            if sum(part['size'] for part in parts) != value['size']:
+                raise CacheError('Multipart cache size mismatch')
 
     def install(self, value, temporary):
         candidate = temporary / "buildroot.tar.zst"
-        downloaded = (self.backend.download_id(value['asset_id'], candidate) if value.get('asset_id')
-                      else self.backend.download(self.tag, value['asset'], candidate))
+        if 'parts' in value:
+            with candidate.open('wb') as output:
+                for part in value['parts']:
+                    chunk = temporary / 'part'
+                    if not self.backend.download_id(part['asset_id'], chunk):
+                        raise CacheError('Compiled cache receipt points to a missing archive part: ' + part['asset'])
+                    if chunk.stat().st_size != part['size'] or digest(chunk) != part['sha256']:
+                        raise CacheError('Compiled buildroot cache part checksum mismatch: ' + part['asset'])
+                    with chunk.open('rb') as source:
+                        shutil.copyfileobj(source, output)
+                    chunk.unlink()
+            downloaded = True
+        else:
+            downloaded = (self.backend.download_id(value['asset_id'], candidate) if value.get('asset_id')
+                          else self.backend.download(self.tag, value['asset'], candidate))
         if not downloaded:
             raise CacheError('Compiled cache receipt points to a missing archive; refusing a cold rebuild: ' + value['asset'])
         if (candidate.stat().st_size != value["size"] or digest(candidate) != value["sha256"]):
@@ -249,6 +293,8 @@ class ReleaseCache:
         value = {"schema": 2, "key": self.key, "tag": self.tag, "asset": self.asset, "compatibility": self.seed_key or None, "sha256": checksum, "size": self.path.stat().st_size, "created_at": datetime.now(timezone.utc).isoformat()}
         release = self.backend.release(self.tag)
         suffix = '.upload-' + uuid.uuid4().hex[:12]
+        if value['size'] >= MAX_ASSET_SIZE:
+            return self.save_parts(value, release, suffix)
         staged = self.backend.find_asset(release, self.asset)
         if staged is None or staged.get('size') != value['size'] or staged.get('digest') != 'sha256:' + checksum:
             staged = self.backend.upload(release, self.asset + suffix, self.path)
@@ -274,8 +320,58 @@ class ReleaseCache:
         if previous:
             self.backend.delete(previous['id'])
         for asset in self.backend.list_assets(release):
-            if asset['id'] != staged['id'] and asset['name'].startswith((self.asset + '.upload-', self.receipt + '.upload-')):
+            if asset['id'] != staged['id'] and asset['name'].startswith((self.asset + '.upload-', self.asset + '.part-', self.receipt + '.upload-')):
                 self.backend.delete(asset['id'])
+        return value
+
+    def save_parts(self, value, release, suffix):
+        value['parts'] = []
+        staged_parts = []
+        with tempfile.TemporaryDirectory(prefix='buildroot-cache-', dir=self.path.parent) as directory:
+            temporary = Path(directory)
+            with self.path.open('rb') as source:
+                remaining = value['size']
+                while remaining:
+                    name = self.asset + '.part-' + str(len(value['parts']) + 1).zfill(4)
+                    chunk = temporary / 'part'
+                    size = min(remaining, ASSET_PART_SIZE)
+                    with chunk.open('wb') as output:
+                        pending = size
+                        while pending:
+                            block = source.read(min(pending, 1024 * 1024))
+                            if not block:
+                                raise CacheError('Compiled cache archive changed during upload')
+                            output.write(block)
+                            pending -= len(block)
+                    checksum = digest(chunk)
+                    staged = self.backend.find_asset(release, name)
+                    if staged is None or staged.get('size') != size or staged.get('digest') != 'sha256:' + checksum:
+                        staged = self.backend.upload(release, name + suffix, chunk)
+                    value['parts'].append(dict(asset=name, asset_id=staged['id'], size=size, sha256=checksum))
+                    staged_parts.append(staged)
+                    remaining -= size
+            metadata = temporary / 'metadata.json'
+            metadata.write_text(json.dumps(value, sort_keys=True) + '\n')
+            pointer = self.backend.upload(release, self.receipt + suffix, metadata)
+        previous = self.backend.find_asset(release, self.receipt + '.previous')
+        current = self.backend.find_asset(release, self.receipt)
+        if current:
+            if previous:
+                self.backend.delete(previous['id'])
+            self.backend.rename(current['id'], self.receipt + '.previous')
+        self.backend.rename(pointer['id'], self.receipt)
+        # The receipt commits every part ID before any previous archive is removed.
+        retained = {part['asset_id'] for part in value['parts']}
+        for asset in self.backend.list_assets(release):
+            if (asset['id'] not in retained and (asset['name'] == self.asset
+                    or asset['name'].startswith((self.asset + '.part-', self.asset + '.upload-', self.receipt + '.upload-')))):
+                self.backend.delete(asset['id'])
+        for part, staged in zip(value['parts'], staged_parts):
+            if staged['name'] != part['asset']:
+                self.backend.rename(staged['id'], part['asset'])
+        previous = self.backend.find_asset(release, self.receipt + '.previous')
+        if previous:
+            self.backend.delete(previous['id'])
         return value
 
 
