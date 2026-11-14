@@ -224,6 +224,7 @@ def package_libraries(kind, direct=False):
         if projected is not None:
             classified['libraries'] = {name: entry for name, entry in classified['libraries'].items() if name in projected}
         write(manifest, classified)
+    if not shared or read(selected_sdk / 'build-payload.json').get('state') != 'sealed':
         run(['php', 'bin/build-payload', 'seal', '--root', selected_sdk])
     if kind != 'rpm':
         streams = set(plan.get('library_streams', [])) | {stream for stream, request in plan['php_requests'].items()

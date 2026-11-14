@@ -388,21 +388,25 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(len([call for call in calls if call[:2] == ['php', 'bin/spp']]), 1 if kind == 'apk' else 0)
 
     def test_format_library_selection_without_openssl_uses_common_sdk_in_place(self):
-        for kind in ('rpm', 'deb'):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+        for kind, state in [('rpm', 'prepared'), ('deb', 'prepared'), ('rpm', 'sealed'), ('deb', 'sealed')]:
+            with self.subTest(kind=kind, state=state), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 stage = root / 'stage'
                 glibc.write(stage / 'target.json', {'source_run_id': '42', 'image': 'producer'})
-                glibc.write(stage / kind / 'shared-library-plan.json', {'libraries': ['zlib']})
+                glibc.write(stage / kind / 'shared-library-plan.json', {'libraries': ['zlib'], 'php_requests': {}, 'library_streams': ['8.5']})
                 glibc.write(root / 'buildroot/shared-libraries.json', {'libraries': {'zlib': {'elf': {}}}})
+                glibc.write(stage / kind / 'shared-libraries.json', {'libraries': {'zlib': {'elf': {}}}})
+                glibc.write(root / 'buildroot/build-payload.json', {'state': state})
                 with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
-                        patch.object(glibc, 'package_libraries') as package, patch.object(glibc, 'run') as run, \
+                        patch.object(glibc, 'package_library_archives') as package, patch.object(glibc, 'run') as run, \
                         patch.dict(os.environ, TYPE=kind):
                     glibc.format_libraries()
-                package.assert_called_once_with(kind, direct=True)
+                package.assert_called_once()
+                self.assertEqual(package.call_args.args[2], root / 'buildroot')
                 self.assertTrue((root / 'buildroot').is_dir())
                 self.assertFalse((stage / ('sdk-' + kind)).exists())
-                self.assertEqual(len(run.call_args_list), 1)
+                self.assertEqual(len(run.call_args_list), 2 if state == 'prepared' else 1)
+                self.assertEqual(any('seal' in call.args[0] for call in run.call_args_list), state == 'prepared')
                 self.assertIn('receipt', run.call_args.args[0])
 
     def test_php_packaging_preserves_prebuilt_libraries_with_a_subset(self):
