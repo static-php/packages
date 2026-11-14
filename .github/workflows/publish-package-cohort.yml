@@ -3,18 +3,6 @@ name: Publish package cohort
 on:
     workflow_call:
         inputs:
-            mirror:
-                description: Mirror packages already published to host 1
-                type: boolean
-                default: false
-            primary-run-id:
-                description: Existing primary publication results for a mirror-only retry
-                type: string
-                default: ""
-            primary-artifact-name:
-                description: Recorded publication results artifact for this cohort
-                type: string
-                default: ""
             php-version:
                 description: Optional single PHP stream to retry
                 type: string
@@ -63,7 +51,7 @@ permissions:
     actions: read
 
 concurrency:
-    group: ${{ inputs.mirror && format('shared-publish-host2-{0}-{1}', inputs.format, inputs.target) || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}
+    group: ${{ format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}
     cancel-in-progress: false
     queue: max
 
@@ -88,9 +76,8 @@ env:
 jobs:
     publish-glibc:
         name: Publish glibc cohort
-        if: inputs.format == 'deb' || (inputs.format == 'rpm' && !inputs.mirror)
+        if: inputs.format == 'deb' || inputs.format == 'rpm'
         runs-on: ubuntu-24.04${{ inputs.arch == 'arm64' && '-arm' || '' }}
-        continue-on-error: ${{ inputs.mirror && inputs.primary-run-id == '' }}
         container:
             image: ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}
         steps: &publish-steps
@@ -159,18 +146,8 @@ jobs:
                     path: cohort
             -   name: Verify selected build target
                 run: python3 .github/actions/shared-libraries/publication.py verify-target --directory "cohort/shared-libs-$TYPE-$TARGET"
-            -   name: Download primary publication results
-                if: inputs.mirror
-                continue-on-error: ${{ inputs.primary-run-id == '' }}
-                uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-                with:
-                    github-token: ${{ github.token }}
-                    run-id: ${{ inputs.primary-run-id || github.run_id }}
-                    name: ${{ inputs.primary-artifact-name || format('publication-{0}-{1}{2}', inputs.format, inputs.target, inputs.publication-id != '' && format('-{0}', inputs.publication-id) || '') }}
-                    path: log
             -   name: Publish each validated PHP stream independently
                 env:
-                    MIRROR: ${{ inputs.mirror }}
                     RPM_SIGNING_KEY: ${{ secrets.DEB_GPG_PRIVATE_KEY }}
                     RPM_SIGNING_PASSWORD: ${{ secrets.DEB_GPG_PASSWORD }}
                 run: python3 .github/actions/shared-libraries/publication.py publish-available
@@ -178,7 +155,7 @@ jobs:
                 if: ${{ !cancelled() }}
                 uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
                 with:
-                    name: publication-${{ inputs.format }}-${{ inputs.target }}${{ inputs.publication-id != '' && format('-{0}', inputs.publication-id) || '' }}${{ inputs.mirror && '-mirror' || '' }}
+                    name: publication-${{ inputs.format }}-${{ inputs.target }}${{ inputs.publication-id != '' && format('-{0}', inputs.publication-id) || '' }}
                     overwrite: true
                     path: |
                         log/publication-*.log
@@ -189,5 +166,4 @@ jobs:
         name: Publish Alpine cohort
         if: inputs.format == 'apk'
         runs-on: ubuntu-24.04${{ inputs.arch == 'arm64' && '-arm' || '' }}
-        continue-on-error: ${{ inputs.mirror && inputs.primary-run-id == '' }}
         steps: *publish-steps

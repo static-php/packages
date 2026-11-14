@@ -61,7 +61,7 @@ def package_groups(directory, package_type, owners, helper, selected_owners=None
     return groups
 
 
-def publication_order(groups, helper, kind, mirror=False):
+def publication_order(groups, helper, kind):
     ordered = []
     for owner, paths in groups.items():
         for path in paths:
@@ -72,11 +72,11 @@ def publication_order(groups, helper, kind, mirror=False):
             elif name == LAYOUT_PACKAGE:
                 phase = 0
             elif name.startswith('php-zts-lib-'):
-                phase = 1 if mirror else 3
+                phase = 3
             elif name in ('php-zts', 'php-zts-cli'):
-                phase = 3 if mirror else 2
+                phase = 2
             else:
-                phase = 2 if mirror else 1
+                phase = 1
             ordered.append((phase, owner, path))
     return sorted(ordered, key=lambda item: (item[0], item[1], item[2].name))
 
@@ -86,7 +86,7 @@ def verify_debian_indexes(host, password, groups, helper):
     return verifier['verify_indexes'](host, password, groups, helper)
 
 
-def publish(host, password, kind, groups, helper, mirror=False):
+def publish(host, password, kind, groups, helper):
     digests = {}
     selected = {}
     for owner, paths in sorted(groups.items()):
@@ -111,14 +111,14 @@ def publish(host, password, kind, groups, helper, mirror=False):
                             path.write_bytes(data)
                             print('Reusing identical published DEB: ' + path.name, flush=True)
         before = {path: helper['archive_sha256'](path) for path in paths}
-        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote, keep_newer=mirror)
-        if not mirror and len(allowed) != len(paths):
+        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
+        if len(allowed) != len(paths):
             raise RuntimeError('A version/archive identity guard rejected the cohort for owner ' + owner)
         digests.update({path: before[path] for path in allowed})
         selected[owner] = allowed
     if any(helper['archive_sha256'](path) != digest for path, digest in digests.items()):
         raise RuntimeError('A cohort archive changed during publication preflight')
-    ordered = publication_order(selected, helper, kind, mirror)
+    ordered = publication_order(selected, helper, kind)
     completed = {owner: [] for owner in selected}
     def upload(item):
         index, (_, owner, path) = item
@@ -133,9 +133,8 @@ def publish(host, password, kind, groups, helper, mirror=False):
             return failure
         print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         completed[owner].append(path)
-    # Mirror cohorts are serialized by the workflow; bound concurrent large uploads.
     failures = []
-    with ThreadPoolExecutor(max_workers=2 if mirror else 4) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
             failures.extend(error for error in pool.map(upload, phase) if error)
     if kind == 'debian':
@@ -148,7 +147,6 @@ def publish(host, password, kind, groups, helper, mirror=False):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('package_type', choices=('deb', 'apk'))
-    parser.add_argument('host_number', choices=('1', '2'))
     parser.add_argument('--cohort', type=Path)
     parser.add_argument('--directory', type=Path, default=Path('.'))
     args = parser.parse_args(argv)
@@ -161,7 +159,7 @@ def main(argv=None):
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
     groups = package_groups(args.directory, args.package_type, owners, helper, selected)
-    publish(helper['host' + args.host_number], os.environ['FORGEJO_PASSWORD'], kind, groups, helper, mirror=args.host_number == '2')
+    publish(helper['host'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper)
 
 
 

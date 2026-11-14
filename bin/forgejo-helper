@@ -26,8 +26,7 @@ CONSUMER_SIDECAR_PACKAGE = 'php-zts-consumer-metadata'
 VERIFIED_ARCHIVE_IDENTITIES = {}
 REGISTRY_SESSIONS = local()
 
-host1 = "https://git.henderkes.com"
-host2 = "https://git.static-php.dev"
+host = "https://git.henderkes.com"
 
 STREAM_OWNERS = ('82', '83', '84', '85', '86')
 
@@ -480,10 +479,9 @@ def version_is_newer(pkg_type, left, right):
         raise RuntimeError(f"Cannot compare APK versions {left} and {right}")
     return result == '>'
 
-def verify_upload_versions(host, owner, password, pkg_type, files, packages, *, keep_newer=False):
+def verify_upload_versions(host, owner, password, pkg_type, files, packages):
     candidates = {}
     skipped = {}
-    newer = set()
     def check(item):
         index, pkg_file = item
         name, version, arch = package_metadata(pkg_file, pkg_type)
@@ -511,22 +509,14 @@ def verify_upload_versions(host, owner, password, pkg_type, files, packages, *, 
                 skipped[key] = f"Cannot verify {name} {version} for {arch}: {error}"
                 break
             if arch in archs:
-                if keep_newer:
-                    newer.add(key)
-                else:
-                    skipped[key] = f"{name} {version} sorts below published {published['version']} for {arch}"
+                skipped[key] = f"{name} {version} sorts below published {published['version']} for {arch}"
                 break
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(check, enumerate(files, 1)))
-    rejected = [reason for key, reason in skipped.items() if key not in newer]
-    if keep_newer and rejected:
-        raise RuntimeError('A version/archive identity guard rejected the cohort: ' + ' | '.join(rejected))
     allowed = []
     for pkg_file in files:
         key = candidates[pkg_file]
-        if key in newer:
-            print(f"Keeping newer mirror package: {owner}/{pkg_file.name}", flush=True)
-        elif key in skipped:
+        if key in skipped:
             print(f"::warning::Skipping upload of {pkg_file.name}: {skipped[key]}")
         else:
             allowed.append(pkg_file)
@@ -726,16 +716,10 @@ def check_packages(host, owner, password, pkg_type, pattern):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    host = host1
-    if "--host=2" in args:
-        host = host2
-        args.remove("--host=2")
-
     if len(args) < 4:
-        print("Usage: script.py [--host=2] <upload|check|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
+        print("Usage: script.py <upload|check|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
         print("Examples:")
         print("  script.py upload alpine 85 pass '*.apk'")
-        print("  script.py --host=2 upload rpm 85 pass '*.rpm'")
         print("  script.py list alpine 85 pass")
         sys.exit(1)
 

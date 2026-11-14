@@ -57,9 +57,9 @@ class ForgejoPublication(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def mirror(self, cohort, owners):
+    def publish_cohort(self, cohort, owners):
         with patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test', 'PUBLICATION_PHP_STREAMS': '8.5'}), \
-                patch('sys.argv', ['publish-forgejo.py', 'apk', '2', '--cohort', str(cohort), '--directory', str(self.root)]), \
+                patch('sys.argv', ['publish-forgejo.py', 'apk', '--cohort', str(cohort), '--directory', str(self.root)]), \
                 patch.dict(publisher['main'].__globals__, {'consumer_owners': Mock(return_value=owners)}), \
                 patch.object(publisher['main'].__globals__['runpy'], 'run_path', return_value=helper) as loader:
             publisher['main']()
@@ -219,19 +219,18 @@ class ForgejoPublication(unittest.TestCase):
         paths = [self.archive(name=name) for name in (
             'php-zts-runtime-layout', 'php-zts-lib-grpc-debuginfo', 'php-zts-lib-zlib',
             'frankenphp', 'php-zts-cli')]
-        for mirror in (False, True):
-            attempted = []
-            def upload(host, owner, password, kind, path, **kwargs):
-                attempted.append(path)
-                if 'grpc-debuginfo' in path.name:
-                    raise RuntimeError('connection closed during upload')
-            helpers = dict(helper, get_remote_candidates=lambda *args: [],
-                           verify_upload_versions=lambda host, owner, password, kind, paths, remote, **kwargs: paths,
-                           upload_verified_archive=upload)
-            with self.subTest(mirror=mirror), contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaisesRegex(RuntimeError, '1 package uploads failed; remaining packages were attempted'):
-                    publisher['publish']('https://example.com', 'test', 'alpine', {'84': paths}, helpers, mirror=mirror)
-            self.assertCountEqual(attempted, paths)
+        attempted = []
+        def upload(host, owner, password, kind, path, **kwargs):
+            attempted.append(path)
+            if 'grpc-debuginfo' in path.name:
+                raise RuntimeError('connection closed during upload')
+        helpers = dict(helper, get_remote_candidates=lambda *args: [],
+                       verify_upload_versions=lambda host, owner, password, kind, paths, remote, **kwargs: paths,
+                       upload_verified_archive=upload)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, '1 package uploads failed; remaining packages were attempted'):
+                publisher['publish']('https://example.com', 'test', 'alpine', {'84': paths}, helpers)
+        self.assertCountEqual(attempted, paths)
 
     def test_owner_listing_records_owner_and_reads_every_stream(self):
         listing = Mock(side_effect=lambda host, owner, password, kind: [{'name': 'library', 'version': owner}])
@@ -240,7 +239,7 @@ class ForgejoPublication(unittest.TestCase):
         self.assertEqual([record['owner'] for record in records], list(publisher['STREAM_OWNERS']))
         self.assertEqual(listing.call_count, 5)
 
-    def test_mixed_mirror_copies_only_selected_packages_without_backfilling_libraries(self):
+    def test_mixed_cohort_publishes_only_selected_packages_without_backfilling_libraries(self):
         names = {'php-zts-runtime-layout', 'php-zts-lib-libaom', 'php-zts-lib-libaom-debuginfo',
                  'php-zts-ssh2', 'php-zts-ssh2-debuginfo'}
         selected = [self.archive(name=name) for name in sorted(names)]
@@ -256,19 +255,18 @@ class ForgejoPublication(unittest.TestCase):
         owners = {helper['package_metadata'](path, 'alpine'): '85' for path in selected
                   if not publisher['independent'](helper['package_metadata'](path, 'alpine')[0])}
         uploaded = []
-        def publish(host, password, kind, groups, helpers, mirror):
-            self.assertTrue(mirror)
+        def publish(host, password, kind, groups, helpers):
             self.assertEqual(set(groups), {'85'})
             uploaded.extend(path for paths in groups.values() for path in paths)
         with patch.dict(publisher['publish'].__globals__, {'publish': publish}), \
                 patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.mirror(self.root / 'cohort', owners)
+            self.publish_cohort(self.root / 'cohort', owners)
         self.assertEqual({path.name: path.read_bytes() for path in uploaded}, original)
         self.assertEqual(len(uploaded), len(selected))
         self.assertEqual({path.name for path in self.root.glob('*.apk')}, set(original))
 
-    def test_mirror_preflights_runtime_and_debug_together_once(self):
+    def test_cohort_preflights_runtime_and_debug_together_once(self):
         paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-lib-libaom', 'php-zts-lib-libaom-debuginfo')]
         listing = Mock(return_value=[])
         preflight = Mock(side_effect=lambda host, owner, password, kind, files, remote, **kwargs: files)
@@ -276,23 +274,23 @@ class ForgejoPublication(unittest.TestCase):
         helpers = dict(helper, get_remote_candidates=listing, verify_upload_versions=preflight,
                        upload_verified_archive=lambda host, owner, password, kind, path, **kwargs: uploaded.append(path))
         with contextlib.redirect_stdout(io.StringIO()):
-            publisher['publish']('https://mirror.test', 'test', 'alpine', {'85': paths}, helpers, mirror=True)
+            publisher['publish']('https://example.com', 'test', 'alpine', {'85': paths}, helpers)
         listing.assert_called_once()
-        preflight.assert_called_once_with('https://mirror.test', '85', 'test', 'alpine', paths, [], keep_newer=True)
+        preflight.assert_called_once_with('https://example.com', '85', 'test', 'alpine', paths, [])
         self.assertEqual(uploaded[-1].name, paths[-1].name)
         self.assertCountEqual(uploaded, paths)
 
-    def test_library_only_mirror_publishes_only_the_selected_archives(self):
+    def test_library_only_cohort_publishes_only_the_selected_archives(self):
         names = {'php-zts-lib-' + identifier + suffix for identifier in ('libaom', 'libjxl')
                  for suffix in ('', '-debuginfo')}
         for name in sorted(names):
             self.archive(name=name)
         uploaded = []
-        def publish(host, password, kind, groups, helpers, mirror):
+        def publish(host, password, kind, groups, helpers):
             uploaded.extend(helpers['package_metadata'](path, kind)[0] for paths in groups.values() for path in paths)
         with patch.dict(publisher['publish'].__globals__, {'publish': publish}), \
                 patch.dict('os.environ', {'FORGEJO_PASSWORD': 'test'}):
-            self.mirror(self.root, {})
+            self.publish_cohort(self.root, {})
         self.assertEqual(set(uploaded), names)
         self.assertEqual(len(uploaded), len(names))
 
@@ -565,7 +563,7 @@ class ForgejoPublication(unittest.TestCase):
             publisher['publish']('https://example.com', 'test', 'alpine', groups, helpers)
         upload.assert_not_called()
 
-    def test_mirror_retry_keeps_newer_runtime_and_debug_in_one_version_check(self):
+    def test_publication_rejects_older_runtime_and_debug_together(self):
         cli = self.archive(name='php-zts-cli', version='8.5.12-r1')
         debug = self.archive(name='php-zts-cli-debuginfo', version='8.5.12-r1')
         library = self.archive()
@@ -580,33 +578,20 @@ class ForgejoPublication(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'guard rejected'):
                 publisher['publish']('https://primary.test', 'test', 'alpine', {'85': paths}, helpers)
             self.assertEqual(uploaded, [])
-            architectures.reset_mock()
-            publisher['publish']('https://mirror.test', 'test', 'alpine', {'85': paths}, helpers, mirror=True)
-            self.assertEqual(uploaded, [library])
-            architectures.assert_called_once()
-            conflicting_debug = remote + [{'name': 'php-zts-cli-debuginfo', 'version': '8.5.12-r1'}]
-            with patch.dict(helper_globals, {'remote_package_archives': lambda *args: [{'arch': 'x86_64', 'sha256': '0' * 64}]}):
-                self.assertEqual(helper['verify_upload_versions']('https://mirror.test', '85', 'test', 'alpine', paths,
-                    conflicting_debug, keep_newer=True), [library])
-            architectures.return_value = {'aarch64'}
-            self.assertEqual(helper['verify_upload_versions']('https://mirror.test', '85', 'test', 'alpine', paths, remote, keep_newer=True), paths)
-            architectures.return_value = set()
-            with self.assertRaisesRegex(RuntimeError, 'Cannot determine published architectures'):
-                helper['verify_upload_versions']('https://mirror.test', '85', 'test', 'alpine', paths, remote, keep_newer=True)
 
-    def test_mirror_retry_does_not_bypass_equal_version_identity_errors(self):
+    def test_publication_retry_does_not_bypass_equal_version_identity_errors(self):
         path = self.archive()
         remote = [{'name': 'php-zts-lib-ssl', 'version': '3.6.0-r1'}]
         upload = Mock()
         helpers = dict(helper, get_remote_candidates=lambda *args: remote, upload_verified_archive=upload)
         with patch.dict(helper_globals, {'version_is_newer': lambda *args: False,
                 'remote_package_archives': lambda *args: [{'arch': 'x86_64', 'sha256': '0' * 64}]}), \
-                self.assertRaisesRegex(RuntimeError, 'Equal version has different archive bytes'):
-            publisher['publish']('https://mirror.test', 'test', 'alpine', {'85': [path]}, helpers, mirror=True)
+                self.assertRaisesRegex(RuntimeError, 'guard rejected the cohort'):
+            publisher['publish']('https://example.com', 'test', 'alpine', {'85': [path]}, helpers)
         upload.assert_not_called()
 
     @unittest.skipUnless(shutil.which('apk'), 'native APK version comparator unavailable')
-    def test_invalid_old_apk_version_cannot_block_valid_mirror_replacement(self):
+    def test_invalid_old_apk_version_cannot_block_valid_replacement(self):
         path = self.archive(name='php-zts-igbinary', version='3.2.17_rc1_p82-r5')
         remote = [{'name': 'php-zts-igbinary', 'version': '3.2.17~rc1p82-r0'}]
         self.assertFalse(helper['version_is_newer']('alpine', remote[0]['version'], '3.2.17_rc1_p82-r5'))
@@ -617,38 +602,36 @@ class ForgejoPublication(unittest.TestCase):
                        get_remote_package_archs=Mock(side_effect=AssertionError('Invalid old archive read')),
                        upload_verified_archive=upload)
         with contextlib.redirect_stdout(io.StringIO()):
-            publisher['publish']('https://mirror.test', 'test', 'alpine', {'82': [path]}, helpers, mirror=True)
-        upload.assert_called_once_with('https://mirror.test', '82', 'test', 'alpine', path, preflighted=True)
+            publisher['publish']('https://example.com', 'test', 'alpine', {'82': [path]}, helpers)
+        upload.assert_called_once_with('https://example.com', '82', 'test', 'alpine', path, preflighted=True)
 
-    def test_parallel_mirror_uploads_finish_dependencies_before_cli(self):
+    def test_parallel_uploads_publish_consumers_before_replacing_libraries(self):
         libraries = {'php-zts-lib-' + str(i) for i in range(4)}
         paths = [self.archive(name=name) for name in sorted(libraries | {'php-zts-cli', 'php-zts-runtime-layout'})]
         completed = set()
-        barrier = Barrier(2)
+        barrier = Barrier(4)
         def upload(host, owner, password, kind, path, **kwargs):
             name = helper['package_metadata'](path, kind)[0]
             if name in libraries:
                 self.assertIn('php-zts-runtime-layout', completed)
+                self.assertIn('php-zts-cli', completed)
                 barrier.wait(timeout=3)
-            if name == 'php-zts-cli':
-                self.assertTrue(libraries <= completed)
             completed.add(name)
         helpers = dict(helper, get_remote_candidates=lambda *args: [],
                        verify_upload_versions=lambda host, owner, password, kind, paths, remote, **kwargs: paths,
                        upload_verified_archive=upload)
         with contextlib.redirect_stdout(io.StringIO()):
-            publisher['publish']('https://example.com', 'test', 'alpine', {'85': paths}, helpers, mirror=True)
+            publisher['publish']('https://example.com', 'test', 'alpine', {'85': paths}, helpers)
         self.assertEqual(len(completed), 6)
 
-    def test_primary_and_mirror_update_order(self):
+    def test_publication_update_order(self):
         paths = [self.archive(name=name) for name in ('php-zts-cli', 'php-zts-intl', 'php-zts-lib-ssl',
                  'php-zts-runtime-layout', 'php-zts-cli-debuginfo', 'php-zts-lib-ssl-debuginfo')]
         groups = {'86': paths}
-        def names(mirror):
-            return [helper['package_metadata'](path, 'alpine')[0] for _, _, path in publisher['publication_order'](groups, helper, 'alpine', mirror)]
+        def names():
+            return [helper['package_metadata'](path, 'alpine')[0] for _, _, path in publisher['publication_order'](groups, helper, 'alpine')]
         debug = ['php-zts-cli-debuginfo', 'php-zts-lib-ssl-debuginfo']
-        self.assertEqual(names(True), ['php-zts-runtime-layout', 'php-zts-lib-ssl', 'php-zts-intl', 'php-zts-cli'] + debug)
-        self.assertEqual(names(False), ['php-zts-runtime-layout', 'php-zts-intl', 'php-zts-cli', 'php-zts-lib-ssl'] + debug)
+        self.assertEqual(names(), ['php-zts-runtime-layout', 'php-zts-intl', 'php-zts-cli', 'php-zts-lib-ssl'] + debug)
 
     def test_archive_mutation_during_preflight_prevents_upload(self):
         path = self.archive()

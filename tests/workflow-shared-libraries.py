@@ -311,7 +311,7 @@ class CacheAndCohortTests(unittest.TestCase):
                            PATH=str(root / 'shims') + ':' + os.environ['PATH'],
                            BUILDER_HOST_UID='1001', BUILDER_HOST_GID='1002',
                            COMPOSER_CACHE_DIR=str(root / 'composer-cache'), OWNER_CALL=str(root / 'ownership'))
-                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'upload-1'],
+                result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'upload'],
                                         cwd=root, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual((root / 'ownership').read_text().splitlines(),

@@ -1,5 +1,5 @@
 name: Publish existing packages
-run-name: ${{ inputs.mirror_run_id != '' && 'Mirror' || 'Publish' }} ${{ inputs.format }} packages
+run-name: Publish ${{ inputs.format }} packages
 
 on:
     workflow_dispatch:
@@ -13,14 +13,6 @@ on:
                 description: "Completed package build run IDs (comma-separated)"
                 type: string
                 required: true
-            mirror_run_id:
-                description: "Mirror only: one shared primary run ID or one per build (comma-separated)"
-                type: string
-                default: ""
-            skip_mirror:
-                description: "Publish to host 1 only; mirror its results afterward"
-                type: boolean
-                default: false
             arch:
                 description: "Architecture to retry"
                 type: choice
@@ -57,17 +49,15 @@ jobs:
                     DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
                     SELECTED_ARCH: ${{ inputs.arch }}
                     SELECTED_PHP: ${{ inputs.php_version }}
-                    PRIMARY_RUN_IDS: ${{ inputs.mirror_run_id }}
                 run: |
                     python3 .github/actions/shared-libraries/publication.py prepare \
                         --run-ids "$BUILD_RUN_ID" --type "$TYPE" --branch "$DEFAULT_BRANCH" \
-                        --arch "$SELECTED_ARCH" --php "$SELECTED_PHP" \
-                        --primary-run-ids "$PRIMARY_RUN_IDS" >> "$GITHUB_OUTPUT"
+                        --arch "$SELECTED_ARCH" --php "$SELECTED_PHP" >> "$GITHUB_OUTPUT"
 
     publish:
         name: Publish (${{ matrix.type }} ${{ matrix.target }} ${{ matrix.scope }})
         needs: prepare
-        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && inputs.mirror_run_id == '' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' }}
         permissions:
             contents: write
             packages: read
@@ -81,36 +71,6 @@ jobs:
             php-version: ${{ inputs.php_version }}
             php-versions: ${{ matrix.php-versions }}
             publication-id: ${{ matrix.publication-id }}
-            target: ${{ matrix.target }}
-            arch: ${{ matrix.arch }}
-            image: ${{ matrix.image }}
-            package-image-digest: ${{ matrix.package-image-digest }}
-            source-run-id: ${{ matrix.source-run-id }}
-            build-run-id: ${{ matrix.build-run-id }}
-            artifact-ids: ${{ matrix.artifact-ids }}
-        secrets: inherit
-
-    mirror:
-        name: Mirror (${{ matrix.type }} ${{ matrix.target }} ${{ matrix.scope }})
-        needs: [prepare, publish]
-        if: ${{ !cancelled() && needs.prepare.outputs.any == 'true' && (inputs.mirror_run_id != '' || !inputs.skip_mirror) }}
-        permissions:
-            contents: write
-            packages: read
-            actions: read
-        strategy:
-            fail-fast: false
-            max-parallel: 2
-            matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-        uses: ./.github/workflows/publish-package-cohort.yml
-        with:
-            mirror: true
-            php-version: ${{ inputs.php_version }}
-            php-versions: ${{ matrix.php-versions }}
-            publication-id: ${{ matrix.publication-id }}
-            primary-run-id: ${{ matrix.primary-run-id }}
-            primary-artifact-name: ${{ matrix.primary-artifact-name }}
-            format: ${{ matrix.type }}
             target: ${{ matrix.target }}
             arch: ${{ matrix.arch }}
             image: ${{ matrix.image }}

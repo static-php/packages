@@ -348,19 +348,3 @@ jobs:
             source-run-id: ${{ matrix.source_run_id }}
             php-versions: ${{ inputs.php_versions }}
         secrets: inherit
-
-    mirror:
-        name: Queue secondary mirror
-        needs: [prepare, publish]
-        if: ${{ !cancelled() && inputs.publish == true && inputs.format == 'deb' && needs.prepare.outputs.publish-any == 'true' }}
-        runs-on: ubuntu-24.04
-        continue-on-error: true
-        permissions:
-            actions: write
-        steps:
-            -   name: Queue mirror independently of the producer lock
-                env:
-                    GH_TOKEN: ${{ github.token }}
-                run: |
-                    gh workflow run publish-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-                        -f format=deb -f build_run_id="$GITHUB_RUN_ID" -f mirror_run_id="$GITHUB_RUN_ID"

@@ -158,11 +158,11 @@ class Publication(unittest.TestCase):
                     stream = environment['PUBLICATION_PHP_STREAMS']
                     phase = command[-1]
                     events.append((stream, phase))
-                    if stream == '8.4' and phase in ('upload-1', 'publish-rpm'):
+                    if stream == '8.4' and phase in ('upload', 'publish-rpm'):
                         with log.open('a') as output:
                             output.write('::warning::Skipping upload of example.apk: Cannot verify example: connection reset\n'
                                          'Traceback:\n  caller\n  publisher\n  raise RuntimeError\nRuntimeError: cohort rejected\n')
-                    if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload-1', 'publish-rpm') or phase == 'upload-2':
+                    if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload', 'publish-rpm'):
                         raise subprocess.CalledProcessError(1, command)
                 previous = Path.cwd()
                 try:
@@ -175,23 +175,11 @@ class Publication(unittest.TestCase):
                         self.assertIn('::error::', output.getvalue())
                         primary_summary = (root / 'summary').read_text()
                         self.assertIn('publication-' + kind + '-target-php8.4.log', primary_summary)
-                        self.assertFalse(any(phase == 'upload-2' for _, phase in events))
                         self.assertEqual([stream for stream, phase in events if phase == 'record-repository'], ['8.5', '8.6'])
                         self.assertEqual([stream for stream, phase in events if phase == 'invalidate-repository'], ['8.4'])
-                        if kind != 'rpm':
-                            output.seek(0)
-                            output.truncate()
-                            self.assertFalse(publication.publish_available(root / 'cohort', kind, 'target', mirror=True))
-                            self.assertIn('::warning::', output.getvalue())
-                            self.assertNotIn('::error::', output.getvalue())
-                            mirrored = [stream for stream, phase in events if phase == 'upload-2']
-                            self.assertEqual(mirrored, ['8.5', '8.6'])
-                            self.assertLess(events.index(('8.6', 'upload-1')), events.index(('8.5', 'upload-2')))
-                            self.assertEqual(json.loads((root / 'log' / f'publication-{kind}-target.json').read_text()),
-                                             ['8.5', '8.6'])
                 finally:
                     os.chdir(previous)
-                upload = 'publish-rpm' if kind == 'rpm' else 'upload-1'
+                upload = 'publish-rpm' if kind == 'rpm' else 'upload'
                 self.assertNotIn(('8.2', 'publish'), events)
                 self.assertNotIn(('8.3', upload), events)
                 for stream in ('8.5', '8.6'):
@@ -241,10 +229,10 @@ class Publication(unittest.TestCase):
 
     def test_format_matrix_pins_multiple_builds_and_rejects_overlapping_cohorts(self):
         self.plan()
-        first = (self.state(), self.plans, '', set())
+        first = (self.state(), self.plans)
         self.run['id'], self.artifacts = 43, []
         self.plan(arch='arm64')
-        second = (self.state(), self.plans, '', set())
+        second = (self.state(), self.plans)
         values = publication.batch_matrix([first, second])
         self.assertEqual({(row['arch'], row['build-run-id']) for row in values}, {('x86_64', '42'), ('arm64', '43')})
         selected, = publication.batch_matrix([first, second], selected_arch='arm64')
@@ -257,7 +245,6 @@ class Publication(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(RuntimeError):
                 publication.run_ids(value)
         self.assertEqual(publication.run_ids('42, 43'), ['42', '43'])
-        self.assertEqual(publication.run_ids('100,100', distinct=False), ['100', '100'])
 
     def test_rpm_and_deb_publish_independently_from_one_build(self):
         self.plan()
@@ -472,13 +459,11 @@ class WorkflowContracts(unittest.TestCase):
         self.workflow = yaml.safe_load((ROOT / '.github/workflows/publish-packages.yml').read_text())
         self.publisher = yaml.safe_load((ROOT / '.github/workflows/publish-package-cohort.yml').read_text())
 
-    def test_only_secondary_mirror_failures_are_non_blocking(self):
+    def test_publication_failures_block_their_jobs(self):
         self.assertNotIn('continue-on-error', self.workflow['jobs']['prepare'])
         for name in ['publish-glibc', 'publish-apk']:
             job = self.publisher['jobs'][name]
-            self.assertEqual(job['continue-on-error'], "${{ inputs.mirror && inputs.primary-run-id == '' }}")
-            results = next(step for step in job['steps'] if step['name'] == 'Download primary publication results')
-            self.assertEqual(results['continue-on-error'], "${{ inputs.primary-run-id == '' }}")
+            self.assertNotIn('continue-on-error', job)
             publish = next(step for step in job['steps'] if step['name'] == 'Publish each validated PHP stream independently')
             self.assertFalse(publish.get('continue-on-error', False))
             diagnostics = next(step for step in job['steps'] if step['name'] == 'Upload publication diagnostics')
@@ -487,32 +472,15 @@ class WorkflowContracts(unittest.TestCase):
     def test_format_dispatch_and_existing_builds_use_the_same_publisher(self):
         inputs = self.workflow[True]['workflow_dispatch']['inputs']
         self.assertEqual(inputs['format']['options'], ['rpm', 'deb', 'apk'])
-        self.assertEqual(set(inputs), {'format', 'build_run_id', 'mirror_run_id', 'skip_mirror', 'arch', 'php_version'})
+        self.assertEqual(set(inputs), {'format', 'build_run_id', 'arch', 'php_version'})
         self.assertEqual(inputs['arch']['default'], 'all')
         self.assertEqual(inputs['php_version']['default'], 'all')
-        self.assertFalse(inputs['skip_mirror']['default'])
-        self.assertIn('!inputs.skip_mirror', self.workflow['jobs']['mirror']['if'])
-        self.assertEqual(self.workflow['jobs']['mirror']['strategy']['max-parallel'], 2)
-        self.assertIn("inputs.mirror_run_id == ''", self.workflow['jobs']['publish']['if'])
-        self.assertEqual(self.workflow['jobs']['mirror']['with']['primary-run-id'], '${{ matrix.primary-run-id }}')
-        download = next(step for step in self.publisher['jobs']['publish-glibc']['steps']
-                        if step['name'] == 'Download primary publication results')
-        self.assertEqual(download['with']['run-id'], '${{ inputs.primary-run-id || github.run_id }}')
+        self.assertEqual(set(self.workflow['jobs']), {'prepare', 'publish'})
         declared = self.publisher[True]['workflow_call']['inputs']
         required = {name for name, value in declared.items() if value.get('required')}
         for name in ['package-glibc.yml', 'build-apk-forgejo.yml', 'publish-packages.yml']:
             jobs = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']
             job = jobs['publish']
-            mirror = jobs['mirror']
-            self.assertIn('publish', mirror['needs'])
-            self.assertIn('!cancelled()', mirror['if'])
-            if name == 'publish-packages.yml':
-                self.assertTrue(mirror['with']['mirror'])
-                self.assertEqual(mirror['strategy']['matrix'], job['strategy']['matrix'])
-            else:
-                self.assertTrue(mirror['continue-on-error'])
-                self.assertEqual(mirror['permissions'], {'actions': 'write'})
-                self.assertNotIn('uses', mirror)
             self.assertEqual(job['uses'], './.github/workflows/publish-package-cohort.yml')
             self.assertEqual(job['secrets'], 'inherit')
             self.assertTrue(required <= set(job['with']) <= set(declared))
@@ -532,31 +500,11 @@ class WorkflowContracts(unittest.TestCase):
             if name != 'build-apk-forgejo.yml':
                 self.assertEqual(job['with']['package-image-digest'], '${{ matrix.package-image-digest }}')
         self.assertEqual(self.publisher['concurrency'], {
-            'group': "${{ inputs.mirror && format('shared-publish-host2-{0}-{1}', inputs.format, inputs.target) || format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}", 'cancel-in-progress': False, 'queue': 'max'})
+            'group': "${{ format('shared-publish-{0}-{1}', inputs.format, inputs.target) }}", 'cancel-in-progress': False, 'queue': 'max'})
         self.assertNotIn('container', self.publisher['jobs']['publish-apk'])
         self.assertEqual(self.publisher['jobs']['publish-glibc']['container']['image'],
                          "ghcr.io/static-php/${{ inputs.format == 'rpm' && 'packages-builder-rhel-8' || 'packages-packager-debian' }}@sha256:${{ inputs.package-image-digest }}")
         self.assertEqual(self.publisher['jobs']['publish-glibc']['steps'], self.publisher['jobs']['publish-apk']['steps'])
-
-    def test_producers_queue_mirrors_without_holding_the_producer_lock(self):
-        for name, kind in [('package-glibc.yml', 'deb'), ('build-apk-forgejo.yml', 'apk')]:
-            job = yaml.safe_load((ROOT / '.github/workflows' / name).read_text())['jobs']['mirror']
-            step = job['steps'][0]
-            self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
-            with self.subTest(workflow=name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                executable = root / 'gh'
-                executable.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\nPath(os.environ["DISPATCH_LOG"]).write_text(json.dumps(sys.argv[1:]))\n')
-                executable.chmod(0o755)
-                log = root / 'dispatch.json'
-                environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
-                    DISPATCH_LOG=str(log), GITHUB_REPOSITORY='static-php/packages', GITHUB_REF_NAME='master', GITHUB_RUN_ID='42')
-                subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], env=environment, check=True)
-                self.assertEqual(json.loads(log.read_text()), ['workflow', 'run', 'publish-packages.yml',
-                    '--repo', 'static-php/packages', '--ref', 'master', '-f', 'format=' + kind,
-                    '-f', 'build_run_id=42', '-f', 'mirror_run_id=42'])
-        wrapper = yaml.safe_load((ROOT / '.github/workflows/build-deb-forgejo.yml').read_text())
-        self.assertEqual(wrapper['jobs']['build']['permissions']['actions'], 'write')
 
     def test_publisher_reads_inherited_secrets_directly(self):
         inputs = self.publisher[True]['workflow_call']['inputs']

@@ -13,7 +13,7 @@ if [[ "$TYPE" == apk && "${IN_BUILDER:-}" != true ]]; then
     mkdir -p "$HOME/.cache/composer"
     owner_args=(-e BUILDER_HOST_UID="$(id -u)" -e BUILDER_HOST_GID="$(id -g)")
     case "$command" in
-        upload-1|upload-2|record-repository|invalidate-repository)
+        upload|record-repository|invalidate-repository)
             owner_args=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
             ;;
     esac
@@ -125,10 +125,9 @@ PY
         python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" --profile all --output stage/published-baseline \
             --inventory "$baseline_stage/native-inventories/$PHPV.json" "${baseline_args[@]}"
         ;;
-    upload-1|upload-2)
-        host=${command##*-}
+    upload)
         cd "dist/$TYPE"
-        python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE" "$host"
+        python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE"
         ;;
     record)
         jq -n --arg type "$TYPE" --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
