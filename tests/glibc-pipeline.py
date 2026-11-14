@@ -31,6 +31,47 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_reuse_only_cannot_compile_even_when_plan_requests_a_full_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {'PHPV': '8.4', 'COMPILE': 'true', 'COMPILE_PACKAGES': '', 'NO_COMPILE': 'true',
+                           'SOURCE_RUN_ID': '42', 'TYPE': 'apk'}
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', root / 'stage'), \
+                    patch.dict(os.environ, environment), patch.object(glibc, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'no compilation was requested'):
+                    glibc.payload()
+            run.assert_not_called()
+
+    def test_reuse_only_rejects_cached_payload_that_still_requires_a_rebuild(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / 'stage'
+            stage.mkdir()
+            (root / 'buildroot').mkdir()
+            (root / 'php-payload-cache.tar.zst').write_bytes(b'retained cache')
+            (stage / 'payload-cache-key').write_text('exact-key')
+            (stage / 'payload-cache-seed-key').write_text('seed-key')
+            calls = []
+            def restore(arguments, **kwargs):
+                calls.append(arguments)
+                glibc.write(root / 'buildroot/consumer-cache-seed.json', {
+                    'rebuild_packages': ['grpc'], 'compiled_source_run_id': '42',
+                    'changed_components': ['grpc'], 'cache_exact': False})
+            environment = {'PHPV': '8.4', 'COMPILE': 'true', 'COMPILE_PACKAGES': 'grpc', 'NO_COMPILE': 'true',
+                           'SOURCE_RUN_ID': '42', 'TYPE': 'apk'}
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', stage), \
+                        patch.dict(os.environ, environment), patch.object(glibc, 'run', side_effect=restore):
+                    with self.assertRaisesRegex(RuntimeError, 'refusing compilation'):
+                        glibc.payload()
+            finally:
+                os.chdir(previous)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2], 'restore')
+            self.assertNotIn('--compile-packages', calls[0])
+
     def test_sdk_cleanup_removes_only_unrecorded_php_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             sdk = Path(temporary)

@@ -667,6 +667,18 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('-f mode=incremental', step['run'])
         self.assertNotIn('-f php_versions=', step['run'])
 
+    def test_apk_reuse_only_requires_exact_caches_and_reaches_every_builder(self):
+        data = yaml.safe_load((ROOT / '.github/workflows/build-apk-forgejo.yml').read_text())
+        self.assertFalse(data[True]['workflow_dispatch']['inputs']['reuse_only']['default'])
+        for name in ['build-libs', 'build']:
+            self.assertEqual(data['jobs'][name]['env']['NO_COMPILE'], '${{ inputs.reuse_only || false }}')
+        restore = next(step for step in data['jobs']['build-libs']['steps'] if step.get('name') == 'Restore buildroot cache')
+        self.assertEqual(restore['with']['fail-on-cache-miss'], '${{ inputs.reuse_only }}')
+        action = yaml.safe_load((ROOT / '.github/actions/apk-packages/action.yml').read_text())
+        restore = next(step for step in action['runs']['steps'] if step.get('name') == 'Restore sealed PHP payload')
+        self.assertEqual(restore['with']['fail-on-cache-miss'], "${{ env.NO_COMPILE == 'true' }}")
+        self.assertIn('-e NO_COMPILE', (ROOT / '.github/actions/shared-libraries/run.sh').read_text())
+
     def test_daily_downloads_do_not_force_calendar_rebuilds(self):
         data = yaml.safe_load((ROOT / '.github/workflows/spc-download.yml').read_text())
         self.assertEqual(data[True]['schedule'], [{'cron': '0 22 * * *'}])

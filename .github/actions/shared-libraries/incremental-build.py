@@ -322,6 +322,8 @@ def dependency_signature(name, manifest, actual):
 
 
 def execute(root, buildroot, plan, package_type, command=None):
+    if os.environ.get('NO_COMPILE') == 'true' and (plan['full'] or plan['selected']):
+        raise RuntimeError('Reuse-only request requires already compiled libraries; refusing compilation')
     if (buildroot / 'build-payload.json').is_file():
         helper_module('glibc.py', 'glibc').clean_sdk(buildroot)
     cache_path = root / "downloads/.cache.json"

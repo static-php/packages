@@ -22,6 +22,13 @@ spec.loader.exec_module(incremental)
 
 
 class IncrementalLibraryTests(unittest.TestCase):
+    def test_reuse_only_rejects_compilation_before_modifying_sdk(self):
+        for plan in [{'full': True, 'selected': []}, {'full': False, 'selected': ['base']}]:
+            with mock.patch.dict(os.environ, NO_COMPILE='true'), mock.patch.object(incremental.subprocess, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'refusing compilation'):
+                    incremental.execute(self.root, self.sdk, plan, 'apk')
+            run.assert_not_called()
+
     def test_rebuild_orders_alias_chain_before_targets_without_touching_outputs(self):
         other = incremental.file_snapshot(self.sdk, self.manifest, ['other'])
         target = self.sdk / 'lib/libbase.so.1'

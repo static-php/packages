@@ -30,6 +30,7 @@ runs:
                 key: ${{ steps.payload-cache-key.outputs.cache-key }}
                 seed-key: ${{ (env.ABI_BREAK != 'true' || (env.COMPILE == 'true' && env.ABI_CORE_REBUILD != 'true')) && steps.payload-cache-key.outputs.seed-key || '' }}
                 path: php-payload-cache.tar.zst
+                fail-on-cache-miss: ${{ env.NO_COMPILE == 'true' }}
         -   name: Freeze actual published baseline
             uses: ./.github/actions/native-baseline
         -   name: Build and test PHP packages

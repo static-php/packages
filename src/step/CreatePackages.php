@@ -255,6 +255,23 @@ class CreatePackages
     {
         $directory = realpath(dirname($baselinePath));
         $archive = realpath(dirname($baselinePath) . '/' . $layout['archive']);
+        if ($archive === false) {
+            foreach (json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $capturedPath) {
+                $captured = json_decode((string) file_get_contents($capturedPath), true, 512, JSON_THROW_ON_ERROR);
+                if (!self::baselineMatches($captured, self::$packageType, $architecture)) {
+                    continue;
+                }
+                foreach ($captured['packages'] ?? [] as $entry) {
+                    if (($entry['name'] ?? null) !== 'php-zts-runtime-layout'
+                        || ($entry['sha256'] ?? null) !== $layout['archive_sha256']) {
+                        continue;
+                    }
+                    $directory = realpath(dirname($capturedPath));
+                    $archive = realpath(dirname($capturedPath) . '/' . $entry['path']);
+                    break 2;
+                }
+            }
+        }
         if ($directory === false || $archive === false || !str_starts_with($archive, $directory . '/')
             || !is_file($archive) || hash_file('sha256', $archive) !== $layout['archive_sha256']) {
             throw new RuntimeException('Invalid retained runtime layout archive');

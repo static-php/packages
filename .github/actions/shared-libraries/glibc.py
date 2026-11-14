@@ -550,6 +550,8 @@ def payload():
     root = ROOT / 'build' / stream
     compile_requested = os.environ.get('COMPILE', 'true').lower() == 'true'
     compile_packages = os.environ.get('COMPILE_PACKAGES', os.environ.get('PACKAGES', ''))
+    if os.environ.get('NO_COMPILE') == 'true':
+        compile_requested, compile_packages = False, ''
     cached = Path('php-payload-cache.tar.zst')
     saved_sdk = STAGE / 'sdk-before-php'
     restored = False
@@ -604,6 +606,8 @@ def payload():
         else:
             compile_packages = ''
         if compile_requested:
+            if os.environ.get('NO_COMPILE') == 'true':
+                raise RuntimeError('Reuse-only request requires an already compiled PHP payload; refusing compilation')
             run(['python3', '.github/actions/shared-libraries/source-snapshot.py', 'materialize', '--php'])
             if compile_packages and not (ROOT / 'source/php-src').is_dir():
                 release = read(ROOT / 'downloads/.spc-meta.json')['php_versions'][stream]

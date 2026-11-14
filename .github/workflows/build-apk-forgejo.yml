@@ -34,6 +34,10 @@ on:
                 description: "Publish verified packages (false builds and tests only)"
                 type: boolean
                 default: false
+            reuse_only:
+                description: "Package cached outputs only; fail instead of compiling"
+                type: boolean
+                default: false
             debug_tmate:
                 description: "Open tmate on failure"
                 type: boolean
@@ -131,6 +135,7 @@ jobs:
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
             PUBLISH: ${{ inputs.publish || false }}
+            NO_COMPILE: ${{ inputs.reuse_only || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             IMAGE: ${{ matrix.image }}
@@ -176,6 +181,7 @@ jobs:
                     mode: restore
                     key: ${{ steps.cache-key.outputs.key }}
                     seed-key: ${{ steps.cache-key.outputs.seed-key }}
+                    fail-on-cache-miss: ${{ inputs.reuse_only }}
             -   name: Extract restored buildroot
                 if: steps.cache.outputs.cache-hit == 'true' || steps.cache.outputs.seed-hit == 'true'
                 run: tar --zstd -xf buildroot.tar.zst
@@ -329,6 +335,7 @@ jobs:
             ITERATION: ${{ inputs.iteration || '' }}
             BUMP: ${{ inputs.bump || false }}
             PUBLISH: ${{ inputs.publish || false }}
+            NO_COMPILE: ${{ inputs.reuse_only || false }}
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             FORGEJO_PASSWORD: ${{ secrets.FORGEJO_PASSWORD }}
             IMAGE: ${{ matrix.image }}
