@@ -175,10 +175,21 @@ class MatrixTests(unittest.TestCase):
     def test_compatible_library_update_publishes_without_php(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
             root = Path(temporary)
-            self.write_plan(root, 'alma8-x86_64', {'8.4': {'full': False, 'packages': []}})
+            self.write_plan(root, 'alma8-x86_64', {'8.4': {'full': False, 'packages': []}}, libraries=['zlib'])
             builds, publish = workflow.matrix(root, workflow.STREAMS)
             self.assertEqual(builds, [])
             self.assertEqual(len(publish), 1)
+
+    def test_unchanged_architecture_has_no_build_or_publication_jobs(self):
+        with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:
+            root = Path(temporary)
+            empty = {stream: {'full': False, 'packages': [], 'compile': False} for stream in workflow.STREAMS}
+            self.write_plan(root, 'alma8-arm64', empty, libraries=[])
+            self.assertEqual(workflow.matrix(root, workflow.STREAMS), ([], []))
+            self.write_plan(root, 'alma8-x86_64', {'8.6': {'packages': ['grpc']}}, libraries=['grpc'])
+            builds, publish = workflow.matrix(root, workflow.STREAMS)
+            self.assertEqual([item['target'] for item in builds], ['alma8-x86_64'])
+            self.assertEqual([item['target'] for item in publish], ['alma8-x86_64'])
 
     def test_breaking_transition_overrides_manual_php_filter(self):
         with tempfile.TemporaryDirectory(prefix='shared-workflow-test-') as temporary:

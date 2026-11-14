@@ -61,6 +61,9 @@ def matrix(plans, php_versions, succeeded=None):
         target = dict(json.loads((path.parent / "target.json").read_text()), libraries=plan.get("libraries", []))
         if succeeded is not None and target["target"] not in succeeded:
             continue
+        if not plan.get("libraries") and not any(request.get("full") or request.get("packages")
+                                                 for request in plan.get("php_requests", {}).values()):
+            continue
         if "format_selection" in plan:
             target = dict(target, format_selection=plan["format_selection"])
         targets.append(target)
