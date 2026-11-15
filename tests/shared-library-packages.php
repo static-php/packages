@@ -170,6 +170,10 @@ try {
     };
     check(str_contains($headers['consumer'], $requirement($newFloor)), 'New-symbol consumer permits the older library revision');
     $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base++.so.1');
+    check($soname === ($type === 'deb' ? 'php-zts-soname-libfixture-2dbase-2b-2b.so.1' : 'php-zts-soname-libfixture-2dbase++.so.1'), 'New SONAME capability contains architecture');
+    $legacySoname = str_replace('php-zts-soname-', 'php-zts-soname-x86-5f64-', $soname);
+    check(str_contains($headers['base'], $legacySoname), 'Published consumers lost their compatible provider alias');
+    check(!str_contains($headers['consumer'], $legacySoname), 'New consumer requires a legacy architecture-qualified capability');
     check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
     check(str_contains($headers['consumer'], $soname), 'Consumer package omits its required private SONAME');
     if ($type === 'rpm') {

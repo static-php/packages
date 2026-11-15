@@ -26,7 +26,7 @@ matrix = runpy.run_path(str(Path(__file__).with_name('build-shared-matrix.py')))
 class RuntimeHarness(unittest.TestCase):
     def test_private_soname_provides_are_not_system_library_provides(self):
         for capability, error in [
-            ('php-zts-soname-aarch64-libattr.so.1', 'contains no dynamic ELF'),
+            ('php-zts-soname-libattr.so.1', 'contains no dynamic ELF'),
             ('libattr.so.1()(64bit)', 'advertises a system SONAME'),
             ('libattr.so.1', 'advertises a system SONAME'),
         ]:

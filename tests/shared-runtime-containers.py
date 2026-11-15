@@ -750,8 +750,8 @@ def build_fixtures(kind):
         ('complete', '2.0.0', 2, (3, 3)),
     ):
         directory = root / stage
-        capability = f'php-zts-soname-x86-5f64-libspprtfixture.so.{abi}'
-        fixture_package(kind, directory, library_name, lib_version, libraries[abi], provides=[capability])
+        capability = f'php-zts-soname-libspprtfixture.so.{abi}'
+        fixture_package(kind, directory, library_name, lib_version, libraries[abi], provides=[capability, f'php-zts-soname-x86-5f64-libspprtfixture.so.{abi}'])
         if stage == 'incompatible':
             for archive in (root / 'compatible').glob('*.' + kind):
                 if archive.name.startswith(library_name):
@@ -759,7 +759,9 @@ def build_fixtures(kind):
         for name, revision in zip(consumers, revisions):
             consumer_abi = 2 if revision == 3 else 1
             deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})']
-            deps.append(f'php-zts-soname-x86-5f64-libspprtfixture.so.{consumer_abi}')
+            # Published consumers keep their old requirement until upgraded.
+            scope = '' if revision == 3 else 'x86-5f64-'
+            deps.append(f'php-zts-soname-{scope}libspprtfixture.so.{consumer_abi}')
             fixture_package(kind, directory, name, f'{revision}.0.0',
                             {'/usr/bin/' + name: binaries[consumer_abi]}, depends=deps)
         index_repo(kind, directory)

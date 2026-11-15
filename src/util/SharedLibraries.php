@@ -437,16 +437,26 @@ final class SharedLibraries
         $type ??= defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
         // Use a lossless spelling accepted by the native packaging tools.
         // Escape '-' too, so case/punctuation escapes cannot collide. Scope to
-        // our private runtime and architecture: a system library cannot supply it.
+        // our private runtime: a system library cannot supply it.
         // FPM's Debian relationship validator rejects consecutive '+' signs.
         $pattern = $type === 'deb' ? '/[^a-z0-9.]/' : '/[^a-z0-9.+]/';
         $encode = static fn (string $value): string => preg_replace_callback($pattern, static fn ($m) => '-' . bin2hex($m[0]), $value);
-        return 'php-zts-soname-' . $encode($this->architecture()) . '-' . $encode($soname);
+        return 'php-zts-soname-' . $encode($soname);
     }
 
     public function providesForLibrary(string $id): array
     {
-        return array_map($this->sonameCapability(...), $this->librarySonames($id));
+        $provides = [];
+        foreach ($this->librarySonames($id) as $soname) {
+            $capability = $this->sonameCapability($soname);
+            $provides[] = $capability;
+            // Published consumers still require the original spelling. Retain it
+            // only for SONAMEs this package actually contains; new requirements
+            // always use the architecture-free capability above.
+            $legacyArchitecture = preg_replace_callback('/[^a-z0-9.+]/', static fn ($m) => '-' . bin2hex($m[0]), $this->architecture());
+            $provides[] = 'php-zts-soname-' . $legacyArchitecture . '-' . substr($capability, strlen('php-zts-soname-'));
+        }
+        return $provides;
     }
 
     public static function normalizeVersion(string $raw): string

@@ -352,8 +352,8 @@ class BaselineCapture(unittest.TestCase):
             helper['select_packages']('rpm', [cli, *providers], {'cli'})
 
     def test_retained_soname_provider_replaces_latest_and_uses_its_own_closure(self):
-        old_cap = 'php-zts-soname-x86-5f64-libgrpc.so.50'
-        new_cap = 'php-zts-soname-x86-5f64-libgrpc.so.58'
+        old_cap = 'php-zts-soname-libgrpc.so.50'
+        new_cap = 'php-zts-soname-libgrpc.so.58'
         packages = [
             {'name': 'php-zts-grpc', 'version': '1', 'requires': ['php-zts-lib-grpc', old_cap]},
             {'name': 'php-zts-lib-grpc', 'version': '1', 'provides': [old_cap], 'requires': ['php-zts-lib-old']},
