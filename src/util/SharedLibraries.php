@@ -429,15 +429,18 @@ final class SharedLibraries
         return $names;
     }
 
-    public function sonameCapability(string $soname): string
+    public function sonameCapability(string $soname, ?string $type = null): string
     {
         if (!isset($this->sonameOwners[$soname])) {
             throw new RuntimeException('Unknown private SONAME: ' . $soname);
         }
-        // Use one lossless spelling accepted by all three native formats.
+        $type ??= defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
+        // Use a lossless spelling accepted by the native packaging tools.
         // Escape '-' too, so case/punctuation escapes cannot collide. Scope to
         // our private runtime and architecture: a system library cannot supply it.
-        $encode = static fn (string $value): string => preg_replace_callback('/[^a-z0-9.+]/', static fn ($m) => '-' . bin2hex($m[0]), $value);
+        // FPM's Debian relationship validator rejects consecutive '+' signs.
+        $pattern = $type === 'deb' ? '/[^a-z0-9.]/' : '/[^a-z0-9.+]/';
+        $encode = static fn (string $value): string => preg_replace_callback($pattern, static fn ($m) => '-' . bin2hex($m[0]), $value);
         return 'php-zts-soname-' . $encode($this->architecture()) . '-' . $encode($soname);
     }
 
@@ -476,7 +479,7 @@ final class SharedLibraries
                 default => $dependency['package'] . ' >= ' . $version,
             };
             foreach ($dependency['sonames'] as $soname) {
-                $result[] = $this->sonameCapability($soname);
+                $result[] = $this->sonameCapability($soname, $type);
             }
         }
         return $result;

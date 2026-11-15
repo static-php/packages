@@ -95,12 +95,12 @@ try {
     file_put_contents(BUILD_ROOT_PATH . '/licenses/base', 'Fixture MIT license');
     file_put_contents(BUILD_ROOT_PATH . '/licenses/consumer', 'Fixture MIT license');
     $libdir = '/usr/lib/php-zts/lib';
-    command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base.so.1', $root . '/base.c']);
-    symlink('libfixture-base.so.1', BUILD_LIB_PATH . '/libfixture-base.so');
-    command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base']);
+    command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base++.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base++.so.1', $root . '/base.c']);
+    symlink('libfixture-base++.so.1', BUILD_LIB_PATH . '/libfixture-base++.so');
+    command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base++']);
     $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => 'x86_64', 'libc' => $type === 'apk' ? 'musl' : 'glibc', 'runtime_libdir' => $libdir, 'libraries' => []];
     foreach (['base', 'consumer'] as $id) {
-        $relative = 'lib/libfixture-' . $id . '.so.1';
+        $relative = 'lib/libfixture-' . $id . ($id === 'base' ? '++' : '') . '.so.1';
         $output = command(['readelf', '--wide', '--dynamic', BUILD_ROOT_PATH . '/' . $relative]);
         preg_match_all('/\(NEEDED\).*?\[([^\]]+)\]/', $output, $needed);
         command(['objcopy', '--only-keep-debug', BUILD_ROOT_PATH . '/' . $relative, BUILD_ROOT_PATH . '/debug/' . $relative . '.debug']);
@@ -108,7 +108,7 @@ try {
             'version' => $id === 'base' ? '1.19' : '1.2.3', 'source_hash' => str_repeat('a', 64), 'license' => 'MIT',
             'license_files' => ['licenses/' . $id], 'files' => [$relative],
             'runtime_assets' => (object)[], 'dlopen_dependencies' => [], 'depends' => [],
-            'elf' => [$relative => ['soname' => 'libfixture-' . $id . '.so.1', 'needed' => $needed[1], 'runpath' => [$libdir]]],
+            'elf' => [$relative => ['soname' => 'libfixture-' . $id . ($id === 'base' ? '++' : '') . '.so.1', 'needed' => $needed[1], 'runpath' => [$libdir]]],
         ];
     }
     file_put_contents(BUILD_ROOT_PATH . '/shared-libraries.json', json_encode($manifest, JSON_THROW_ON_ERROR));
@@ -122,8 +122,8 @@ try {
         $oldFloor = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->getPackageVersion('fixture-base', $type);
         file_put_contents($root . '/base.c', "int fixture_base(void) { return 42; }\nint fixture_added(void) { return 42; }\n");
         file_put_contents($root . '/consumer.c', "extern int fixture_added(void);\nint fixture_consumer(void) { return fixture_added(); }\n");
-        command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base.so.1', $root . '/base.c']);
-        command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base']);
+        command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base++.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base++.so.1', $root . '/base.c']);
+        command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base++']);
         foreach (['base', 'consumer'] as $id) {
             $manifest['libraries']['fixture-' . $id]['source_hash'] = hash_file('sha256', $root . '/' . $id . '.c');
         }
@@ -169,7 +169,7 @@ try {
         default => 'php-zts-lib-fixture-base >= ' . $version,
     };
     check(str_contains($headers['consumer'], $requirement($newFloor)), 'New-symbol consumer permits the older library revision');
-    $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base.so.1');
+    $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base++.so.1');
     check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
     check(str_contains($headers['consumer'], $soname), 'Consumer package omits its required private SONAME');
     check(str_contains($oldHeader, $requirement($oldFloor)), 'Old compatible consumer lost its original library floor');
