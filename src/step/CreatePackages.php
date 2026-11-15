@@ -1510,7 +1510,7 @@ class CreatePackages
         if (isset($config['depends']) && is_array($config['depends'])) {
             foreach ($config['depends'] as $depend) {
                 $fpmArgs[] = '--depends';
-                if (preg_match('/\.so(\.\d+)*$/', $depend)) {
+                if (!str_starts_with($depend, self::getPrefix() . '-soname-') && preg_match('/\.so(\.\d+)*$/', $depend)) {
                     $depend .= '()(64bit)';
                 }
                 $fpmArgs[] = $depend;

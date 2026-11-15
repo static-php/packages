@@ -172,6 +172,30 @@ try {
     $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base++.so.1');
     check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
     check(str_contains($headers['consumer'], $soname), 'Consumer package omits its required private SONAME');
+    if ($type === 'rpm') {
+        $runtimeArtifacts = array_values(array_filter($artifacts, static fn ($file) => !str_contains(basename($file), '-debuginfo')));
+        $provides = [];
+        $requires = [];
+        foreach ($runtimeArtifacts as $artifact) {
+            $provides = [...$provides, ...explode("\n", trim(command(['rpm', '-qp', '--qf', "[%{PROVIDENAME}\n]", $artifact])))];
+            $requires = [...$requires, ...explode("\n", trim(command(['rpm', '-qp', '--qf', "[%{REQUIRENAME}\n]", $artifact])))];
+        }
+        check(in_array($soname, $requires, true), 'RPM rewrote the private SONAME requirement');
+        foreach ($requires as $dependency) {
+            if (str_starts_with($dependency, 'php-zts-soname-')) {
+                check(in_array($dependency, $provides, true), "No exact RPM provider for {$dependency}");
+            }
+        }
+        $rpmRoot = $root . '/installed-libraries';
+        mkdir($rpmRoot);
+        command(['rpm', '--root', $rpmRoot, '--initdb']);
+        // Supply only the shell prerequisite for the disabled layout script.
+        $shellFixture = $root . '/fixture-shell.rpm';
+        command(['fpm', '-s', 'empty', '-t', 'rpm', '-n', 'fixture-shell', '-v', '1', '--provides', '/bin/sh', '-p', $shellFixture]);
+        command(['rpm', '--root', $rpmRoot, '-i', $shellFixture]);
+        // Enforce native dependency resolution for the production-generated archives.
+        command(['rpm', '--root', $rpmRoot, '-U', '--noscripts', ...$artifacts, ...array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'php-zts-runtime-layout'))]);
+    }
     check(str_contains($oldHeader, $requirement($oldFloor)), 'Old compatible consumer lost its original library floor');
     check(!str_contains($headers['base'], 'php-zts-lib-fixture-consumer'), 'Dependency incorrectly inherited from another package');
     $consumers = json_decode(file_get_contents(DIST_PATH . '/' . $type . '/shared-library-consumers.json'), true, flags: JSON_THROW_ON_ERROR);
