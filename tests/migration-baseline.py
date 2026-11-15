@@ -351,6 +351,25 @@ class BaselineCapture(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli, *providers], {'cli'})
 
+    def test_retained_soname_provider_replaces_latest_and_uses_its_own_closure(self):
+        old_cap = 'php-zts-soname-x86-5f64-libgrpc.so.50'
+        new_cap = 'php-zts-soname-x86-5f64-libgrpc.so.58'
+        packages = [
+            {'name': 'php-zts-grpc', 'version': '1', 'requires': ['php-zts-lib-grpc', old_cap]},
+            {'name': 'php-zts-lib-grpc', 'version': '1', 'provides': [old_cap], 'requires': ['php-zts-lib-old']},
+            {'name': 'php-zts-lib-grpc', 'version': '2', 'provides': [new_cap], 'requires': ['php-zts-lib-new']},
+            {'name': 'php-zts-lib-old', 'version': '1'},
+            {'name': 'php-zts-lib-new', 'version': '1'},
+        ]
+        with patch.dict(helper['select_packages'].__globals__, {'newer': lambda kind, a, b: int(a['version']) > int(b['version'])}):
+            for kind in ('rpm', 'deb', 'apk'):
+                selected = helper['select_packages'](kind, packages, {'grpc'})
+                self.assertEqual(selected['php-zts-lib-grpc']['version'], '1')
+                self.assertEqual(set(selected), {'php-zts-grpc', 'php-zts-lib-grpc', 'php-zts-lib-old'})
+                incompatible = packages + [{'name': 'php-zts-new-client', 'version': '1', 'requires': [new_cap]}]
+                with self.assertRaisesRegex(RuntimeError, 'all required SONAMEs'):
+                    helper['select_packages'](kind, incompatible, {'grpc', 'new-client'})
+
     def test_full_user_baseline_excludes_unreferenced_partial_sdk_publication(self):
         cli = {'name': 'php-zts-cli', 'version': '8.3.36-2', 'requires': []}
         library = {'name': 'php-zts-lib-curl', 'version': '8.20.0-1', 'requires': ['php-zts-lib-nghttp3']}

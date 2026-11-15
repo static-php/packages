@@ -256,29 +256,64 @@ def select_packages(kind, inventory, profile, include_debug=False, latest=None, 
         if not include_debug and (name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout'):
             return False
         return managed and (include_debug or not name.endswith(('-debuginfo', '-dbgsym')))
-    selected = {name: package for name, package in latest.items() if wanted(name)}
-    providers = {}
-    for package in latest.values():
+    roots = {name: package for name, package in latest.items() if wanted(name)}
+    selected = dict(roots)
+    providers, versions = {}, {}
+    for package in inventory:
+        versions.setdefault(package['name'], []).append(package)
         for capability in [package['name'], *package.get('provides', [])]:
-            providers.setdefault(capability, {})[package['name']] = package
-    pending = list(selected.values())
-    while pending:
-        package = pending.pop()
-        for dependency in package.get('requires', []):
-            if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
-                continue
-            choices = list(providers.get(dependency, {}).values())
-            if len(choices) != 1:
-                message = 'Missing or ambiguous published managed dependency: ' + dependency
-                if defects is None:
-                    raise RuntimeError(message)
-                defects.append({'package': package['name'], 'dependency': dependency, 'error': message})
-                continue
-            provider = choices[0]
-            if provider['name'] not in selected:
-                selected[provider['name']] = provider
-                pending.append(provider)
-    return selected
+            providers.setdefault(capability, set()).add(package['name'])
+    seen = set()
+    cache = {}
+    while True:
+        identity = tuple(sorted((name, package['version']) for name, package in selected.items()))
+        if identity in seen:
+            message = 'Published managed dependencies have no stable provider closure'
+            if defects is None:
+                raise RuntimeError(message)
+            defects.append({'error': message})
+            return selected
+        seen.add(identity)
+        requirements = {}
+        missing = []
+        for package in selected.values():
+            for dependency in package.get('requires', []):
+                if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
+                    continue
+                choices = providers.get(dependency, set())
+                if len(choices) != 1:
+                    missing.append({'package': package['name'], 'dependency': dependency,
+                                    'error': 'Missing or ambiguous published managed dependency: ' + dependency})
+                    continue
+                requirements.setdefault(next(iter(choices)), set()).add(dependency)
+        resolved = dict(roots)
+        for name, capabilities in requirements.items():
+            key = (name, tuple(sorted(capabilities)))
+            if key not in cache:
+                def satisfies(package):
+                    return capabilities.issubset({package['name'], *package.get('provides', [])})
+                # Prefer the latest version only if it supplies every required
+                # SONAME. Otherwise choose the newest retained compatible one.
+                candidate = latest.get(name)
+                if candidate is None or not satisfies(candidate):
+                    candidates = [package for package in versions[name] if satisfies(package)]
+                    candidate = latest_packages(kind, candidates).get(name)
+                cache[key] = candidate
+            provider = cache[key]
+            if provider is None:
+                missing.append({'package': name, 'dependency': ','.join(sorted(capabilities)),
+                                'error': 'No published provider supplies all required SONAMEs: ' + name})
+            else:
+                resolved[name] = provider
+        if resolved == selected:
+            if missing and defects is None:
+                raise RuntimeError(missing[0]['error'])
+            if defects is not None:
+                defects.extend(missing)
+            return selected
+        # Recompute from the chosen versions, dropping dependencies introduced
+        # only by a newer provider that has just been replaced by an older one.
+        selected = resolved
 
 
 def download_package(package, kind, output, stage):
