@@ -7,11 +7,10 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
 
 import glibc
-from publication import api, inspect_run, pinned_image
+from publication import api, download_plans, inspect_run, pinned_image
 from workflow import STREAMS, csv, emit
 
 
@@ -32,8 +31,7 @@ def inspect(run_id, architectures, streams):
         raise RuntimeError('Unsupported repackaging architecture or PHP stream')
     includes = []
     with tempfile.TemporaryDirectory(prefix='spp-retained-plans-') as temporary:
-        subprocess.run(['gh', 'run', 'download', str(run_id), '--repo', repository,
-                        '--pattern', 'shared-plans-glibc-*', '--dir', temporary], check=True)
+        download_plans(repository, run_id, temporary)
         for arch in selected_arch:
             target_name = 'alma8-' + arch
             directory = Path(temporary) / ('shared-plans-glibc-' + target_name)

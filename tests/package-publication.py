@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 import yaml
 
@@ -21,6 +22,37 @@ import publication
 
 
 class Publication(unittest.TestCase):
+    def test_plan_download_retries_transport_errors_without_partial_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / 'plans'
+            calls = []
+            def download(command, **kwargs):
+                staging = Path(command[-1])
+                self.assertEqual(list(staging.iterdir()), [])
+                calls.append(command)
+                if len(calls) == 1:
+                    (staging / 'partial.json').write_text('partial')
+                    return subprocess.CompletedProcess(command, 1, '', 'HTTP 502: Server Error')
+                (staging / 'complete.json').write_text('verified plan')
+                return subprocess.CompletedProcess(command, 0, '', '')
+            with patch.object(publication.subprocess, 'run', download), patch.object(publication.time, 'sleep'):
+                publication.download_plans('static-php/packages', 123, destination)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([p.name for p in destination.iterdir()], ['complete.json'])
+            for error, attempts in [('HTTP 503: unavailable', 3), ('HTTP 404: expired', 1)]:
+                with patch.object(publication.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', error)) as run, patch.object(publication.time, 'sleep'):
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        publication.download_plans('static-php/packages', 123, Path(temporary) / 'failed')
+                    self.assertEqual(run.call_count, attempts)
+
+    def test_api_retries_only_transient_http_errors(self):
+        for code, attempts in [(502, 3), (429, 3), (403, 1), (404, 1)]:
+            failure = HTTPError('https://api.github.com/test', code, 'fixture', {}, None)
+            with patch.object(publication, 'urlopen', side_effect=failure) as fetch, patch.object(publication.time, 'sleep'):
+                with self.assertRaises(HTTPError):
+                    publication.api('test')
+                self.assertEqual(fetch.call_count, attempts)
+
     def test_published_upgrade_matrix_retries_only_selected_native_cells(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/verify-published-upgrades.yml').read_text())
         step = workflow['jobs']['prepare']['steps'][0]

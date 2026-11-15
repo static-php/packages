@@ -5,10 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 
-from publication import api, inspect_run
+from publication import api, download_plans, inspect_run
 from workflow import STREAMS, csv, emit, image_digest, matrix, tls_checks
 
 
@@ -69,7 +68,7 @@ def main():
     artifacts = [item for page in api(endpoint + '/artifacts?per_page=100', True) for item in page['artifacts']]
     state = inspect_run(run, artifacts, repository, os.environ['DEFAULT_BRANCH'], kind)
     plans = Path('plans')
-    subprocess.run(['gh', 'run', 'download', run_id, '--repo', repository, '--pattern', 'shared-plans-glibc-*', '--dir', str(plans)], check=True)
+    download_plans(repository, run_id, plans)
     jobs = [job for page in api(endpoint + '/jobs?per_page=100', True) for job in page['jobs']]
     architectures = csv(os.environ.get('ARCHITECTURES', ''), ['x86_64', 'arm64'])
     if not architectures or set(architectures) - {'x86_64', 'arm64'}:

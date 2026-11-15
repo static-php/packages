@@ -2,6 +2,7 @@
 """Select complete package cohorts from an existing build run."""
 
 import argparse
+import http.client
 import io
 import json
 import os
@@ -12,8 +13,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from urllib.request import Request, build_opener, urlopen
+from urllib.error import HTTPError, URLError
 
 from workflow import STREAMS, assemble, emit, image_digest, prune_consumers, verify_upgrades
 
@@ -201,14 +204,44 @@ def api(path, paginate=False):
     while url:
         if not url.startswith(base):
             raise RuntimeError('GitHub pagination left the API origin')
-        with urlopen(Request(url, headers=headers), timeout=60) as response:
-            page = json.load(response)
-            if not paginate:
-                return page
-            pages.append(page)
-            next_page = re.search(r'<([^>]+)>;\s*rel="next"', response.headers.get('Link', ''))
-            url = next_page.group(1) if next_page else None
+        for attempt in range(3):
+            try:
+                with urlopen(Request(url, headers=headers), timeout=60) as response:
+                    page = json.load(response)
+                    next_page = re.search(r'<([^>]+)>;\s*rel="next"', response.headers.get('Link', ''))
+                break
+            except (HTTPError, URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as error:
+                if attempt == 2 or isinstance(error, HTTPError) and error.code not in (408, 429) and error.code < 500:
+                    raise
+                print('::warning::Transient GitHub API failure; retrying ' + url, file=sys.stderr)
+                time.sleep(2 ** attempt)
+        if not paginate:
+            return page
+        pages.append(page)
+        url = next_page.group(1) if next_page else None
     return pages
+
+
+def download_plans(repository, run_id, destination):
+    destination = Path(destination)
+    if destination.exists() and any(destination.iterdir()):
+        raise RuntimeError('Retained plan destination must be empty')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(3):
+        # Discard partial extraction on transport failure before retrying.
+        with tempfile.TemporaryDirectory(prefix='spp-plans-', dir=destination.parent) as staging:
+            command = ['gh', 'run', 'download', str(run_id), '--repo', repository,
+                       '--pattern', 'shared-plans-glibc-*', '--dir', staging]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                shutil.copytree(staging, destination, dirs_exist_ok=True)
+                return
+            transient = re.search(r'HTTP (?:408|429|5\d\d)\b|timed? out|connection (?:reset|closed|refused)|unexpected EOF|TLS handshake timeout',
+                                  result.stderr, re.I)
+            if not transient or attempt == 2:
+                raise RuntimeError('Cannot download retained build plans: ' + result.stderr.strip())
+        print('::warning::Transient retained-plan download failure; retrying', file=sys.stderr)
+        time.sleep(2 ** attempt)
 
 
 def run_logged(arguments, environment, log):

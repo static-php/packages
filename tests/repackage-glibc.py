@@ -53,14 +53,14 @@ class Repackage(unittest.TestCase):
         names = ['shared-plans-glibc-alma8-x86_64', 'shared-sdk-glibc-alma8-x86_64',
                  'shared-sdk-buildroot-glibc-alma8-x86_64', 'shared-payload-glibc-alma8-x86_64-php8.4']
         artifacts = [{'id': index + 1, 'name': name, 'expired': missing and index == 3} for index, name in enumerate(names)]
-        def download(arguments, **kwargs):
-            self.assertEqual(arguments[:3], ['gh', 'run', 'download'])
-            directory = Path(arguments[-1]) / names[0]
+        def download(repository, run_id, destination):
+            self.assertEqual((repository, run_id), ('static-php/packages', 22))
+            directory = Path(destination) / names[0]
             self.write(directory / 'target.json', self.target)
             self.write(directory / 'shared-library-plan.json', plan or {'php_requests': {'8.4': {'full': True}}})
         def api(path, paginate=False):
             return [{'artifacts': artifacts}] if paginate else run
-        with patch.object(repackage, 'api', api), patch.object(repackage.subprocess, 'run', download):
+        with patch.object(repackage, 'api', api), patch.object(repackage, 'download_plans', download):
             return repackage.inspect(22, 'amd64', '8.4')
 
     def test_inspection_pins_recorded_images_sources_and_artifact_ids(self):
