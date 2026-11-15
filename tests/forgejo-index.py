@@ -1,4 +1,7 @@
 import hashlib
+import gzip
+import io
+import tarfile
 from pathlib import Path
 import runpy
 import tempfile
@@ -80,6 +83,57 @@ class ForgejoIndex(unittest.TestCase):
         self.helper['registry_request'] = request
         self.assertEqual(self.verify(), [])
         self.assertEqual(self.archives, [self.other, self.record])
+
+
+class ForgejoApkIndex(ForgejoIndex):
+    def setUp(self):
+        super().setUp()
+        self.path = self.path.with_suffix('.apk')
+        self.identity = ('php-zts-zip-debuginfo', '1.22.8.0_p82_p35_p0-r10', 'x86_64')
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode='w') as archive:
+            data = b'pkgname = php-zts-zip-debuginfo\n'
+            info = tarfile.TarInfo('.PKGINFO')
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        self.path.write_bytes(gzip.compress(raw.getvalue(), mtime=0))
+        self.digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        self.control = runpy.run_path(str(ROOT / 'bin/freeze-migration-baseline.py'))['apk_control_checksum'](self.path.read_bytes())
+        self.record = {'arch': 'x86_64', 'sha256': self.digest}
+        self.other = {'arch': 'aarch64', 'sha256': 'other-architecture'}
+        self.archives = [self.record, self.other]
+
+    def request(self, method, url, **kwargs):
+        self.events.append((method, url))
+        if method == 'delete':
+            self.assertEqual(url, 'https://registry.test/api/packages/83/alpine/main/php-zts/x86_64/'
+                             'php-zts-zip-debuginfo-1.22.8.0_p82_p35_p0-r10.apk')
+            self.archives.remove(self.record)
+            return Mock(status_code=204)
+        self.assertEqual(method, 'get')
+        self.assertTrue(url.endswith('/x86_64/APKINDEX.tar.gz'))
+        name, version, arch = self.identity
+        body = f'P:{name}\nV:{version}\nA:{arch}\nC:{self.control}\n' if self.visible else ''
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode='w') as archive:
+            info = tarfile.TarInfo('APKINDEX')
+            info.size = len(body.encode())
+            archive.addfile(info, io.BytesIO(body.encode()))
+        return Mock(content=gzip.compress(raw.getvalue()))
+
+    def upload(self, host, owner, password, kind, path, **kwargs):
+        self.assertEqual(kind, 'alpine')
+        super().upload(host, owner, password, 'debian', path, **kwargs)
+
+    def verify(self):
+        return index['verify_indexes']('https://registry.test', 'secret', {'83': [self.path]}, self.helper, kind='alpine')
+
+    def test_mismatched_control_checksum_never_deletes_an_archive(self):
+        self.visible = True
+        self.control = 'Q1different'
+        errors = self.verify()
+        self.assertIn('different checksum', errors[0])
+        self.assertEqual([event[0] for event in self.events], ['get'])
 
 
 if __name__ == '__main__':

@@ -86,6 +86,11 @@ def verify_debian_indexes(host, password, groups, helper):
     return verifier['verify_indexes'](host, password, groups, helper)
 
 
+def verify_alpine_indexes(host, password, groups, helper):
+    verifier = runpy.run_path(str(Path(__file__).with_name('forgejo-index.py')))
+    return verifier['verify_indexes'](host, password, groups, helper, kind='alpine')
+
+
 def publish(host, password, kind, groups, helper):
     digests = {}
     selected = {}
@@ -139,6 +144,8 @@ def publish(host, password, kind, groups, helper):
             failures.extend(error for error in pool.map(upload, phase) if error)
     if kind == 'debian':
         failures.extend(verify_debian_indexes(host, password, completed, helper))
+    else:
+        failures.extend(verify_alpine_indexes(host, password, completed, helper))
     if failures:
         raise RuntimeError(f'{len(failures)} package uploads failed; remaining packages were attempted: '
                            + ' | '.join(failures[:5]))
