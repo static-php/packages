@@ -291,7 +291,7 @@ def assert_elf(kind, names, manifest=None):
             paths[path] = name
         if kind == 'rpm' and name.startswith('php-zts-lib-'):
             provides = run(['rpm', '-q', '--provides', name]).stdout
-            if re.search(r'^\S+\.so(?:\.|\()', provides, re.M):
+            if re.search(r'^(?!php-zts-soname-)\S+\.so(?:\.|\()', provides, re.M):
                 raise RuntimeError(f'{name}: private library advertises a system SONAME capability')
     for path, owner in sorted(paths.items()):
         if path.is_symlink() or str(path).startswith('/usr/lib/debug/'):
@@ -796,6 +796,12 @@ def fixture_checks(kind):
                 raise RuntimeError('Complete SONAME transition did not upgrade both consumers: '
                                    + repr({name: installed(kind, name) for name in [library, *consumers]})
                                    + '\n' + transaction.stdout + transaction.stderr)
+        manifest = Path('/spp/fixtures/installed-manifest.json')
+        manifest.write_text(json.dumps({
+            'runtime_libdir': '/usr/lib64/php-zts/lib' if kind == 'rpm' else '/usr/lib/php-zts/lib',
+            'libraries': {},
+        }))
+        assert_elf(kind, [library, *consumers], manifest)
         for name in consumers:
             expected = '2' if stage == 'complete' else '1'
             if run(['/usr/bin/' + name]).stdout.strip() != expected:

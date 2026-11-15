@@ -24,6 +24,19 @@ matrix = runpy.run_path(str(Path(__file__).with_name('build-shared-matrix.py')))
 
 
 class RuntimeHarness(unittest.TestCase):
+    def test_private_soname_provides_are_not_system_library_provides(self):
+        for capability, error in [
+            ('php-zts-soname-aarch64-libattr.so.1', 'contains no dynamic ELF'),
+            ('libattr.so.1()(64bit)', 'advertises a system SONAME'),
+            ('libattr.so.1', 'advertises a system SONAME'),
+        ]:
+            with self.subTest(capability=capability), patch.dict(scope, {
+                'payload': lambda *args: [],
+                'run': lambda *args: SimpleNamespace(stdout=capability + '\n'),
+            }):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    harness['assert_elf']('rpm', ['php-zts-lib-attr'])
+
     def test_local_repository_refresh_preserves_official_sources_and_full_solver(self):
         refresh = {
             'deb': ['apt-get', '-o', 'Dir::Etc::sourcelist=/etc/apt/sources.list.d/spp-runtime.list',
