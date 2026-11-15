@@ -2,6 +2,12 @@
 """Serve disposable repository generations without stale mtime-only validators."""
 
 import http.server
+import socketserver
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    # EL8's Python 3.6 has no http.server.ThreadingHTTPServer.
+    daemon_threads = True
 
 
 class Repository(http.server.SimpleHTTPRequestHandler):
@@ -15,4 +21,4 @@ class Repository(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    http.server.ThreadingHTTPServer(('0.0.0.0', 8080), Repository).serve_forever()
+    ThreadingHTTPServer(('0.0.0.0', 8080), Repository).serve_forever()

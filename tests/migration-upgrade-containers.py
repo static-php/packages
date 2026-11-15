@@ -1234,6 +1234,19 @@ class PreparedMirror:
         write_inventory(scratch / 'inventory.json', native_inventory)
         (repository / 'keys').symlink_to('../keys', target_is_directory=True)
         run(['docker', 'exec', '-d', '-w', '/spp/repository', helper, 'python3', '/spp/package-repository-server.py'])
+        health = '''import time,sys
+from urllib.request import urlopen
+for attempt in range(10):
+    try:
+        with urlopen(sys.argv[1], timeout=2) as response:
+            response.read()
+        break
+    except OSError:
+        if attempt == 9:
+            raise RuntimeError('Disposable repository server did not start')
+        time.sleep(0.5)
+'''
+        resources.exec(helper, ['python3', '-c', health, 'http://127.0.0.1:8080/keys/' + keyname])
         self.inventory = native_inventory
         self.helper = helper
         self.stock_image = run(['docker', 'inspect', '--format', '{{.Image}}', helper]).stdout.strip()

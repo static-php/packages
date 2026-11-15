@@ -805,6 +805,40 @@ def fixture_checks(kind):
             'complete_soname_cohort': True}
 
 
+def repository_server_check():
+    import threading
+    from urllib.request import Request, urlopen
+    helper = runpy.run_path(str(Path(__file__).with_name('package-repository-server.py')))
+    with tempfile.TemporaryDirectory(prefix='spp-server-') as temporary:
+        index = Path(temporary) / 'Packages'
+        index.write_bytes(b'old')
+        os.utime(index, (1700000000, 1700000000))
+        class Handler(helper['Repository']):
+            def translate_path(self, path):
+                return str(index)
+            def log_message(self, *args):
+                pass
+        server = helper['ThreadingHTTPServer'](('127.0.0.1', 0), Handler)
+        worker = threading.Thread(target=server.serve_forever)
+        worker.daemon = True
+        worker.start()
+        try:
+            url = 'http://127.0.0.1:' + str(server.server_port) + '/Packages'
+            with urlopen(url, timeout=5) as response:
+                modified = response.headers['Last-Modified']
+                if response.read() != b'old':
+                    raise RuntimeError('Native test repository server returned incorrect initial bytes')
+            index.write_bytes(b'new')
+            os.utime(index, (1700000000, 1700000000))
+            with urlopen(Request(url, headers={'If-Modified-Since': modified}), timeout=5) as response:
+                if response.read() != b'new':
+                    raise RuntimeError('Native test repository server retained a stale index')
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+
+
 def inside(args):
     kind = args.type
     if args.inside == 'prepare':
@@ -824,7 +858,9 @@ def inside(args):
     if os.environ.get('LD_LIBRARY_PATH'):
         raise RuntimeError('LD_LIBRARY_PATH must be unset')
     if args.inside == 'fixtures':
+        repository_server_check()
         result = fixture_checks(kind)
+        result['repository_index_refresh'] = True
     else:
         names = json.loads(Path('/spp/package-names.json').read_text())
         if args.package:
@@ -925,7 +961,7 @@ def cell(os_name, php, artifacts, manifest=None, individual=True, fixtures=True,
         (directory / 'repo').mkdir()
         for package in artifacts.glob('*.' + kind) if artifacts else []:
             shutil.copy2(package, directory / 'repo' / package.name)
-        for filename in ('shared-runtime-containers.py', 'shared-runtime.php', 'container-architecture.py'):
+        for filename in ('shared-runtime-containers.py', 'shared-runtime.php', 'container-architecture.py', 'package-repository-server.py'):
             shutil.copy2(HERE / filename, directory / filename)
         if manifest:
             shutil.copy2(manifest, directory / 'manifest.json')
