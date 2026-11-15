@@ -75,6 +75,14 @@ try {
     if (CreatePackages::resolveIteration('php-zts-imagick', '9.9.9', 'x86_64', $type) !== ($type === 'apk' ? '0' : '1')) {
         throw new RuntimeException('ABI rebuild carried a revision into a new upstream release');
     }
+    if ($type === 'deb') {
+        $plan['abi_consumer_requests']['8.6']['consumers'][] = 'php-zts-pdo-mysql';
+        $plan['published_consumers']['8.6']['php-zts-pdo-mysql'] = $release($moduleVersion, 11);
+        file_put_contents($planPath, json_encode($plan, JSON_THROW_ON_ERROR));
+        if (CreatePackages::resolveIteration('php-zts-pdo_mysql', $moduleVersion, 'x86_64', $type) !== '12') {
+            throw new RuntimeException('ABI revision lookup lost the native DEB package spelling');
+        }
+    }
     if ($counter->invoke(null, 'php-zts-xdebug', $moduleVersion, 'x86_64', $type) !== 23) {
         throw new RuntimeException('Packaging changed an unrelated consumer revision without --bump');
     }

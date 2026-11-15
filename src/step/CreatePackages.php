@@ -2495,6 +2495,7 @@ class CreatePackages
         [$phpVersion] = self::getPhpVersionAndArchitecture();
         preg_match('/^(\d+\.\d+)/', $phpVersion, $match);
         $stream = $match[1] ?? '';
+        $name = $type === 'deb' ? str_replace('_', '-', $name) : $name;
         if (!in_array($name, $plan['abi_consumer_requests'][$stream]['consumers'] ?? [], true)) {
             return 0;
         }
