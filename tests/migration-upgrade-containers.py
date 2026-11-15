@@ -687,7 +687,8 @@ def assert_partial_upgrade(before, after, incoming, changed, allow_unaffected=Fa
             continue
         expected = incoming[name]['version'] if name in updates else version
         if after.get(name) != expected:
-            raise RuntimeError('Partial update held back a candidate or changed an unchanged package: ' + name)
+            raise RuntimeError('Partial update held back a candidate or changed an unchanged package: '
+                               + name + ' (expected ' + expected + ', installed ' + str(after.get(name)) + ')')
     return updates
 
 
@@ -935,10 +936,13 @@ def inside(args):
             raise RuntimeError('Published installed package lacks a candidate: ' + name)
     # The ordinary solver transaction below proves version ordering. In particular,
     # APK 3 can upgrade installed legacy tags which `apk version -t` rejects.
-    ordinary_upgrade(kind)
+    transaction = ordinary_upgrade(kind)
     after = installed(kind)
     if partial:
-        actual_updates = assert_partial_upgrade(before['installed'], after, incoming, changed, args.allow_unaffected_profile)
+        try:
+            actual_updates = assert_partial_upgrade(before['installed'], after, incoming, changed, args.allow_unaffected_profile)
+        except RuntimeError as error:
+            raise RuntimeError(str(error) + '\n' + transaction.stdout + transaction.stderr) from error
         library_updates = assert_library_upgrade(before['installed'], after, {name: incoming[name] for name in changed}) if args.library_only and actual_updates else []
     else:
         actual_updates = [name for name in comparison_names if before['installed'][name] != candidate[name]['version']]
@@ -1127,7 +1131,7 @@ class PreparedMirror:
         for item in self.baseline['packages']:
             records.append({'role': 'baseline', 'name': Path(item['source']).name,
                             'path': item['source'], 'sha256': item['sha256']})
-        helpers = [Path(__file__), HERE / 'container-architecture.py', HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py']
+        helpers = [Path(__file__), HERE / 'container-architecture.py', HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py', HERE / 'package-repository-server.py']
         if args.tls:
             helpers.append(HERE / 'tls-runtime-containers.py')
         if args.tls or args.services:
@@ -1166,6 +1170,7 @@ class PreparedMirror:
         self.copy_checked(HERE / 'container-architecture.py', scratch / 'container-architecture.py')
         self.copy_checked(HERE / 'shared-runtime.php', scratch / 'shared-runtime.php')
         self.copy_checked(HERE / 'shared-runtime-containers.py', scratch / 'shared-runtime-containers.py')
+        self.copy_checked(HERE / 'package-repository-server.py', scratch / 'package-repository-server.py')
         (scratch / 'published-names.json').write_text(json.dumps(sorted({p['name'] for p in
             baseline['packages'] + baseline.get('published_packages', [])})))
         repository = scratch / 'repository'
@@ -1228,7 +1233,7 @@ class PreparedMirror:
                 native_inventory['baseline_index_failure'] = 'Frozen archive header differs from recorded published version: ' + package['name']
         write_inventory(scratch / 'inventory.json', native_inventory)
         (repository / 'keys').symlink_to('../keys', target_is_directory=True)
-        run(['docker', 'exec', '-d', '-w', '/spp/repository', helper, 'python3', '-m', 'http.server', '8080'])
+        run(['docker', 'exec', '-d', '-w', '/spp/repository', helper, 'python3', '/spp/package-repository-server.py'])
         self.inventory = native_inventory
         self.helper = helper
         self.stock_image = run(['docker', 'inspect', '--format', '{{.Image}}', helper]).stdout.strip()

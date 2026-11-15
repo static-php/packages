@@ -1,6 +1,9 @@
 """Regression checks for real-baseline ordinary-upgrade validation."""
 
 import gzip
+import email.message
+import email.utils
+import http.server
 import io
 import json
 import os
@@ -29,6 +32,41 @@ class PreparedStub:
 
 
 class MigrationUpgradeHarness(unittest.TestCase):
+    def test_generation_switch_with_same_index_mtime_serves_new_bytes(self):
+        handler_class = runpy.run_path(str(Path(__file__).with_name('package-repository-server.py')))['Repository']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for generation in ('old', 'new'):
+                (root / generation).mkdir()
+                index = root / generation / 'Packages'
+                index.write_bytes(generation.encode())
+                os.utime(index, (1700000000, 1700000000))
+            (root / 'current').symlink_to('old', target_is_directory=True)
+
+            def request(cls, conditional=False):
+                handler = cls.__new__(cls)
+                handler.directory = directory
+                handler.path = '/current/Packages'
+                handler.headers = email.message.Message()
+                handler.extra_response_headers = None
+                if conditional:
+                    handler.headers['If-Modified-Since'] = email.utils.formatdate(1700000000, usegmt=True)
+                responses = []
+                handler.send_response = responses.append
+                handler.send_header = lambda *args: None
+                handler.end_headers = lambda: None
+                stream = handler.send_head()
+                if stream is None:
+                    return responses[-1], None
+                with stream:
+                    return responses[-1], stream.read()
+
+            self.assertEqual(request(handler_class), (200, b'old'))
+            (root / 'current').unlink()
+            (root / 'current').symlink_to('new', target_is_directory=True)
+            self.assertEqual(request(http.server.SimpleHTTPRequestHandler, True), (304, None))
+            self.assertEqual(request(handler_class, True), (200, b'new'))
+
     def test_published_upgrade_inventory_rejects_unrelated_bumps_and_keeps_native_library_consumers(self):
         inputs = runpy.run_path(str(Path(__file__).with_name('published-upgrade-inputs.py')))
         globals_ = inputs['prepare'].__globals__
