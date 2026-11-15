@@ -169,6 +169,9 @@ try {
         default => 'php-zts-lib-fixture-base >= ' . $version,
     };
     check(str_contains($headers['consumer'], $requirement($newFloor)), 'New-symbol consumer permits the older library revision');
+    $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base.so.1');
+    check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
+    check(str_contains($headers['consumer'], $soname), 'Consumer package omits its required private SONAME');
     check(str_contains($oldHeader, $requirement($oldFloor)), 'Old compatible consumer lost its original library floor');
     check(!str_contains($headers['base'], 'php-zts-lib-fixture-consumer'), 'Dependency incorrectly inherited from another package');
     $consumers = json_decode(file_get_contents(DIST_PATH . '/' . $type . '/shared-library-consumers.json'), true, flags: JSON_THROW_ON_ERROR);

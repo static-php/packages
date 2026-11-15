@@ -20,6 +20,18 @@ def workflow(name):
 
 
 class SharedGlibcEntrypoints(unittest.TestCase):
+    def test_reuse_only_glibc_requests_reach_both_compilation_guards(self):
+        data, events = workflow('build-rpm-modular-packages.yml')
+        for event in ('workflow_dispatch', 'workflow_call'):
+            self.assertFalse(events[event]['inputs']['reuse_only']['default'])
+        jobs = [job for job in data['jobs'].values() if 'MODE' in job.get('env', {})]
+        self.assertEqual(len(jobs), 2)
+        for job in jobs:
+            self.assertEqual(job['env']['NO_COMPILE'], '${{ inputs.reuse_only || false }}')
+        action = yaml.safe_load((ROOT / '.github/actions/php-payload/action.yml').read_text())
+        restore = next(step for step in action['runs']['steps'] if step.get('id') == 'payload-cache')
+        self.assertEqual(restore['with']['fail-on-cache-miss'], "${{ env.NO_COMPILE == 'true' }}")
+
     def test_debian_forwards_to_the_single_glibc_workflow(self):
         data, events = workflow('build-deb-forgejo.yml')
         self.assertNotIn('repository_dispatch', events)

@@ -746,13 +746,20 @@ def build_fixtures(kind):
     for stage, lib_version, abi, revisions in (
         ('shared', '1.0.0', 1, (2, 2)),
         ('compatible', '1.1.0', 1, (2, 2)),
+        ('incompatible', '2.0.0', 2, (2, 2)),
         ('complete', '2.0.0', 2, (3, 3)),
     ):
         directory = root / stage
-        fixture_package(kind, directory, library_name, lib_version, libraries[abi])
+        capability = f'php-zts-soname-x86-5f64-libspprtfixture.so.{abi}'
+        fixture_package(kind, directory, library_name, lib_version, libraries[abi], provides=[capability])
+        if stage == 'incompatible':
+            for archive in (root / 'compatible').glob('*.' + kind):
+                if archive.name.startswith(library_name):
+                    shutil.copy2(archive, directory / archive.name)
         for name, revision in zip(consumers, revisions):
             consumer_abi = 2 if revision == 3 else 1
             deps = [f'{library_name} (>= {"2.0.0" if consumer_abi == 2 else "1.0.0"})']
+            deps.append(f'php-zts-soname-x86-5f64-libspprtfixture.so.{consumer_abi}')
             fixture_package(kind, directory, name, f'{revision}.0.0',
                             {'/usr/bin/' + name: binaries[consumer_abi]}, depends=deps)
         index_repo(kind, directory)
@@ -761,7 +768,7 @@ def build_fixtures(kind):
 def fixture_checks(kind):
     consumers = ['php-zts-runtime-fixture82', 'php-zts-runtime-fixture86']
     library = 'php-zts-lib-runtime-fixture'
-    for stage in ('shared', 'compatible', 'complete'):
+    for stage in ('shared', 'compatible', 'incompatible', 'complete'):
         configure_repo(kind, '/spp/fixtures/' + stage)
         before = {name: installed(kind, name) for name in consumers}
         if stage == 'shared':
@@ -774,6 +781,14 @@ def fixture_checks(kind):
                 raise RuntimeError('Compatible library update was not installed')
             if before != {name: installed(kind, name) for name in consumers}:
                 raise RuntimeError('Compatible library update changed consumer packages')
+        elif stage == 'incompatible':
+            # Both providers remain available. An old installed consumer must
+            # keep its old provider, even when a newer library is requested.
+            install(kind, [library], upgrade=True, check=False)
+            if '1.1.0' not in (installed(kind, library) or ''):
+                raise RuntimeError('Solver replaced a required SONAME with an incompatible provider')
+            if before != {name: installed(kind, name) for name in consumers}:
+                raise RuntimeError('Incomplete SONAME transition removed or changed consumers')
         else:
             # A single transaction includes every installed reverse dependency.
             transaction = install(kind, [library, *consumers], upgrade=True)
@@ -786,6 +801,7 @@ def fixture_checks(kind):
             if run(['/usr/bin/' + name]).stdout.strip() != expected:
                 raise RuntimeError(f'{stage}: installed fixture consumer {name} cannot run')
     return {'shared_install': True, 'compatible_library_only': True,
+            'incompatible_provider_rejected': True,
             'complete_soname_cohort': True}
 
 

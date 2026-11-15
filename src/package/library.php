@@ -66,6 +66,7 @@ final class library implements package
                 ...$this->libraries->dependenciesForPackage($files, defined('SPP_TYPE') ? SPP_TYPE : 'rpm', $this->id),
             ])),
             'provides' => [],
+            'provides_unversioned' => $this->libraries->providesForLibrary($this->id),
         ];
     }
 

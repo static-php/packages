@@ -64,15 +64,22 @@ try {
     putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
     foreach ([['php-zts-imagick', $moduleVersion, 17], ['frankenphp', $version, 19]] as [$name, $base, $expected]) {
         $revision = $counter->invoke(null, $name, $base, 'x86_64', $type);
-        if ($revision !== $expected || CreatePackages::resolveIteration($name, $base, 'x86_64', $type) !== (string) $expected) {
-            throw new RuntimeException('ABI consumer changed revision without --bump: ' . $name);
+        if ($revision !== $expected || CreatePackages::resolveIteration($name, $base, 'x86_64', $type) !== (string) ($expected + 1)) {
+            throw new RuntimeException('ABI consumer rebuild did not advance its recorded revision: ' . $name);
         }
+        $memo->setValue(null, []);
+        if (CreatePackages::resolveIteration($name . '-debuginfo', $base, 'x86_64', $type) !== (string) ($expected + 1)) {
+            throw new RuntimeException('ABI retry/debug companion did not retain the same revision floor');
+        }
+    }
+    if (CreatePackages::resolveIteration('php-zts-imagick', '9.9.9', 'x86_64', $type) !== ($type === 'apk' ? '0' : '1')) {
+        throw new RuntimeException('ABI rebuild carried a revision into a new upstream release');
     }
     if ($counter->invoke(null, 'php-zts-xdebug', $moduleVersion, 'x86_64', $type) !== 23) {
         throw new RuntimeException('Packaging changed an unrelated consumer revision without --bump');
     }
     $memo->setValue(null, []);
-    if ($frankenCounter->invoke(new frankenphp(), 'frankenphp', $version, 'x86_64', $type, null, false) !== '19') {
+    if ($frankenCounter->invoke(new frankenphp(), 'frankenphp', $version, 'x86_64', $type, null, false) !== '20') {
         throw new RuntimeException('FrankenPHP did not share the ABI consumer revision floor');
     }
     $override->setValue(null, '4');
@@ -80,10 +87,14 @@ try {
         throw new RuntimeException('Explicit user iteration override lost precedence');
     }
     $override->setValue(null, null);
+    $memo->setValue(null, []);
     $plan['abi_break'] = false;
     file_put_contents($planPath, json_encode($plan, JSON_THROW_ON_ERROR));
     if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== 17) {
         throw new RuntimeException('Ordinary packaging ignored the current published revision');
+    }
+    if (CreatePackages::resolveIteration('php-zts-imagick', $moduleVersion, 'x86_64', $type) !== '17') {
+        throw new RuntimeException('Compatible library update raised an unchanged consumer revision');
     }
     putenv('SPP_SHARED_LIBRARY_PLAN');
     if ($counter->invoke(null, 'php-zts-imagick', $moduleVersion, 'x86_64', $type) !== 17) {
@@ -125,7 +136,7 @@ try {
             throw new RuntimeException('Explicit --bump failed to advance the published package and debug revision');
         }
     }
-    echo 'Passed ' . $type . " revision preservation for ABI consumers, local outputs and FrankenPHP, plus explicit bumps/overrides.\n";
+    echo 'Passed ' . $type . " scoped automatic revisions for ABI consumers, local outputs and FrankenPHP, plus explicit bumps/overrides.\n";
 } finally {
     putenv('SPP_NATIVE_INVENTORY');
     $previousBaseline === false ? putenv('SPP_BASELINE_MANIFESTS') : putenv('SPP_BASELINE_MANIFESTS=' . $previousBaseline);

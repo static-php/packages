@@ -352,10 +352,11 @@ final class SharedLibraries
         }
     }
 
-    /** @return list<array{id:string,package:string,version:string}> */
+    /** @return list<array{id:string,package:string,version:string,sonames:list<string>}> */
     public function dependenciesForFiles(array $files, ?string $ownId = null, array $extraDlopen = []): array
     {
         $ids = [];
+        $needed = [];
         if ($ownId !== null) {
             $entry = $this->get($ownId);
             $extraDlopen = array_merge($extraDlopen, $entry['depends'] ?? [], $entry['dlopen_dependencies'] ?? []);
@@ -366,6 +367,11 @@ final class SharedLibraries
                 throw new RuntimeException('Unknown declared shared-library dependency: ' . json_encode($dependency));
             }
             $ids[$id] = true;
+            // An explicit SONAME names one dlopen target. A library ID declares
+            // the library's runtime objects, whose names must remain available.
+            foreach (isset($this->sonameOwners[$dependency]) ? [$dependency] : $this->librarySonames($id) as $soname) {
+                $needed[$id][$soname] = true;
+            }
         }
         $expanded = [];
         foreach ($files as $source => $destination) {
@@ -386,6 +392,7 @@ final class SharedLibraries
             foreach ($details['needed'] as $soname) {
                 if (isset($this->sonameOwners[$soname])) {
                     $ids[$this->sonameOwners[$soname]] = true;
+                    $needed[$this->sonameOwners[$soname]][$soname] = true;
                     $private = true;
                 } elseif (!$this->isSystemSoname($soname)) {
                     throw new RuntimeException("Unresolved private shared library {$soname} needed by {$source}");
@@ -406,9 +413,37 @@ final class SharedLibraries
         ksort($ids);
         $dependencies = [];
         foreach (array_keys($ids) as $id) {
-            $dependencies[] = ['id' => $id, 'package' => $this->libraryPackageName($id), 'version' => self::normalizeVersion($this->get($id)['version'])];
+            $sonames = array_keys($needed[$id] ?? []);
+            sort($sonames);
+            $dependencies[] = ['id' => $id, 'package' => $this->libraryPackageName($id), 'version' => self::normalizeVersion($this->get($id)['version']), 'sonames' => $sonames];
         }
         return $dependencies;
+    }
+
+    /** Actual ELF SONAMEs, excluding unversioned linker symlinks and data files. */
+    public function librarySonames(string $id): array
+    {
+        $this->get($id);
+        $names = array_keys(array_filter($this->sonameOwners, static fn ($owner) => $owner === $id));
+        sort($names);
+        return $names;
+    }
+
+    public function sonameCapability(string $soname): string
+    {
+        if (!isset($this->sonameOwners[$soname])) {
+            throw new RuntimeException('Unknown private SONAME: ' . $soname);
+        }
+        // Use one lossless spelling accepted by all three native formats.
+        // Escape '-' too, so case/punctuation escapes cannot collide. Scope to
+        // our private runtime and architecture: a system library cannot supply it.
+        $encode = static fn (string $value): string => preg_replace_callback('/[^a-z0-9.+]/', static fn ($m) => '-' . bin2hex($m[0]), $value);
+        return 'php-zts-soname-' . $encode($this->architecture()) . '-' . $encode($soname);
+    }
+
+    public function providesForLibrary(string $id): array
+    {
+        return array_map($this->sonameCapability(...), $this->librarySonames($id));
     }
 
     public static function normalizeVersion(string $raw): string
@@ -440,6 +475,9 @@ final class SharedLibraries
                 'apk' => $dependency['package'] . '>=' . $version,
                 default => $dependency['package'] . ' >= ' . $version,
             };
+            foreach ($dependency['sonames'] as $soname) {
+                $result[] = $this->sonameCapability($soname);
+            }
         }
         return $result;
     }

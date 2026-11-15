@@ -184,10 +184,12 @@ try {
     $typeProperty->setValue(null, 'rpm');
     $save($manifest);
     $payload = [$temporary . '/php' => '/usr/bin/php-zts-test'];
-    expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)'], 'Consumer must require its direct owner at the built version');
-    expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2'], 'APK prerelease version not normalized');
-    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8'], 'Transitive library dependency missing');
-    expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)'], 'Declared dlopen dependencies missing');
+    expect($libraries->librarySonames('base') === ['libbase.so.1'], 'Linker symlink falsely advertised as a runtime SONAME');
+    expect($libraries->providesForLibrary('base') === [$libraries->sonameCapability('libbase.so.1')], 'Library SONAME ownership is ambiguous');
+    expect($libraries->dependenciesForPackage($payload, 'deb') === ['php-zts-lib-top (>= 2.1~rc2-2)', $libraries->sonameCapability('libtop.so.2')], 'Consumer must require its direct owner at the built version');
+    expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2', $libraries->sonameCapability('libtop.so.2')], 'APK prerelease version not normalized');
+    expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8', $libraries->sonameCapability('libbase.so.1')], 'Transitive library dependency missing');
+    expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)', $libraries->sonameCapability('libbase.so.1')], 'Declared dlopen dependencies missing');
     expect(SharedLibraries::normalizeVersion('v3.8.0') === '3.8.0', 'Leading version marker retained');
     expect(SharedLibraries::normalizeVersion('libssh2-1.11.1') === '1.11.1', 'Artifact tag prefix retained');
     expect(SharedLibraries::normalizeVersion('grpc-v1.74.0RC1') === '1.74.0~rc1', 'Prefixed prerelease not normalized');
@@ -198,7 +200,7 @@ try {
     $package = new library($libraries, 'base');
     $config = $package->getFpmConfig();
     expect($package->getName() === 'php-zts-lib-base' && $package->getVersion() === '1.0', 'PHP-independent package identity changed');
-    expect(($config['provides_unversioned'] ?? []) === [] && $config['depends'] === ['php-zts-runtime-layout'], 'Base library must require its runtime layout without a PHP dependency');
+    expect(($config['provides_unversioned'] ?? []) === [$libraries->sonameCapability('libbase.so.1')] && $config['depends'] === ['php-zts-runtime-layout'], 'Base library must require its runtime layout without a PHP dependency');
     expect($config['files'][$temporary . '/lib/libbase.so.1'] === $runtime . '/libbase.so.1', 'Runtime library path incorrect');
     expect($config['files'][$temporary . '/assets/data.txt'] === '/usr/share/php-zts/base/data.txt', 'Runtime asset path incorrect');
     expect(!isset($config['files'][$temporary . '/abi/base.xml']), 'Obsolete ABI dump was packaged');

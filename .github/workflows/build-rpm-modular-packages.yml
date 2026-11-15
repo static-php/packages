@@ -46,6 +46,10 @@ on:
                 description: "Publish verified packages (false builds and tests only)"
                 type: boolean
                 default: false
+            reuse_only:
+                description: "Require cached SDK/PHP outputs and refuse compilation"
+                type: boolean
+                default: false
             debug_tmate:
                 description: "Open tmate on failure"
                 type: boolean
@@ -85,6 +89,10 @@ on:
                 required: false
                 default: false
             publish:
+                type: boolean
+                required: false
+                default: false
+            reuse_only:
                 type: boolean
                 required: false
                 default: false
@@ -212,6 +220,7 @@ jobs:
             TARGET: ${{ matrix.target }}
             MATRIX_ARCH: ${{ matrix.arch }}
             MODE: ${{ inputs.mode || 'full' }}
+            NO_COMPILE: ${{ inputs.reuse_only || false }}
             LIBRARIES: ${{ inputs.libraries || '' }}
             PHP_VERSIONS: ${{ inputs.php_versions || '' }}
             PACKAGES: ${{ matrix.packages || inputs.packages || '' }}
@@ -460,6 +469,7 @@ jobs:
             TARGET: ${{ matrix.target }}
             MATRIX_ARCH: ${{ matrix.arch }}
             MODE: ${{ inputs.mode || 'full' }}
+            NO_COMPILE: ${{ inputs.reuse_only || false }}
             LIBRARIES: ${{ inputs.libraries || '' }}
             PHP_VERSIONS: ${{ inputs.php_versions || '' }}
             PACKAGES: ${{ matrix.packages }}

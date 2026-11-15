@@ -2475,11 +2475,35 @@ class CreatePackages
                     $next = max($next, self::getRemoteNextIteration($base . '-debuginfo', $version, $architecture, $packageType));
                 }
             } else {
-                $next = max(self::getNextIteration($base, $version, $architecture, $packageType), self::migrationNextIteration($base, $version, $architecture, $packageType), self::migrationRevisionFloor($base, $version, $architecture, $packageType));
+                $next = max(self::getNextIteration($base, $version, $architecture, $packageType), self::migrationNextIteration($base, $version, $architecture, $packageType), self::migrationRevisionFloor($base, $version, $architecture, $packageType), self::abiConsumerRevisionFloor($base, $version, $architecture, $packageType));
             }
             self::$resolvedIterations[$key] = (string)$next;
         }
         return self::$resolvedIterations[$key];
+    }
+
+    private static function abiConsumerRevisionFloor(string $name, string $version, string $architecture, string $type): int
+    {
+        $path = getenv('SPP_SHARED_LIBRARY_PLAN');
+        if (!$path || str_starts_with($name, 'php-zts-lib-') || $name === 'php-zts-runtime-layout') {
+            return 0;
+        }
+        $plan = self::migrationBaseline($path);
+        if (($plan['abi_break'] ?? false) !== true || !self::baselineMatches($plan, $type, $architecture)) {
+            return 0;
+        }
+        [$phpVersion] = self::getPhpVersionAndArchitecture();
+        preg_match('/^(\d+\.\d+)/', $phpVersion, $match);
+        $stream = $match[1] ?? '';
+        if (!in_array($name, $plan['abi_consumer_requests'][$stream]['consumers'] ?? [], true)) {
+            return 0;
+        }
+        $published = preg_replace('/^\d+:/', '', $plan['published_consumers'][$stream][$name] ?? '');
+        $pattern = '/^' . preg_quote($version, '/') . ($type === 'apk' ? '-r' : '-') . '(\d+)(?:[.][A-Za-z0-9.+_~]+)?$/D';
+        // A SONAME rebuild changes a same-upstream package. Anchor its revision
+        // to the recorded incompatible consumer, so retrying the same transition
+        // does not keep incrementing it. New upstream versions start normally.
+        return preg_match($pattern, $published, $release) ? (int) $release[1] + 1 : 0;
     }
 
     private static function iterationKey(string $name, string $version, string $architecture, string $type): string
