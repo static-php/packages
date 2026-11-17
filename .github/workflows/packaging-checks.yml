@@ -100,3 +100,17 @@ jobs:
                 env:
                     RUNTIME: ${{ matrix.runtime }}
                 run: python3 tests/shared-runtime-containers.py --fixtures-only --os "$RUNTIME"
+            -   name: Authenticate Debian packaging image
+                if: matrix.runtime == 'debian'
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            -   name: Verify generated DEB dependencies with APT
+                if: matrix.runtime == 'debian'
+                run: |
+                    docker run --rm -v "$GITHUB_WORKSPACE:/build" -w /build ghcr.io/static-php/packages-packager-debian bash -ec '
+                        command -v apt-get
+                        git config --global --add safe.directory /build
+                        composer install --no-dev --no-interaction --prefer-dist --no-progress
+                        php tests/shared-library-packages.php --type=deb
+                    '

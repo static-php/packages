@@ -323,7 +323,7 @@ try {
     } elseif ($type === 'apk') {
         installApkFixture($installRoot, [$layout, $legacyArchive], [$base->getName() => $newFloor]);
         command(['apk', '--root', $installRoot, '--no-network', '--no-scripts', '--allow-untrusted', '--force-non-repository', '--repositories-file', '/dev/null', 'add', $newConsumer]);
-    } else {
+    } elseif (is_executable('/usr/bin/apt-get')) {
         $status = $root . '/installed-status';
         file_put_contents($status, file_get_contents('/var/lib/dpkg/status') . "\n"
             . command(['dpkg-deb', '-f', $legacyArchive]) . "Status: install ok installed\n\n"
