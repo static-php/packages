@@ -87,6 +87,11 @@ try {
     define('DIST_DEB_PATH', DIST_PATH . '/deb');
     define('DIST_APK_PATH', DIST_PATH . '/apk');
     define('TEMP_DIR', $root . '/tmp');
+    $architecture = match (php_uname('m')) {
+        'aarch64', 'arm64' => 'aarch64',
+        'x86_64', 'amd64' => 'x86_64',
+        default => throw new RuntimeException('Unsupported fixture architecture'),
+    };
     foreach ([BUILD_LIB_PATH, BUILD_ROOT_PATH . '/licenses', BUILD_ROOT_PATH . '/debug/lib', DIST_RPM_PATH, DIST_DEB_PATH, DIST_APK_PATH, TEMP_DIR] as $directory) {
         mkdir($directory, 0755, true);
     }
@@ -98,7 +103,7 @@ try {
     command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-base++.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-base++.so.1', $root . '/base.c']);
     symlink('libfixture-base++.so.1', BUILD_LIB_PATH . '/libfixture-base++.so');
     command(['gcc', '-shared', '-nostdlib', '-fPIC', '-g', '-Wl,-soname,libfixture-consumer.so.1', '-Wl,--enable-new-dtags,-rpath,' . $libdir, '-o', BUILD_LIB_PATH . '/libfixture-consumer.so.1', $root . '/consumer.c', '-L' . BUILD_LIB_PATH, '-lfixture-base++']);
-    $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => 'x86_64', 'libc' => $type === 'apk' ? 'musl' : 'glibc', 'runtime_libdir' => $libdir, 'libraries' => []];
+    $manifest = ['schema' => 1, 'linkage' => 'shared', 'architecture' => $architecture, 'libc' => $type === 'apk' ? 'musl' : 'glibc', 'runtime_libdir' => $libdir, 'libraries' => []];
     foreach (['base', 'consumer'] as $id) {
         $relative = 'lib/libfixture-' . $id . ($id === 'base' ? '++' : '') . '.so.1';
         $output = command(['readelf', '--wide', '--dynamic', BUILD_ROOT_PATH . '/' . $relative]);
@@ -171,7 +176,7 @@ try {
     check(str_contains($headers['consumer'], $requirement($newFloor)), 'New-symbol consumer permits the older library revision');
     $soname = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->sonameCapability('libfixture-base++.so.1');
     check($soname === ($type === 'deb' ? 'php-zts-soname-libfixture-2dbase-2b-2b.so.1' : 'php-zts-soname-libfixture-2dbase++.so.1'), 'New SONAME capability contains architecture');
-    $legacySoname = str_replace('php-zts-soname-', 'php-zts-soname-x86-5f64-', $soname);
+    $legacySoname = str_replace('php-zts-soname-', 'php-zts-soname-' . str_replace('_', '-5f', $architecture) . '-', $soname);
     check(str_contains($headers['base'], $legacySoname), 'Published consumers lost their compatible provider alias');
     check(!str_contains($headers['consumer'], $legacySoname), 'New consumer requires a legacy architecture-qualified capability');
     check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
@@ -239,13 +244,13 @@ try {
                 $packageName = $name . $suffix;
                 ob_start();
                 try {
-                    $createApk->invoke(null, $library, $packageName, $version, 'x86_64', '1', [
+                    $createApk->invoke(null, $library, $packageName, $version, $architecture, '1', [
                         'files' => [$root . '/base.c' => '/usr/share/php-zts/' . $packageName],
                     ], $debug);
                 } finally {
                     ob_end_clean();
                 }
-                $artifact = DIST_APK_PATH . "/{$packageName}-{$version}-r1.x86_64.apk";
+                $artifact = DIST_APK_PATH . "/{$packageName}-{$version}-r1.{$architecture}.apk";
                 $header = packageHeader($artifact, 'apk');
                 check(str_contains($header, "pkgver = {$expected}-r1\n"), "APK altered {$input}: {$header}");
                 if ($debug) {
@@ -256,7 +261,76 @@ try {
             installApkFixture($root . '/installed-version-' . $index++, $pair, [$name => $expected . '-r1', $name . '-debuginfo' => $expected . '-r1']);
         }
     }
-    echo "Passed {$type} shared library packages, revision floors and debuginfo without PHP.\n";
+    $libraries = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH);
+    $base = new staticphp\package\library($libraries, 'fixture-base');
+    $legacyArchive = $root . '/legacy-provider.' . $type;
+    if ($type === 'apk') {
+        $baseArchive = current(array_filter($artifacts, static fn ($file) => str_contains(basename($file), 'fixture-base-') && !str_contains(basename($file), '-debuginfo')));
+        $original = file_get_contents($baseArchive);
+        $config = $base->getFpmConfig();
+        $config['provides_unversioned'] = [$legacySoname];
+        ob_start();
+        try {
+            $createApk->invoke(null, $base, $base->getName(), $base->getVersion(), $architecture, '2', $config, false, false);
+        } finally {
+            ob_end_clean();
+        }
+        copy($baseArchive, $legacyArchive);
+        file_put_contents($baseArchive, $original);
+        preg_match_all('/^provides = (.+)$/m', packageHeader($legacyArchive, $type), $matches);
+        $publishedProvides = $matches[1];
+    } else {
+        command(['fpm', '-s', 'dir', '-t', $type, '-n', $base->getName(), '-v', $base->getVersion(),
+            '--iteration', '2', '--architecture', $architecture, '--provides', $legacySoname,
+            '--depends', 'php-zts-runtime-layout', '-p', $legacyArchive,
+            BUILD_LIB_PATH . '/libfixture-base++.so.1=' . $libraries->getInstallLibdir($type) . '/libfixture-base++.so.1']);
+        $publishedProvides = $type === 'rpm'
+            ? explode("\n", trim(command(['rpm', '-qp', '--qf', "[%{PROVIDENAME}\n]", $legacyArchive])))
+            : array_map('trim', explode(',', command(['dpkg-deb', '-f', $legacyArchive, 'Provides'])));
+    }
+    check(in_array($legacySoname, $publishedProvides, true) && !in_array($soname, $publishedProvides, true), 'Incremental fixture does not reproduce the published provider');
+    $legacyHash = hash_file('sha256', $legacyArchive);
+    $inventoryPath = $root . '/published-inventory.json';
+    $planPath = $root . '/selected-library.json';
+    file_put_contents($inventoryPath, json_encode(['schema' => 1, 'type' => $type, 'php_stream' => '8.4', 'architecture' => $architecture,
+        'inventory' => [['name' => $base->getName(), 'version' => $newFloor, 'architecture' => $architecture, 'provides' => $publishedProvides]]], JSON_THROW_ON_ERROR));
+    file_put_contents($planPath, json_encode(['libraries' => ['fixture-consumer']], JSON_THROW_ON_ERROR));
+    putenv('SPP_NATIVE_INVENTORY=' . $inventoryPath);
+    putenv('SPP_SHARED_LIBRARY_PLAN=' . $planPath);
+    $beforePartial = glob(DIST_PATH . '/' . $type . '/*.' . $type);
+    ob_start();
+    try {
+        CreatePackages::run(null, '3', true, false, true, ['fixture-consumer'], BUILD_ROOT_PATH);
+    } finally {
+        ob_end_clean();
+        putenv('SPP_NATIVE_INVENTORY');
+        putenv('SPP_SHARED_LIBRARY_PLAN');
+    }
+    $partial = array_values(array_diff(glob(DIST_PATH . '/' . $type . '/*.' . $type), $beforePartial));
+    $newConsumer = current(array_filter($partial, static fn ($file) => !str_contains(basename($file), '-debuginfo')
+        && (str_contains(basename($file), 'fixture-consumer-') || str_contains(basename($file), 'fixture-consumer_'))));
+    $partialHeader = packageHeader($newConsumer, $type);
+    check(str_contains($partialHeader, $legacySoname) && !str_contains($partialHeader, $soname), 'Partial update requires an unpublished SONAME spelling');
+    check(hash_file('sha256', $legacyArchive) === $legacyHash, 'Partial update rewrote the retained provider');
+    $layout = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'php-zts-runtime-layout')));
+    $installRoot = $root . '/installed-incremental';
+    if ($type === 'rpm') {
+        mkdir($installRoot);
+        command(['rpm', '--root', $installRoot, '--initdb']);
+        command(['rpm', '--root', $installRoot, '-i', $shellFixture]);
+        command(['rpm', '--root', $installRoot, '-U', '--noscripts', $layout, $legacyArchive]);
+        command(['rpm', '--root', $installRoot, '-U', '--noscripts', $newConsumer]);
+    } elseif ($type === 'apk') {
+        installApkFixture($installRoot, [$layout, $legacyArchive], [$base->getName() => $newFloor]);
+        command(['apk', '--root', $installRoot, '--no-network', '--no-scripts', '--allow-untrusted', '--force-non-repository', '--repositories-file', '/dev/null', 'add', $newConsumer]);
+    } else {
+        $status = $root . '/installed-status';
+        file_put_contents($status, file_get_contents('/var/lib/dpkg/status') . "\n"
+            . command(['dpkg-deb', '-f', $legacyArchive]) . "Status: install ok installed\n\n"
+            . command(['dpkg-deb', '-f', $layout]) . "Status: install ok installed\n\n");
+        command(['apt-get', '-s', '-o', 'Dir::State::status=' . $status, '-o', 'Debug::NoLocking=true', 'install', $newConsumer]);
+    }
+    echo "Passed {$type} shared library packages, incremental published providers, revision floors and debuginfo without PHP.\n";
 } finally {
     $oldTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $oldTmp);
     removeFixture($root);

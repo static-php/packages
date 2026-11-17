@@ -630,7 +630,8 @@ class CreatePackages
         $type = self::$packageType;
         $selected = [];
         if ($planPath = getenv('SPP_SHARED_LIBRARY_PLAN')) {
-            $selected = self::migrationBaseline($planPath)['libraries'] ?? [];
+            $plan = self::migrationBaseline($planPath);
+            $selected = array_diff($plan['libraries'] ?? [], array_keys($plan['publication_retries'] ?? []));
         }
         $packages = getenv('SPP_NATIVE_INVENTORY') ? self::nativeInventory($type, self::$sharedLibraries->architecture()) : [];
         foreach (getenv('SPP_NATIVE_INVENTORY') ? [] : json_decode(getenv('SPP_BASELINE_MANIFESTS') ?: '[]', true, 512, JSON_THROW_ON_ERROR) as $path) {
@@ -641,12 +642,14 @@ class CreatePackages
         }
         $normalizeArch = static fn (string $arch): string => match ($arch) {'amd64' => 'x86_64', 'arm64' => 'aarch64', default => $arch};
         foreach (self::$sharedLibraries->libraryIds() as $id) {
+            self::$sharedLibraries->setPublishedProvides($id, $type, null);
             if (self::$sharedLibraries->getPackageVersion($id, $type) !== null && ($packages === [] || in_array($id, $selected, true))) {
                 continue;
             }
             $source = SharedLibraries::normalizeVersion(self::$sharedLibraries->get($id)['version']);
             $source = $type === 'apk' ? self::toApkVersion($source) : $source;
             $resolved = null;
+            $resolvedPackage = null;
             foreach ($packages as $package) {
                 if (($package['name'] ?? '') !== self::$sharedLibraries->libraryPackageName($id)
                     || $normalizeArch($package['architecture'] ?? '') !== self::$sharedLibraries->architecture()) {
@@ -656,10 +659,12 @@ class CreatePackages
                 $upstream = preg_replace($type === 'apk' ? '/-r[0-9]+$/D' : '/-[^-]+$/D', '', $version);
                 if ($upstream === $source && ($resolved === null || self::compareMigrationVersions($type, $version, $resolved) > 0)) {
                     $resolved = $version;
+                    $resolvedPackage = $package;
                 }
             }
             if ($resolved !== null) {
                 self::$sharedLibraries->setPackageVersion($id, $type, $resolved);
+                self::$sharedLibraries->setPublishedProvides($id, $type, $resolvedPackage['provides'] ?? null);
             }
         }
     }
@@ -765,6 +770,7 @@ class CreatePackages
             $version = self::$packageType === 'apk' ? self::toApkVersion($package->getVersion()) : $package->getVersion();
             $iteration = self::resolveIteration($package->getName(), $version, $packageArchitecture, self::$packageType);
             $manifest->setPackageVersion($id, self::$packageType, $version . (self::$packageType === 'apk' ? '-r' : '-') . $iteration);
+            $manifest->setPublishedProvides($id, self::$packageType, null);
             $packages[] = $package;
         }
         foreach ($packages as $package) {

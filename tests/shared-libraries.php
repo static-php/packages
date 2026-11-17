@@ -175,6 +175,19 @@ try {
     $resolve->invoke(null);
     expect($unresolved->getPackageVersion('base', 'apk') === '1.0-r1', 'Native inventory retained a foreign dependency floor');
     expect(in_array('php-zts-lib-base>=1.0-r1', $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Native dependency floor ignored the selected owner inventory');
+    $snapshot = json_decode(file_get_contents($inventoryPath), true, flags: JSON_THROW_ON_ERROR);
+    $legacyBase = 'php-zts-soname-' . str_replace('_', '-5f', $architecture) . '-libbase.so.1';
+    $snapshot['inventory'][0]['provides'] = [$legacyBase];
+    $snapshot['inventory'][1]['provides'] = ['php-zts-soname-libbase.so.1'];
+    file_put_contents($inventoryPath, json_encode($snapshot, JSON_THROW_ON_ERROR));
+    $resolve->invoke(null);
+    expect($unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']) === ['php-zts-lib-base>=1.0-r1', $legacyBase], 'Unchanged provider requires a capability it never published');
+    file_put_contents($planPath, json_encode(['libraries' => ['base'], 'publication_retries' => ['base' => []]]));
+    $resolve->invoke(null);
+    expect(in_array($legacyBase, $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Retained publication retry was treated as a newly packaged provider');
+    file_put_contents($planPath, json_encode(['libraries' => ['base']]));
+    $resolve->invoke(null);
+    expect(in_array('php-zts-soname-libbase.so.1', $unresolved->dependenciesForPackage([], 'apk', null, ['libbase.so.1']), true), 'Newly packaged provider retained a historical requirement');
     putenv('SPP_NATIVE_INVENTORY');
     $versionProperty->setValue(null, $previousVersion);
     putenv($previousPlan === false ? 'SPP_SHARED_LIBRARY_PLAN' : 'SPP_SHARED_LIBRARY_PLAN=' . $previousPlan);
@@ -193,6 +206,18 @@ try {
     expect($libraries->dependenciesForPackage($payload, 'apk') === ['php-zts-lib-top>=2.1_rc2-r2', $libraries->sonameCapability('libtop.so.2')], 'APK prerelease version not normalized');
     expect($libraries->dependenciesForPackage($libraries->getPackageFiles('top'), 'rpm', 'top') === ['php-zts-lib-base >= 1.0-2.el8', $libraries->sonameCapability('libbase.so.1')], 'Transitive library dependency missing');
     expect($libraries->dependenciesForPackage([], 'deb', null, ['libbase.so.1']) === ['php-zts-lib-base (>= 1.0-2)', $libraries->sonameCapability('libbase.so.1')], 'Declared dlopen dependencies missing');
+    foreach (['rpm', 'deb', 'apk'] as $type) {
+        $canonical = $libraries->sonameCapability('libbase.so.1', $type);
+        $legacy = 'php-zts-soname-' . $legacyArchitecture . '-libbase.so.1';
+        foreach ([[$legacy], [$canonical], [$legacy, $canonical]] as $provides) {
+            $libraries->setPublishedProvides('base', $type, $provides);
+            $dependency = $libraries->dependenciesForPackage($libraries->getPackageFiles('top'), $type, 'top');
+            expect($dependency[1] === (in_array($canonical, $provides, true) ? $canonical : $legacy), 'Dependency ignored actual ' . $type . ' provider metadata');
+        }
+        $libraries->setPublishedProvides('base', $type, ['php-zts-soname-libbase.so.2', 'libbase.so.1']);
+        rejected(static fn () => $libraries->dependenciesForPackage([], $type, null, ['libbase.so.1']), 'does not provide required private SONAME');
+        $libraries->setPublishedProvides('base', $type, null);
+    }
     expect(SharedLibraries::normalizeVersion('v3.8.0') === '3.8.0', 'Leading version marker retained');
     expect(SharedLibraries::normalizeVersion('libssh2-1.11.1') === '1.11.1', 'Artifact tag prefix retained');
     expect(SharedLibraries::normalizeVersion('grpc-v1.74.0RC1') === '1.74.0~rc1', 'Prefixed prerelease not normalized');

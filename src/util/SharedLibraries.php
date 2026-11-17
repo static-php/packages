@@ -13,6 +13,7 @@ final class SharedLibraries
     private array $files = [];
     private array $sonameOwners = [];
     private array $elf = [];
+    private array $packageProvides = [];
     private string $manifestHash;
 
     public function __construct(string $root, ?string $expectedRuntimeLibdir = null, ?string $manifestPath = null)
@@ -268,6 +269,15 @@ final class SharedLibraries
         return $version;
     }
 
+    public function setPublishedProvides(string $id, string $type, ?array $provides): void
+    {
+        $this->getPackageVersion($id, $type);
+        unset($this->packageProvides[$type][$id]);
+        if ($provides !== null) {
+            $this->packageProvides[$type][$id] = $provides;
+        }
+    }
+
     public function persist(): void
     {
         $path = $this->packageVersionsPath();
@@ -450,13 +460,15 @@ final class SharedLibraries
         foreach ($this->librarySonames($id) as $soname) {
             $capability = $this->sonameCapability($soname);
             $provides[] = $capability;
-            // Published consumers still require the original spelling. Retain it
-            // only for SONAMEs this package actually contains; new requirements
-            // always use the architecture-free capability above.
-            $legacyArchitecture = preg_replace_callback('/[^a-z0-9.+]/', static fn ($m) => '-' . bin2hex($m[0]), $this->architecture());
-            $provides[] = 'php-zts-soname-' . $legacyArchitecture . '-' . substr($capability, strlen('php-zts-soname-'));
+            $provides[] = $this->legacySonameCapability($soname, defined('SPP_TYPE') ? SPP_TYPE : 'rpm');
         }
         return $provides;
+    }
+
+    private function legacySonameCapability(string $soname, string $type): string
+    {
+        $architecture = preg_replace_callback('/[^a-z0-9.+]/', static fn ($m) => '-' . bin2hex($m[0]), $this->architecture());
+        return 'php-zts-soname-' . $architecture . '-' . substr($this->sonameCapability($soname, $type), strlen('php-zts-soname-'));
     }
 
     public static function normalizeVersion(string $raw): string
@@ -489,7 +501,15 @@ final class SharedLibraries
                 default => $dependency['package'] . ' >= ' . $version,
             };
             foreach ($dependency['sonames'] as $soname) {
-                $result[] = $this->sonameCapability($soname, $type);
+                $capability = $this->sonameCapability($soname, $type);
+                $provides = $this->packageProvides[$type][$dependency['id']] ?? null;
+                if ($provides !== null && !in_array($capability, $provides, true)) {
+                    $capability = $this->legacySonameCapability($soname, $type);
+                    if (!in_array($capability, $provides, true)) {
+                        throw new RuntimeException("Published {$dependency['package']} {$version} does not provide required private SONAME {$soname}");
+                    }
+                }
+                $result[] = $capability;
             }
         }
         return $result;

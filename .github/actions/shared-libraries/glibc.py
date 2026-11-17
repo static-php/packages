@@ -261,6 +261,11 @@ def package_library_archives(kind, directory, sdk, manifest, stream=None):
         baseline = baseline / 'owners' / stream
         snapshot = format_stage(kind) / 'native-inventories' / (stream + '.json')
         environment.update(SPP_NATIVE_INVENTORY=str(snapshot), SPP_FORGEJO_OWNER=stream.replace('.', ''))
+    elif kind == 'rpm':
+        snapshots = sorted((directory / 'native-inventories').glob('*.json'))
+        snapshot = next((path for path in snapshots if not read(path).get('error')), None)
+        if snapshot is not None:
+            environment['SPP_NATIVE_INVENTORY'] = str(snapshot)
     environment['SPP_BASELINE_MANIFESTS'] = json.dumps([str(path.resolve()) for path in baseline.glob('shared-libraries.json')])
     retry_args = ['python3', 'bin/shared-library-plan', 'stage-publication-retries',
                   '--plan', plan_path, '--destination', packages,

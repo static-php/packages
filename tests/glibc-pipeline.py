@@ -31,6 +31,23 @@ runtime = module('runtime-checks')
 
 
 class Pipeline(unittest.TestCase):
+    def test_rpm_library_packaging_uses_the_captured_provider_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'stage/rpm'
+            glibc.write(directory / 'shared-library-plan.json', {'libraries': ['fixture']})
+            glibc.write(directory / 'native-inventories/8.2.json', {'error': 'unavailable'})
+            snapshot = directory / 'native-inventories/8.4.json'
+            glibc.write(snapshot, {'schema': 1, 'type': 'rpm', 'inventory': []})
+            def execute(arguments, **kwargs):
+                if 'stage-publication-retries' in arguments:
+                    glibc.write(directory / 'publication-retries.json', {'remaining_libraries': ['fixture']})
+            with patch.object(glibc, 'ROOT', root), patch.object(glibc, 'STAGE', root / 'stage'), \
+                    patch.object(glibc, 'run', side_effect=execute) as run:
+                glibc.package_library_archives('rpm', directory, root / 'sdk', root / 'manifest.json')
+            package = next(call for call in run.call_args_list if call.args[0][:3] == ['php', 'bin/spp', 'package'])
+            self.assertEqual(package.kwargs['env']['SPP_NATIVE_INVENTORY'], str(snapshot))
+
     def test_reuse_only_cannot_compile_even_when_plan_requests_a_full_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
