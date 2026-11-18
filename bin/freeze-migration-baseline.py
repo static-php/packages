@@ -280,7 +280,8 @@ def select_packages(kind, inventory, profile, include_debug=False, latest=None, 
             for dependency in package.get('requires', []):
                 if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
                     continue
-                choices = providers.get(dependency, set())
+                # Historical builtin provides must not hide a real module package.
+                choices = {dependency} if dependency in versions else providers.get(dependency, set())
                 if len(choices) != 1:
                     missing.append({'package': package['name'], 'dependency': dependency,
                                     'error': 'Missing or ambiguous published managed dependency: ' + dependency})

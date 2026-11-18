@@ -351,6 +351,29 @@ class BaselineCapture(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Missing or ambiguous'):
             helper['select_packages']('rpm', [cli, *providers], {'cli'})
 
+    def test_real_modules_override_historical_cli_provides_and_keep_their_closure(self):
+        packages = [
+            {'name': 'php-zts-cli', 'version': '1', 'provides': ['php-zts-curl', 'php-zts-fileinfo', 'php-zts-openssl']},
+            {'name': 'php-zts-cli', 'version': '2', 'provides': ['php-zts-openssl'], 'requires': ['php-zts-fileinfo']},
+            {'name': 'php-zts-swoole', 'version': '1', 'requires': ['php-zts-cli', 'php-zts-curl', 'php-zts-openssl']},
+            {'name': 'php-zts-curl', 'version': '1', 'requires': ['php-zts-lib-curl']},
+            {'name': 'php-zts-fileinfo', 'version': '1', 'requires': ['php-zts-lib-libmagic']},
+            {'name': 'php-zts-lib-curl', 'version': '1', 'requires': ['php-zts-runtime-layout']},
+            {'name': 'php-zts-lib-libmagic', 'version': '1', 'requires': ['php-zts-runtime-layout']},
+            {'name': 'php-zts-runtime-layout', 'version': '1'},
+            {'name': 'php-zts-redis', 'version': '1', 'requires': ['php-zts-cli']},
+        ]
+        with patch.dict(helper['select_packages'].__globals__, {'newer': lambda kind, a, b: int(a['version']) > int(b['version'])}):
+            for kind in ('rpm', 'deb', 'apk'):
+                with self.subTest(kind=kind):
+                    defects = []
+                    selected = helper['select_packages'](kind, packages, {'swoole'}, defects=defects)
+                    self.assertEqual(defects, [])
+                    self.assertEqual(set(selected), {p['name'] for p in packages} - {'php-zts-redis'})
+                    self.assertEqual(selected['php-zts-cli']['version'], '2')
+                    self.assertEqual(selected['php-zts-curl'], packages[3])
+                    self.assertEqual(selected['php-zts-fileinfo'], packages[4])
+
     def test_retained_soname_provider_replaces_latest_and_uses_its_own_closure(self):
         old_cap = 'php-zts-soname-libgrpc.so.50'
         new_cap = 'php-zts-soname-libgrpc.so.58'
