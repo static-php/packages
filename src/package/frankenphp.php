@@ -195,9 +195,10 @@ class frankenphp implements package
         $fpmArgs = [...$fpmArgs, ...[
             '--depends', "$phpEmbedName",
             '--iteration', $rpmRelease,
-            '--rpm-user', 'frankenphp',
-            '--rpm-group', 'frankenphp',
-            '--config-files', '/etc/frankenphp/Caddyfile',
+            '--rpm-attr', '0755,root,root:/usr/bin/' . $name,
+            '--rpm-attr', '0644,root,root:/usr/lib/systemd/system/' . $name . '.service',
+            '--rpm-attr', '0644,root,root:/etc/frankenphp/Caddyfile',
+            '--rpm-attr', '0755,frankenphp,frankenphp:/var/lib/frankenphp',
             '--config-files', '/etc/frankenphp/Caddyfile.d',
             $this->runtimeBinary() . '=/usr/bin/' . $name,
             $completionFile . '=/usr/share/bash-completion/completions/' . $name,

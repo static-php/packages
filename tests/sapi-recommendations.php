@@ -135,6 +135,25 @@ try {
         assertRecommendation(count($artifacts) === 1, 'Expected one native ' . $sapi . ' package');
         $artifact = $artifacts[0];
         if ($sapi === 'frankenphp') {
+            if ($type === 'rpm') {
+                $entries = runRecommendationCommand(['rpm', '-qp', '--qf', '[%{FILENAMES} %{FILEUSERNAME}:%{FILEGROUPNAME} %{FILEMODES:perms}\n]', $artifact]);
+                $modes = [];
+                foreach (explode("\n", trim($entries)) as $entry) {
+                    [$path, $owner, $mode] = explode(' ', $entry, 3);
+                    $modes[$path] = $mode;
+                    $expectedOwner = $path === '/var/lib/frankenphp' ? 'frankenphp:frankenphp' : 'root:root';
+                    assertRecommendation($owner === $expectedOwner, "$path has RPM owner $owner, expected $expectedOwner");
+                }
+                foreach ([
+                    "/usr/bin/$name" => '-rwxr-xr-x',
+                    "/usr/lib/systemd/system/$name.service" => '-rw-r--r--',
+                    '/etc/frankenphp/Caddyfile' => '-rw-r--r--',
+                    '/etc/frankenphp/Caddyfile.d' => 'drwxr-xr-x',
+                    '/var/lib/frankenphp' => 'drwxr-xr-x',
+                ] as $path => $mode) {
+                    assertRecommendation(($modes[$path] ?? null) === $mode, "$path must have RPM mode $mode");
+                }
+            }
             $controls = match ($type) {
                 'rpm' => ['PREIN' => 'rhel/preinstall.sh', 'POSTIN' => 'rhel/postinstall.sh',
                     'PREUN' => 'rhel/preuninstall.sh', 'POSTUN' => 'rhel/postuninstall.sh'],
