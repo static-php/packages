@@ -6,7 +6,6 @@ namespace staticphp\package;
 
 use RuntimeException;
 use staticphp\package;
-use staticphp\util\RuntimeServices;
 
 final class runtime_layout implements package
 {
@@ -17,24 +16,28 @@ final class runtime_layout implements package
 
     public function getVersion(): string
     {
-        return '2';
+        return '3';
+    }
+
+    public static function serviceDependency(string $type): string
+    {
+        return match ($type) {
+            'deb' => 'php-zts-runtime-layout (>= 3)',
+            'apk' => 'php-zts-runtime-layout>=3',
+            'rpm' => 'php-zts-runtime-layout >= 3',
+        };
     }
 
     public function sourceHash(string $type): string
     {
-        $inputs = ['type' => $type];
-        foreach ([__FILE__, BASE_PATH . '/src/util/RuntimeServices.php', BASE_PATH . '/src/runtime/runtime-services', BASE_PATH . '/src/runtime/apk-commit-hook'] as $path) {
-            if (is_file($path)) {
-                $inputs[basename($path)] = hash_file('sha256', $path);
-            }
-        }
+        $inputs = ['type' => $type, 'runtime_layout.php' => hash_file('sha256', __FILE__)];
         return hash('sha256', json_encode($inputs, JSON_THROW_ON_ERROR));
     }
 
     public function getFpmConfig(): array
     {
         $type = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
-        $config = ['files' => [], 'empty_directories' => [], 'depends' => $type === 'deb' ? ['init-system-helpers'] : []];
+        $config = ['files' => [], 'empty_directories' => []];
         if ($type === 'rpm') {
             $source = TEMP_DIR . '/runtime-layout/php-zts';
             if (!is_dir(dirname($source)) && !mkdir(dirname($source), 0755, true) && !is_dir(dirname($source))) {
@@ -52,12 +55,6 @@ final class runtime_layout implements package
                 $config['files'][$source] = '/usr/lib64/php-zts';
             }
         }
-        if (class_exists(RuntimeServices::class)) {
-            $service = RuntimeServices::layoutConfig($type);
-            foreach ($service as $key => $value) {
-                $config[$key] = isset($config[$key]) && is_array($config[$key]) ? array_merge($config[$key], $value) : $value;
-            }
-        }
         $metadata = TEMP_DIR . '/runtime-layout.json';
         file_put_contents($metadata, json_encode(['schema' => 1, 'type' => $type, 'version' => $this->getVersion(), 'source_hash' => $this->sourceHash($type)], JSON_THROW_ON_ERROR) . "\n");
         $config['files'][$metadata] = '/usr/share/php-zts/runtime-layout.json';
@@ -67,9 +64,8 @@ final class runtime_layout implements package
     public function getFpmExtraArgs(): array
     {
         $type = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
-        $args = class_exists(RuntimeServices::class) ? RuntimeServices::layoutArgs($type) : [];
         if ($type === 'apk') {
-            return $args;
+            return [];
         }
         [$alias, $target, $absolute] = $type === 'rpm'
             ? ['/usr/lib/php-zts', '../lib64/php-zts', '/usr/lib64/php-zts']
@@ -84,8 +80,8 @@ final class runtime_layout implements package
         }
         // FPM rejects epoch zero; the common DEB archive must be identical on both builders.
         return $type === 'deb'
-            ? ['--before-install', $script, '--source-date-epoch-default', '1', ...$args]
-            : ['--before-install', $script, '--before-upgrade', $script, ...$args];
+            ? ['--before-install', $script, '--source-date-epoch-default', '1']
+            : ['--before-install', $script, '--before-upgrade', $script];
     }
 
     public function getDebuginfoFpmConfig(): array
@@ -100,6 +96,6 @@ final class runtime_layout implements package
 
     public function getDescription(): string
     {
-        return 'Private PHP ZTS runtime layout and transaction integration';
+        return 'Private PHP ZTS runtime directories and compatibility paths';
     }
 }

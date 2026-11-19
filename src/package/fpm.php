@@ -5,7 +5,6 @@ namespace staticphp\package;
 use staticphp\package;
 use staticphp\util\BuildPayload;
 use staticphp\step\CreatePackages;
-use staticphp\util\RuntimeServices;
 
 class fpm implements package
 {
@@ -82,11 +81,11 @@ class fpm implements package
         $files += $type === 'apk'
             ? [TEMP_DIR . '/php-fpm.openrc' => '/etc/init.d/php-fpm' . $binarySuffix]
             : [TEMP_DIR . '/php-fpm.service' => '/usr/lib/systemd/system/php-fpm' . $binarySuffix . '.service'];
-        $files += RuntimeServices::descriptor('fpm', 'php-fpm' . $binarySuffix, '/usr/sbin/php-fpm' . $binarySuffix, getConfdir() . '/php-fpm.conf');
         return [
             'depends' => [
                 CreatePackages::getPrefix() . '-cli',
-                ...($type === 'rpm' ? ['shadow-utils'] : ($type === 'deb' ? ['passwd'] : [])),
+                runtime_layout::serviceDependency($type),
+                ...($type === 'rpm' ? ['shadow-utils'] : ($type === 'deb' ? ['passwd', 'init-system-helpers'] : [])),
             ],
             'recommends' => CreatePackages::getSapiRecommendations(),
             'provides' => [],
@@ -94,7 +93,7 @@ class fpm implements package
             'conflicts' => $versionedConflicts,
             'files' => $files,
             'config-files' => [getConfdir() . '/php-fpm.conf', getConfdir() . '/fpm.d/www.conf'],
-            'apk_scripts' => $type === 'apk' ? RuntimeServices::apkScripts('php-fpm' . $binarySuffix) : [],
+            'apk_scripts' => $type === 'apk' ? ['preupgrade' => INI_PATH . '/php-fpm-account.alpine.sh'] : [],
             'empty_directories' => [
                 getConfdir() . '/fpm.d/',
                 '/var/log/' . CreatePackages::getPrefix() . '/php-fpm',
@@ -108,7 +107,20 @@ class fpm implements package
 
     public function getFpmExtraArgs(): array
     {
-        return RuntimeServices::serviceArgs(defined('SPP_TYPE') ? SPP_TYPE : 'rpm', 'php-fpm' . getBinarySuffix());
+        $type = defined('SPP_TYPE') ? SPP_TYPE : 'rpm';
+        $account = INI_PATH . ($type === 'apk' ? '/php-fpm-account.alpine.sh' : '/php-fpm-account.sh');
+        $service = 'php-fpm' . getBinarySuffix();
+        $remove = match ($type) {
+            'apk' => 'if command -v rc-service >/dev/null; then rc-service ' . escapeshellarg($service) . ' stop || :; fi' . "\n"
+                . 'if command -v rc-update >/dev/null; then rc-update del ' . escapeshellarg($service) . ' default || :; fi',
+            'deb' => 'if { [ "${1-}" = remove ] || [ "${1-}" = deconfigure ]; } && [ -d /run/systemd/system ]; then deb-systemd-invoke stop ' . escapeshellarg($service . '.service') . ' || :; fi',
+            'rpm' => 'if [ "${1-}" = 0 ] && [ -d /run/systemd/system ]; then systemctl stop ' . escapeshellarg($service . '.service') . ' || :; fi',
+        };
+        $script = TEMP_DIR . '/php-fpm-preremove.sh';
+        if (file_put_contents($script, "#!/bin/sh\n" . $remove . "\n") === false) {
+            throw new \RuntimeException('Cannot stage the FPM removal script');
+        }
+        return ['--before-install', $account, '--before-remove', $script];
     }
 
     public function getDebuginfoFpmConfig(): array

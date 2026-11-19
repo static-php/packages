@@ -73,6 +73,7 @@ try {
     }
     file_put_contents(BUILD_BIN_PATH . '/php', "#!/bin/sh\nprintf '8.6.0'\n");
     chmod(BUILD_BIN_PATH . '/php', 0755);
+    file_put_contents(BUILD_BIN_PATH . '/php-fpm', 'FPM fixture');
     file_put_contents(BUILD_BIN_PATH . '/frankenphp', "#!/bin/sh\nif [ \"\$1\" = completion ]; then printf '# fixture completion\\n'; else printf 'FrankenPHP v1.13.3 PHP 8.6.0 Caddy v2.11.7\\n'; fi\n");
     chmod(BUILD_BIN_PATH . '/frankenphp', 0755);
     $helpers = strstr(file_get_contents(BASE_PATH . '/bin/spp'), 'function setupGithubToken(');
@@ -97,7 +98,8 @@ try {
         if (!is_dir(dirname($path))) {
             mkdir(dirname($path), 0755, true);
         }
-        file_put_contents($path, str_ends_with($path, '.sh') ? "#!/bin/sh\nexit 0\n" : 'Fixture configuration');
+        $script = "#!/bin/sh\n# upstream {$relative}\n# /usr/bin/frankenphp frankenphp.service rc-service frankenphp stop\nexit 0\n";
+        file_put_contents($path, str_ends_with($path, '.sh') ? $script : 'Fixture configuration');
     }
     foreach (['cli', 'cgi', 'fpm', 'embed', 'frankenphp'] as $sapi) {
         $class = 'staticphp\\package\\' . $sapi;
@@ -123,7 +125,7 @@ try {
                     public function getDescription(): string { return 'SAPI recommendation fixture'; }
                 };
                 $method = new ReflectionMethod(CreatePackages::class, match ($type) { 'rpm' => 'createRpmPackage', 'deb' => 'createDebPackage', 'apk' => 'createApkPackage' });
-                $method->invoke(null, $fixture, '8.6.0', 'x86_64');
+                $method->invoke(null, $sapi === 'fpm' ? $sapiPackage : $fixture, '8.6.0', 'x86_64');
             }
         } finally {
             file_put_contents($root . '/' . $sapi . '.log', ob_get_clean());
@@ -132,6 +134,28 @@ try {
         $artifacts = glob(DIST_PATH . '/' . $type . '/' . $name . '*.' . $type);
         assertRecommendation(count($artifacts) === 1, 'Expected one native ' . $sapi . ' package');
         $artifact = $artifacts[0];
+        if ($sapi === 'frankenphp') {
+            $controls = match ($type) {
+                'rpm' => ['PREIN' => 'rhel/preinstall.sh', 'POSTIN' => 'rhel/postinstall.sh',
+                    'PREUN' => 'rhel/preuninstall.sh', 'POSTUN' => 'rhel/postuninstall.sh'],
+                'deb' => ['./postinst' => 'debian/postinst.sh', './prerm' => 'debian/prerm.sh', './postrm' => 'debian/postrm.sh'],
+                'apk' => ['.post-install' => 'alpine/post-install.sh', '.pre-deinstall' => 'alpine/pre-deinstall.sh'],
+            };
+            foreach ($controls as $control => $source) {
+                $body = match ($type) {
+                    'rpm' => runRecommendationCommand(['rpm', '-qp', '--qf', '%{' . $control . '}', $artifact]),
+                    'deb' => runRecommendationCommand(['tar', '-xOJf', '-', $control], runRecommendationCommand(['ar', 'p', $artifact, 'control.tar.xz'])),
+                    'apk' => runRecommendationCommand(['tar', '-xOf', '-', $control], runRecommendationCommand(['gzip', '-dc', $artifact])),
+                };
+                assertRecommendation(str_contains($body, '# upstream ' . $source), 'Missing upstream script ' . $source);
+                assertRecommendation(str_contains($body, "/usr/bin/{$name} {$name}.service rc-service {$name} stop"), 'Wrong service target in ' . $source);
+            }
+            if ($type === 'apk') {
+                $postRemove = runRecommendationCommand(['tar', '-xOf', '-', '.post-deinstall'], runRecommendationCommand(['gzip', '-dc', $artifact]));
+                assertRecommendation($postRemove === file_get_contents(DIST_PATH . '/frankenphp/package/alpine/post-deinstall.sh'),
+                    'APK changed the upstream post-deinstall script');
+            }
+        }
         if ($type === 'rpm') {
             $weak = array_values(array_filter(explode("\n", trim(runRecommendationCommand(['rpm', '-qp', '--recommends', $artifact])))));
             sort($weak);
@@ -151,6 +175,14 @@ try {
         }
         foreach ($expected as $recommendation) {
             assertRecommendation(!str_contains($strong, $recommendation), $sapi . ' makes ' . $recommendation . ' a hard dependency');
+        }
+        if (in_array($sapi, ['fpm', 'frankenphp'], true)) {
+            $layoutDependency = match ($type) {
+                'deb' => 'php-zts-runtime-layout (>= 3)',
+                'apk' => 'php-zts-runtime-layout>=3',
+                'rpm' => 'php-zts-runtime-layout >= 3',
+            };
+            assertRecommendation(str_contains($strong, $layoutDependency), 'Targeted ' . $sapi . ' upgrade can retain layout version 2');
         }
         echo 'Passed ' . $type . ' native ' . $sapi . ' shared-extension ' . ($type === 'apk' ? 'optionality' : 'recommendations') . ".\n";
     }

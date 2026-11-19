@@ -13,7 +13,6 @@ use Symfony\Component\Process\Process;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 require_once dirname(__DIR__) . '/src/util/BuildPayload.php';
-require_once dirname(__DIR__) . '/src/util/RuntimeServices.php';
 
 function migrationCommand(array $arguments, ?string $input = null, ?string $cwd = null): string
 {
@@ -159,7 +158,7 @@ function migrationLayoutContracts(string $root, string $type): void
     if ($type === 'rpm') {
         migrationCheck($upgrade !== false && hash_file('sha256', $args[$install + 1]) === hash_file('sha256', $args[$upgrade + 1]), 'RPM layout install/upgrade guards differ');
     } else {
-        migrationCheck($upgrade === false, 'DEB before-upgrade wrapper would discard triggered postinst dispatch');
+        migrationCheck($upgrade === false, 'DEB layout should use its native preinst arguments');
     }
     $simulation = $root . '/layout-guards';
     $simAlias = $simulation . $alias;
@@ -568,30 +567,14 @@ try {
         migrationCheck(!str_contains($relationships['php-zts-cli']['requires'], $optional), 'CLI migration changed an optional shared module into a hard dependency');
     }
 
-    $triggerPaths = ['/usr/lib/php-zts', '/usr/lib64/php-zts', '/usr/share/php-zts/services', '/usr/share/php-zts/consumers', '/usr/bin', '/usr/sbin', '/usr/lib/systemd/system'];
+    $layoutArchive = $archivePaths['php-zts-runtime-layout'];
     if ($type === 'rpm') {
-        $scripts = migrationCommand(['rpm', '-qp', '--qf', '[%{TRANSFILETRIGGERSCRIPTS}\n]', $archivePaths['php-zts-runtime-layout']]);
-        $names = explode("\n", trim(migrationCommand(['rpm', '-qp', '--qf', '[%{TRANSFILETRIGGERNAME}\n]', $archivePaths['php-zts-runtime-layout']])));
-        migrationCheck(str_contains($scripts, '/usr/libexec/php-zts/runtime-services finish'), 'RPM runtime layout lacks a registered native transaction file-trigger script');
-        foreach ($triggerPaths as $path) {
-            migrationCheck(in_array($path, $names, true), 'RPM transaction file trigger does not watch ' . $path);
-        }
+        $triggers = migrationCommand(['rpm', '-qp', '--qf', '[%{TRANSFILETRIGGERNAME}]', $layoutArchive]);
+        migrationCheck(trim($triggers) === '', 'RPM runtime layout registered a transaction file trigger');
+        migrationCheck(!str_contains(migrationCommand(['rpm', '-qp', '--scripts', $layoutArchive]), 'posttrans'), 'RPM runtime layout has a post-transaction script');
     } else {
-        $triggers = explode("\n", trim(migrationCommand(['tar', '-xOJf', '-', './triggers'], migrationDebMember($archivePaths['php-zts-runtime-layout'], 'control.tar'))));
-        foreach ($triggerPaths as $path) {
-            migrationCheck(in_array('interest-noawait ' . $path, $triggers, true), 'DEB native trigger metadata lacks interest-noawait for ' . $path);
-        }
-        $helper = $stage . '/native-trigger-helper';
-        $marker = $stage . '/native-trigger-marker';
-        file_put_contents($helper, "#!/bin/sh\nprintf '%s\\n' \"\$*\" >> " . escapeshellarg($marker) . "\n");
-        chmod($helper, 0755);
-        $postinst = migrationCommand(['tar', '-xOJf', '-', './postinst'], migrationDebMember($archivePaths['php-zts-runtime-layout'], 'control.tar'));
-        $script = $stage . '/native-layout-postinst';
-        file_put_contents($script, str_replace('/usr/libexec/php-zts/runtime-services', $helper, $postinst));
-        migrationCommand(['sh', $script, 'configure']);
-        migrationCheck(!file_exists($marker), 'DEB layout refreshes before the complete runtime has configured');
-        migrationCommand(['sh', $script, 'triggered', 'php-zts-runtime']);
-        migrationCheck(file_get_contents($marker) === "finish\n", 'Extracted native DEB postinst does not dispatch its runtime trigger exactly once');
+        $controls = migrationCommand(['tar', '-tJf', '-'], migrationDebMember($layoutArchive, 'control.tar'));
+        migrationCheck(!str_contains($controls, 'triggers') && !str_contains($controls, 'postinst'), 'DEB runtime layout has a trigger or post-install script');
     }
 
     $libraryName = 'php-zts-lib-migration-contract';
@@ -599,7 +582,8 @@ try {
     migrationCheck(str_contains($headers[$libraryName], 'php-zts-runtime-layout'), 'Independently installed library lacks a hard layout dependency');
     migrationCheck(!str_contains($headers[$libraryName], 'php-zts-cli'), 'Independent library depends on a PHP stream');
     migrationCheck(!str_contains($headers['php-zts-runtime-layout'], 'php-zts-cli'), 'Runtime layout depends on a PHP stream');
-    migrationCheck(str_contains($headers['php-zts-runtime-layout'], $type === 'rpm' ? "\n2-8\n" : "Version: 2-8\n"), 'Runtime layout version is PHP-tagged');
+    $layoutVersion = (new runtime_layout())->getVersion() . '-8';
+    migrationCheck(str_contains($headers['php-zts-runtime-layout'], ($type === 'rpm' ? "\n" : 'Version: ') . $layoutVersion . "\n"), 'Runtime layout version is PHP-tagged');
     migrationCheck(str_contains($headers['php-zts-embed'], 'php-zts-runtime-layout'), 'Embed lacks a hard layout dependency');
     $physical = $type === 'rpm' ? '/usr/lib64' : '/usr/lib';
     $layoutRoot = $extractions['php-zts-runtime-layout'];
@@ -700,7 +684,7 @@ SH;
         'library_sha256' => hash_file('sha256', $libraryPayload),
         'embed_sha256' => hash_file('sha256', $embedPayload),
     ], JSON_THROW_ON_ERROR));
-    echo "Passed {$type} native neutral release, independent layout dependencies, canonical/legacy path ownership, shared-core generation/cutoffs, native transaction triggers, recommendations and source immutability.\n";
+    echo "Passed {$type} native neutral release, independent layout dependencies, canonical/legacy path ownership, shared-core generation/cutoffs, trigger-free layout, recommendations and source immutability.\n";
 } finally {
     $previousTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $previousTmp);
     $previousCutoffs === false ? putenv('SPP_MIGRATION_CUTOFFS') : putenv('SPP_MIGRATION_CUTOFFS=' . $previousCutoffs);

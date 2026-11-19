@@ -313,6 +313,12 @@ try {
     check(str_contains($partialHeader, $legacySoname) && !str_contains($partialHeader, $soname), 'Partial update requires an unpublished SONAME spelling');
     check(hash_file('sha256', $legacyArchive) === $legacyHash, 'Partial update rewrote the retained provider');
     $layout = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'php-zts-runtime-layout')));
+    if ($type === 'apk') {
+        $members = command(['tar', '--ignore-zeros', '-tf', '-'], command(['gzip', '-dc', $layout]));
+        check(str_contains($members, 'usr/share/php-zts/runtime-layout.json'), 'APK layout metadata is missing');
+        check(!str_contains($members, 'etc/apk/commit_hooks.d/') && !str_contains($members, 'usr/libexec/php-zts/runtime-services'),
+            'APK runtime layout contains a transaction hook');
+    }
     $installRoot = $root . '/installed-incremental';
     if ($type === 'rpm') {
         mkdir($installRoot);

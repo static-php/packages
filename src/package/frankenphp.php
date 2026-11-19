@@ -6,7 +6,6 @@ use RuntimeException;
 use staticphp\package;
 use staticphp\step\CreatePackages;
 use staticphp\util\BuildPayload;
-use staticphp\util\RuntimeServices;
 use Symfony\Component\Process\Process;
 
 class frankenphp implements package
@@ -56,7 +55,7 @@ class frankenphp implements package
     {
         return array_values(array_unique([
             ...CreatePackages::getSharedLibraryDependencies([BUILD_BIN_PATH . '/frankenphp' => '/usr/bin/frankenphp'], $type),
-            'php-zts-runtime-layout',
+            runtime_layout::serviceDependency($type),
             CreatePackages::getSharedRuntimeCapability(),
         ]));
     }
@@ -136,6 +135,11 @@ class frankenphp implements package
             '-s', 'dir',
             '-t', 'rpm',
             '--no-rpm-autoreqprov',
+            '--depends', 'shadow-utils',
+            '--before-install', $packageFolder . '/rhel/preinstall.sh',
+            '--after-install', $this->serviceAsset($packageFolder . '/rhel/postinstall.sh', $name),
+            '--before-remove', $this->serviceAsset($packageFolder . '/rhel/preuninstall.sh', $name),
+            '--after-remove', $this->serviceAsset($packageFolder . '/rhel/postuninstall.sh', $name),
             '--rpm-compression', 'xz',
             '--rpm-compression-level', '1',
             '-p', $packageFile,  // Full path with distVersion in filename
@@ -197,18 +201,12 @@ class frankenphp implements package
             '--config-files', '/etc/frankenphp/Caddyfile.d',
             $this->runtimeBinary() . '=/usr/bin/' . $name,
             $completionFile . '=/usr/share/bash-completion/completions/' . $name,
-            $this->serviceUnit($packageFolder . '/rhel/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
+            $this->serviceAsset($packageFolder . '/rhel/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
             "{$packageFolder}/Caddyfile=/etc/frankenphp/Caddyfile",
             "{$packageFolder}/content/=/usr/share/frankenphp",
             $empty . '/=/var/lib/frankenphp',
             $empty . '/=/etc/frankenphp/Caddyfile.d',
         ]];
-        array_splice($fpmArgs, 1, 0, [...RuntimeServices::serviceArgs('rpm', $name, true),
-            '--after-install', RuntimeServices::frankenPostInstall('rpm', $name, '/usr/bin/' . $name),
-            '--after-upgrade', RuntimeServices::frankenPostInstall('rpm', $name, '/usr/bin/' . $name, true)]);
-        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
-            $fpmArgs[] = $source . '=' . $destination;
-        }
         foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
             $fpmArgs[] = $source . '=' . $destination;
         }
@@ -382,19 +380,19 @@ class frankenphp implements package
 
         $fpmArgs = [...$fpmArgs, ...[
             '--depends', $phpEmbedName,
-            '--after-install', RuntimeServices::frankenPostInstall('deb', $name, '/usr/bin/' . $name),
+            '--depends', 'passwd',
+            '--depends', 'init-system-helpers',
+            '--after-install', $this->serviceAsset($packageFolder . '/debian/postinst.sh', $name),
+            '--before-remove', $this->serviceAsset($packageFolder . '/debian/prerm.sh', $name),
+            '--after-remove', $this->serviceAsset($packageFolder . '/debian/postrm.sh', $name),
             '--iteration', $debIteration,
             $this->runtimeBinary() . '=/usr/bin/frankenphp' . $frankenphpSuffix,
             $completionFile . '=/usr/share/bash-completion/completions/frankenphp' . $frankenphpSuffix,
-            $this->serviceUnit($packageFolder . '/debian/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
+            $this->serviceAsset($packageFolder . '/debian/frankenphp.service', $name) . '=/usr/lib/systemd/system/' . $name . '.service',
             "{$packageFolder}/Caddyfile=/etc/frankenphp/Caddyfile",
             "{$packageFolder}/content/=/usr/share/frankenphp",
             $empty . '/=/var/lib/frankenphp'
         ]];
-        array_splice($fpmArgs, 1, 0, RuntimeServices::serviceArgs('deb', $name, true));
-        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
-            $fpmArgs[] = $source . '=' . $destination;
-        }
         foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
             $fpmArgs[] = $source . '=' . $destination;
         }
@@ -555,7 +553,7 @@ class frankenphp implements package
                 'dst' => '/usr/share/bash-completion/completions/frankenphp' . $frankenphpSuffix,
             ],
             [
-                'src' => $this->serviceUnit($packageFolder . '/alpine/frankenphp.openrc', $name),
+                'src' => $this->serviceAsset($packageFolder . '/alpine/frankenphp.openrc', $name),
                 'dst' => "/etc/init.d/frankenphp{$frankenphpSuffix}",
             ],
             [
@@ -578,19 +576,19 @@ class frankenphp implements package
         ];
 
         $nfpmConfig['contents'] = $contents;
-        foreach (RuntimeServices::descriptor('frankenphp', $name, '/usr/bin/' . $name, '/etc/frankenphp/Caddyfile') as $source => $destination) {
-            $nfpmConfig['contents'][] = ['src' => $source, 'dst' => $destination];
-        }
         foreach (CreatePackages::consumerMetadataFiles($name, [$this->runtimeBinary() => '/usr/bin/' . $name]) as $source => $destination) {
             $nfpmConfig['contents'][] = ['src' => $source, 'dst' => $destination];
         }
 
         $nfpmConfig['scripts'] = [
-            'postinstall' => RuntimeServices::frankenPostInstall('apk', $name, '/usr/bin/' . $name),
+            'postinstall' => $this->serviceAsset($packageFolder . '/alpine/post-install.sh', $name),
+            'preremove' => $this->serviceAsset($packageFolder . '/alpine/pre-deinstall.sh', $name),
         ];
-        $serviceArgs = RuntimeServices::serviceArgs('apk', $name, true);
-        $nfpmConfig['scripts']['preremove'] = $serviceArgs[array_search('--before-remove', $serviceArgs, true) + 1];
-        $nfpmConfig['apk']['scripts'] = RuntimeServices::apkScripts($name, true);
+        $postRemove = $packageFolder . '/alpine/post-deinstall.sh';
+        // The original Alpine script deletes the user and group shared with FPM and CLI.
+        if (is_file($postRemove) && hash_file('sha256', $postRemove) !== 'b8ae21ba3c3a0fb92f5f89181f9e2cdc5ade8c49b585079185f690a8485b0b61') {
+            $nfpmConfig['scripts']['postremove'] = $postRemove;
+        }
 
         // Write nfpm config
         $nfpmConfigFile = TEMP_DIR . "/nfpm-{$name}.yaml";
@@ -738,14 +736,28 @@ class frankenphp implements package
         return BuildPayload::load(BUILD_ROOT_PATH)?->prepareFile(BUILD_BIN_PATH . '/frankenphp')['debug'] ?? BUILD_ROOT_PATH . '/debug/frankenphp.debug';
     }
 
-    private function serviceUnit(string $source, string $service): string
+    private function serviceAsset(string $source, string $service): string
     {
-        $contents = file_get_contents($source);
-        $contents = str_replace('/usr/bin/frankenphp', '/usr/bin/' . $service, $contents);
-        $contents = str_replace(['/run/frankenphp', 'RuntimeDirectory=frankenphp'], ['/run/' . $service, 'RuntimeDirectory=' . $service], $contents);
-        $path = TEMP_DIR . '/' . $service . (str_ends_with($source, '.openrc') ? '.openrc' : '.service');
-        file_put_contents($path, $contents);
-        chmod($path, 0755);
+        if (!is_file($source) || !is_readable($source)) {
+            throw new RuntimeException('Missing FrankenPHP packaging asset ' . $source);
+        }
+        if ($service === 'frankenphp') {
+            return $source;
+        }
+        $contents = strtr(file_get_contents($source), [
+            '/usr/bin/frankenphp' => '/usr/bin/' . $service,
+            'frankenphp.service' => $service . '.service',
+            '/run/frankenphp' => '/run/' . $service,
+            '/frankenphp.pid' => '/' . $service . '.pid',
+            'RuntimeDirectory=frankenphp' => 'RuntimeDirectory=' . $service,
+            'rc-service frankenphp ' => 'rc-service ' . $service . ' ',
+            'rc-update add frankenphp ' => 'rc-update add ' . $service . ' ',
+            'rc-update del frankenphp ' => 'rc-update del ' . $service . ' ',
+        ]);
+        $path = TEMP_DIR . '/' . $service . '-' . basename($source);
+        if (file_put_contents($path, $contents) === false || !chmod($path, fileperms($source) & 0777)) {
+            throw new RuntimeException('Cannot stage FrankenPHP packaging asset ' . $source);
+        }
         return $path;
     }
 

@@ -9,6 +9,7 @@ use staticphp\util\ExtMeta;
 use staticphp\util\SkippedExtensions;
 use staticphp\util\SharedLibraries;
 use staticphp\util\BuildPayload;
+use staticphp\package\fpm;
 use staticphp\package\library;
 use staticphp\package\pie;
 use staticphp\package\runtime_layout;
@@ -1224,7 +1225,7 @@ class CreatePackages
         }
         self::$binaryDependencies = $isDebuginfo ? [] : self::getPayloadBinaryDependencies($config['files'] ?? []);
         if (!$isDebuginfo) {
-            if (!$package instanceof runtime_layout) {
+            if (!$package instanceof fpm) {
                 $config['depends'][] = 'php-zts-runtime-layout';
             }
             if (!self::isPhpIndependent($package) && !$package instanceof pie) {

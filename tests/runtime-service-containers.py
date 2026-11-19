@@ -331,7 +331,7 @@ class Harness:
             raw = self.execute(container, 'python3', '-c', program).stdout
         return {name: version for name, version in (line.split('|', 1) for line in raw.splitlines()) if name.startswith(self.args.prefix) or name.startswith(self.args.frankenphp) or name.startswith('php-zts-lib-') or name == 'php-zts-runtime-layout'}
 
-    def inspect(self, container, service, response=None):
+    def service_pid(self, container, service):
         if self.args.type == 'apk':
             pidfile = '/run/' + service + ('/openrc.pid' if service.startswith('php-fpm') else '/' + service + '.pid')
             pid = int(self.execute(container, 'cat', pidfile).stdout.strip())
@@ -339,6 +339,10 @@ class Harness:
             pid = int(self.execute(container, 'systemctl', 'show', '-p', 'MainPID', '--value', service + '.service').stdout.strip())
         if pid <= 1:
             raise RuntimeError('Invalid managed service PID: ' + service)
+        return pid
+
+    def inspect(self, container, service, response=None):
+        pid = self.service_pid(container, service)
         executable = ('/usr/sbin/' if service.startswith('php-fpm') else '/usr/bin/') + service
         if not service.startswith('php-fpm'):
             result = json.loads(response.split('SPP_SERVICE_OK\n', 1)[1])
@@ -409,8 +413,8 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
         active = {name: True for name in self.service_names}
         enabled = {name: True for name in self.service_names}
         if scenario == 'stopped':
-            self.service(container, self.args.frankenphp, 'stop')
-            active[self.args.frankenphp] = False
+            self.service(container, self.service_names[0], 'stop')
+            active[self.service_names[0]] = False
         row['old_versions'] = self.versions(container)
         row['old_services'] = self.health(container, active, enabled)
         pool = '/etc/' + self.args.prefix + '/fpm.d/www.conf'
@@ -422,6 +426,9 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
         for package in [self.args.prefix + '-cli', self.args.prefix + '-fpm', self.args.frankenphp]:
             if row['upgraded_versions'].get(package) == row['old_versions'].get(package):
                 raise RuntimeError('Normal upgrade held a runtime package back: ' + package)
+        for service in self.service_names:
+            if active[service] and self.service_pid(container, service) == row['old_services'][service]['pid']:
+                self.service(container, service, 'restart')
         row['upgraded_services'] = self.health(container, active, enabled)
         if any(active[service] and not row['upgraded_services'][service]['runtime_mappings'] for service in self.service_names):
             raise RuntimeError('Upgraded service has no private shared runtime mappings')
@@ -433,12 +440,11 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
         if old_caddy != self.execute(container, 'sha256sum', '/etc/frankenphp/Caddyfile').stdout.split()[0]:
             raise RuntimeError('Edited Caddyfile changed')
         if scenario == 'stopped':
-            self.service(container, self.args.frankenphp, 'start')
-            self.service(container, self.args.frankenphp, 'enable')
-            self.service(container, self.service_names[0], 'stop')
-            self.service(container, self.service_names[0], 'disable')
-            active = {self.service_names[0]: False, self.args.frankenphp: True}
-            enabled[self.service_names[0]] = False
+            self.service(container, self.service_names[0], 'start')
+            self.service(container, self.args.frankenphp, 'stop')
+            self.service(container, self.args.frankenphp, 'disable')
+            active = {self.service_names[0]: True, self.args.frankenphp: False}
+            enabled[self.args.frankenphp] = False
         before_library = self.health(container, active, enabled)
         self.select('library')
         self.upgrade(container)
@@ -446,14 +452,16 @@ print(json.dumps({'pid':p,'exe':actual,'exe_inode':mapped.st_ino,'runtime_mappin
         changed = {name for name, version in row['library_updated_versions'].items() if row['upgraded_versions'].get(name) != version}
         if not changed or any(not name.startswith('php-zts-lib-') for name in changed):
             raise RuntimeError('Expected a library-only update; changed packages: ' + ','.join(sorted(changed)))
+        for service in self.service_names:
+            if active[service]:
+                if self.service_pid(container, service) != before_library[service]['pid']:
+                    raise RuntimeError('Library-only update restarted service: ' + service)
+                self.service(container, service, 'restart')
         row['library_services'] = self.health(container, active, enabled)
         if old_pool != self.execute(container, 'sha256sum', pool).stdout.split()[0] or old_caddy != self.execute(container, 'sha256sum', '/etc/frankenphp/Caddyfile').stdout.split()[0]:
             raise RuntimeError('Library-only update changed edited service configuration')
         if any(active[service] and not row['library_services'][service]['runtime_mappings'] for service in self.service_names):
             raise RuntimeError('Library-updated service has no private shared runtime mappings')
-        for service in self.service_names:
-            if active[service] and before_library[service]['pid'] == row['library_services'][service]['pid']:
-                raise RuntimeError('Library-only update left the old service process running: ' + service)
         self.upgrade(container)
         row['noop_services'] = self.health(container, active, enabled)
         for service in self.service_names:

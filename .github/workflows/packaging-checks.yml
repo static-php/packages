@@ -63,6 +63,7 @@ jobs:
                         for format in ${FORMATS//,/ }; do
                             php tests/abi-consumer-revisions.php --type="$format"
                             php tests/package-versions.php --type="$format"
+                            php tests/sapi-recommendations.php --type="$format"
                             php tests/shared-library-packages.php --type="$format"
                         done
                         python3 tests/payload-profile.py
