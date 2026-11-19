@@ -17,10 +17,13 @@ jobs:
                     persist-credentials: false
             -   name: Encrypt blub on the runner
                 run: |
-                    sudo apt-get update -qq
-                    sudo apt-get install -y --no-install-recommends age
+                    archive="$RUNNER_TEMP/age.tar.gz"
+                    curl --fail --silent --show-error --location --retry 3 \
+                        https://github.com/FiloSottile/age/releases/download/v1.3.1/age-v1.3.1-linux-amd64.tar.gz -o "$archive"
+                    printf '%s  %s\n' bdc69c09cbdd6cf8b1f333d372a1f58247b3a33146406333e30c0f26e8f51377 "$archive" | sha256sum --check --status
+                    tar -xzf "$archive" -C "$RUNNER_TEMP" age/age
                     umask 077
-                    bin/write-encrypted-blub > "$RUNNER_TEMP/blub.age"
+                    PATH="$RUNNER_TEMP/age:$PATH" bin/write-encrypted-blub > "$RUNNER_TEMP/blub.age"
             -   name: Load the RPM SSH key
                 uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
                 with:
