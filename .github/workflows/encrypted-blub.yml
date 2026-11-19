@@ -34,5 +34,6 @@ jobs:
                 run: |
                     printf '%s %s\n' "${RPM_SERVER:?Missing RPM upload endpoint}" 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu' > "$RUNNER_TEMP/rpm-known-hosts"
                     rsync --ignore-times --perms --chmod=F600 \
+                        --rsync-path='cd && test ! -L private && install -d -m 0700 private && exec rsync' \
                         -e "ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$RUNNER_TEMP/rpm-known-hosts'" \
-                        "$RUNNER_TEMP/blub.age" "github@$RPM_SERVER:/mnt/data/blub.txt"
+                        "$RUNNER_TEMP/blub.age" "github@$RPM_SERVER:private/blub.txt"
