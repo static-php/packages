@@ -20,6 +20,42 @@ def workflow(name):
 
 
 class SharedGlibcEntrypoints(unittest.TestCase):
+    def test_release_probe_prefers_ga_from_either_upstream(self):
+        data, _ = workflow('spc-download.yml')
+        probe = next(step['run'] for step in data['jobs']['download']['steps'] if step.get('id') == 'probe-upstream')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            curl = root / 'curl'
+            curl.write_text("""#!/bin/bash
+case "${!#}" in
+    *php.net*) value=$OFFICIAL ;;
+    */pie/releases/latest) value='{"tag_name":"1.5.5"}' ;;
+    *) value=$TAGS ;;
+esac
+[[ $value != offline ]] || exit 22
+echo "$value"
+""")
+            curl.chmod(0o755)
+            cases = [
+                ({'error': 'Unknown version'}, ['8.6.0RC7', '8.6.0', '8.6.1RC1'], '8.6.0'),
+                ('offline', ['8.6.0RC7', '8.6.0', '8.6.1RC1'], '8.6.0'),
+                ({'8.6.0': {}}, 'offline', '8.6.0'),
+                ({'error': 'Unknown version'}, ['8.6.0beta3', '8.6.0RC1', '8.5.13'], '8.6.0beta3'),
+                ('offline', 'offline', None),
+            ]
+            for official, tags, expected in cases:
+                with self.subTest(official=official, tags=tags):
+                    environment = dict(os.environ, PATH=temporary + os.pathsep + os.environ['PATH'], PHP_MINORS='8.6',
+                        GITHUB_RUN_ID='123', GITHUB_TOKEN='fixture',
+                        OFFICIAL=official if official == 'offline' else json.dumps(official),
+                        TAGS=tags if tags == 'offline' else json.dumps([{'ref': 'refs/tags/php-' + tag} for tag in tags]))
+                    result = subprocess.run(['bash', '-c', probe], cwd=root, env=environment, capture_output=True, text=True)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(json.loads((root / 'downloads/.spc-meta.json').read_text())['php_versions'], {'8.6': expected})
+
     def test_reuse_only_glibc_requests_reach_both_compilation_guards(self):
         data, events = workflow('build-rpm-modular-packages.yml')
         for event in ('workflow_dispatch', 'workflow_call'):

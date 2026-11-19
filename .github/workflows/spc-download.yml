@@ -122,27 +122,33 @@ jobs:
                 run: |
                     set -euo pipefail
                     new='{}'
+                    fetch=(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60)
                     for v in $PHP_MINORS; do
-                        # php.net answers an unreleased minor with HTTP 200 and {"error":"Unknown
-                        # version"}, so `keys[0]` yields the literal string "error". Only accept a
-                        # key that actually looks like a version.
-                        latest=$(curl -fsSL -H "Cache-Control: no-cache" "https://www.php.net/releases/index.php?json=&max=1&version=${v}&build=${GITHUB_RUN_ID}" \
-                            | jq -r 'to_entries | map(select(.key | test("^[0-9]+\\.[0-9]+\\.[0-9]+"))) | .[0].key // empty')
-                        # GitHub tags can precede php.net metadata; released streams stay on GA tags.
-                        github_versions=$(curl -fsSL \
-                            -H "Authorization: Bearer $GITHUB_TOKEN" \
-                            -H "Accept: application/vnd.github+json" \
-                            "https://api.github.com/repos/php/php-src/git/matching-refs/tags/php-${v}." \
-                            | jq -r --arg minor "$v" --arg released "$latest" '
-                                .[].ref | sub("^refs/tags/php-"; "")
-                                | select(startswith($minor + "."))
-                                | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+((alpha|beta|RC)[0-9]+)?$"))
-                                | select($released == "" or test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
-                                | select(. != "8.6.0RC1")
-                            ')
-                        # version_compare orders RC tags after alpha/beta, unlike sort -V.
-                        latest=$(printf '%s\n' "$latest" "$github_versions" \
-                            | php -r '$t = array_values(array_filter(array_map("trim", file("php://stdin")))); usort($t, "version_compare"); echo end($t) ?: "";')
+                        if ! official=$("${fetch[@]}" -H "Cache-Control: no-cache" "https://www.php.net/releases/index.php?json=&max=1&version=${v}&build=${GITHUB_RUN_ID}" | jq -r 'keys[]'); then
+                            echo "::warning::php.net release lookup failed for PHP $v; checking upstream tags"
+                            official=""
+                        fi
+                        if ! tags=$("${fetch[@]}" -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+                            "https://api.github.com/repos/php/php-src/git/matching-refs/tags/php-${v}." | jq -r '.[].ref | sub("^refs/tags/php-"; "")'); then
+                            echo "::warning::GitHub tag lookup failed for PHP $v; checking php.net releases"
+                            tags=""
+                        fi
+                        latest=$(printf '%s\n' "$official" "$tags" | php -r '
+                            $prefix = preg_quote($argv[1], "/");
+                            $versions = $stable = [];
+                            foreach (file("php://stdin", FILE_IGNORE_NEW_LINES) as $tag) {
+                                if ($tag === "8.6.0RC1" || !preg_match("/^{$prefix}\\.\\d+((?:alpha|beta|RC)\\d+)?$/D", $tag, $match)) {
+                                    continue;
+                                }
+                                $versions[] = $tag;
+                                if (!isset($match[1])) {
+                                    $stable[] = $tag;
+                                }
+                            }
+                            $choices = $stable ?: $versions;
+                            usort($choices, "version_compare");
+                            echo end($choices) ?: "";
+                        ' "$v")
                         if [[ -z "$latest" ]]; then
                             echo "::error::Failed to fetch latest PHP version for ${v}"
                             exit 1
@@ -151,7 +157,7 @@ jobs:
                         new=$(jq --arg v "$v" --arg l "$latest" '. + {($v): $l}' <<< "$new")
                     done
 
-                    pie_latest=$(curl -fsSL \
+                    pie_latest=$("${fetch[@]}" \
                         -H "Authorization: Bearer $GITHUB_TOKEN" \
                         -H "Accept: application/vnd.github+json" \
                         "https://api.github.com/repos/php/pie/releases/latest" \
