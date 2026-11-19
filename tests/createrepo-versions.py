@@ -19,6 +19,19 @@ with tempfile.TemporaryDirectory(prefix="createrepo-versions-") as temporary:
 
 
 class PackageVersions(unittest.TestCase):
+    def test_default_advances_only_when_this_architecture_has_the_ga_cli(self):
+        arch = 'x86_64'
+        files = ['php-zts-cli-8.5.13-1.x86_64.rpm', 'php-zts-cli-8.6.0~rc7-2.x86_64.rpm',
+                 'php-zts-cli-debuginfo-8.6.0-1.x86_64.rpm', 'php-zts-cli-8.6.0-1.aarch64.rpm']
+        def default():
+            return [doc['data']['stream'] for doc in repo['module_documents'](files, 'el8', arch)
+                    if doc['document'] == 'modulemd-defaults']
+        self.assertEqual(default(), ['static-8.5'])
+        files.append('php-zts-cli-8.6.0-1.x86_64.rpm')
+        self.assertEqual(default(), ['static-8.6'])
+        files[:] = ['php-zts-cli-8.6.0~rc7-2.x86_64.rpm']
+        self.assertEqual(default(), [])
+
     def test_extension_upstream_versions_need_not_have_three_components(self):
         for name in ('php-zts-memcache', 'php-zts-memcache-debuginfo'):
             for version in ('8.2_82', '8.2_82.35', '8.2_82.35+ext', '8.2~rc1_82', '1_82'):

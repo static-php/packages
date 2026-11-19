@@ -11,10 +11,6 @@ from collections import defaultdict
 
 yaml.Dumper.ignore_aliases = lambda *args: True
 
-# Published for opt-in only, never as the stream dnf installs unasked. Users pick it up with
-# `dnf module switch-to php-zts:static-8.6`. Drop the entry once the stream goes GA.
-PRERELEASE_STREAMS = {"8.6"}
-
 def detect_platform():
     cwd = os.getcwd()
     for p in ['el7', 'el8', 'el9', 'el10']:
@@ -187,14 +183,17 @@ def build_defaults_document(default_stream):
 
 def module_documents(rpm_files, platform, arch, module_version=None, metadata=None):
     rpm_map = defaultdict(list)
+    released_streams = set()
     for rpm in rpm_files:
         info = parse_rpm_info(rpm)
         if info:
             rpm_map[info[-1]].append(rpm)
+            name, version, _, package_arch, stream = info
+            if name == 'php-zts-cli' and package_arch == arch and re.fullmatch(r'\d+\.\d+\.\d+', version):
+                released_streams.add(stream)
     documents = build_module_structure(rpm_map, platform, arch, module_version, metadata)
-    streams = [s for s in rpm_map if s not in {"common", "libraries"} and s not in PRERELEASE_STREAMS]
-    if streams:
-        documents.append(build_defaults_document(max(streams, key=stream_sort_key)))
+    if released_streams:
+        documents.append(build_defaults_document(max(released_streams, key=stream_sort_key)))
     return documents
 
 

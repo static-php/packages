@@ -294,6 +294,9 @@ jobs:
                         -e IMAGE -e SOURCE_RUN_ID -e TYPE -e TARGET -e MATRIX_ARCH -e PHPV -e PACKAGES \
                         -e MODE -e ITERATION -e BUMP -e FORGEJO_PASSWORD -e GITHUB_TOKEN \
                         "$PACKAGING_IMAGE" bash .github/actions/shared-libraries/run.sh glibc-package
+                    if [[ -s stage/skipped-rebuilds.log ]]; then
+                        cat stage/skipped-rebuilds.log >> "$GITHUB_STEP_SUMMARY"
+                    fi
             -   name: Verify ordinary package upgrade
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}

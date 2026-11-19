@@ -2,6 +2,7 @@
 import gzip
 import hashlib
 import io
+import json
 from pathlib import Path
 import runpy
 import shutil
@@ -33,6 +34,26 @@ class PackageContent(unittest.TestCase):
             header = f'{name+"/":<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(data):<10}`\n'.encode()
             result.extend(header+data+(b'\n' if len(data)%2 else b''))
         path.write_bytes(result)
+
+    @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB tools unavailable')
+    def test_same_revision_rebuild_keeps_verified_published_deb(self):
+        retain = runpy.run_path(str(ROOT / 'bin/retain-published-consumers'))['retain_published']
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dist = root / 'dist'
+            dist.mkdir()
+            old, new = root / 'published.deb', dist / 'rebuilt.deb'
+            self.archive(old, 'Thu, 12 Nov 2026 11:55:27 +0000')
+            self.archive(new, 'Fri, 13 Nov 2026 11:37:50 +0000', body=b'new bytes')
+            record = dict(name='pie-zts', version='1.5.5+php86-1', architecture='amd64', path=old.name,
+                          sha256=hashlib.sha256(old.read_bytes()).hexdigest())
+            manifest = root / 'baseline.json'
+            manifest.write_text(json.dumps(dict(type='deb', packages=[record])))
+            retain('deb', dist, manifest)
+            self.assertEqual(old.read_bytes(), new.read_bytes())
+            old.write_bytes(b'wrong frozen archive')
+            with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
+                retain('deb', dist, manifest)
 
     @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB tools unavailable')
     def test_timestamp_only_rebuild_can_reuse_bytes_but_payload_metadata_and_modes_cannot(self):

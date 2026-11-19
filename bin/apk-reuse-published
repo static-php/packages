@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import re
 import runpy
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -146,42 +145,8 @@ def select(candidate, manifests, with_debug=False):
 
 
 def retain_published(directory, manifest):
-    metadata = runpy.run_path(str(Path(__file__).with_name('forgejo-helper')))['package_metadata']
-    groups = {}
-    for path in sorted(directory.glob('*.apk')):
-        name, version, arch = metadata(path, 'alpine')
-        base = name.removesuffix('-debuginfo')
-        if base.startswith('php-zts-lib-') or base == 'php-zts-runtime-layout':
-            continue
-        groups.setdefault((base, version, arch), []).append((name, path))
-
-    for (base, version, arch), candidates in groups.items():
-        originals = {}
-        changed = False
-        for name, path in candidates:
-            records = published_records([manifest], name, version.rsplit('-r', 1)[0], arch, exact_version=version)
-            if not records:
-                continue
-            source = next((source for _, source, _ in records if source is not None), None)
-            originals[name] = source
-            if source and sha256(path) != sha256(source):
-                changed = True
-        if not changed:
-            continue
-        if base not in originals:
-            raise RuntimeError('Cannot retain published debuginfo without its runtime: ' + base)
-        for name, source in originals.items():
-            if not valid_archive(source) or metadata(source, 'alpine') != (name, version, arch):
-                raise RuntimeError('Cannot retain unverified published APK: ' + name)
-        for name, path in candidates:
-            if not valid_archive(path):
-                raise RuntimeError('Invalid rebuilt APK: ' + name)
-        for name, path in candidates:
-            if name in originals:
-                shutil.copyfile(originals[name], path)
-            else:
-                path.unlink()
-            print(f'Skipped rebuilt {name} {version} ({arch}); keeping the published {base} revision.', flush=True)
+    retain = runpy.run_path(str(Path(__file__).with_name('retain-published-consumers')))
+    retain['retain_published']('apk', directory, manifest)
 
 
 if __name__ == '__main__':

@@ -89,6 +89,9 @@ PY
         ;;
     classify|glibc-classify|glibc-record|glibc-payload|glibc-package|glibc-libraries)
         python3 .github/actions/shared-libraries/glibc.py "${command#glibc-}"
+        if [[ "$command" == glibc-package && "$BUMP" != true && -z "$ITERATION" ]]; then
+            python3 bin/retain-published-consumers "$TYPE" "dist/$TYPE" stage/published-baseline/baseline.json | tee stage/skipped-rebuilds.log
+        fi
         ;;
     fingerprint)
         mkdir -p stage
@@ -165,7 +168,7 @@ PY
         export SPP_FORGEJO_OWNER="${PHPV//./}"
         php bin/spp package "${flags[@]}"
         if [[ "$TYPE" == apk && "$BUMP" != true && -z "$ITERATION" ]]; then
-            python3 bin/apk-reuse-published dist/apk --retain-published stage/published-baseline/baseline.json | tee stage/skipped-apk-rebuilds.log
+            python3 bin/retain-published-consumers apk dist/apk stage/published-baseline/baseline.json | tee stage/skipped-apk-rebuilds.log
         fi
         python3 .github/actions/shared-libraries/workflow.py receipt --kind consumer --php-stream "$PHPV" \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \
