@@ -164,6 +164,9 @@ PY
         export SPP_NATIVE_INVENTORY="stage/native-inventories/$PHPV.json"
         export SPP_FORGEJO_OWNER="${PHPV//./}"
         php bin/spp package "${flags[@]}"
+        if [[ "$TYPE" == apk && "$BUMP" != true && -z "$ITERATION" ]]; then
+            python3 bin/apk-reuse-published dist/apk --retain-published stage/published-baseline/baseline.json | tee stage/skipped-apk-rebuilds.log
+        fi
         python3 .github/actions/shared-libraries/workflow.py receipt --kind consumer --php-stream "$PHPV" \
             --plan stage/shared-library-plan.json --source-run-id "$SOURCE_RUN_ID" --image "$IMAGE" \
             --output "dist/$TYPE/shared-library-build-receipt.json"

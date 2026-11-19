@@ -8,6 +8,7 @@ import runpy
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +54,41 @@ class ReusePublished(unittest.TestCase):
 
     def select(self):
         return HELPER['select'](self.new, [self.manifest])
+
+    def test_ci_skips_a_changed_rebuild_with_its_debug_symbols(self):
+        candidates = self.root / 'dist'
+        candidates.mkdir()
+        new = candidates / 'runtime.apk'
+        new_debug = candidates / 'debug.apk'
+        old_debug = self.root / 'published-debug.apk'
+        archive(self.old, revision=3)
+        archive(old_debug, revision=3, debug=True)
+        archive(new, revision=3, payload=b'changed development snapshot')
+        archive(new_debug, revision=3, payload=b'new symbols', debug=True)
+        self.baseline()
+        baseline = json.loads(self.manifest.read_text())
+        baseline['packages'].append(dict(baseline['packages'][0], name='php-zts-cli-debuginfo',
+                                         path=old_debug.name, sha256=HELPER['sha256'](old_debug)))
+        self.manifest.write_text(json.dumps(baseline))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            HELPER['retain_published'](candidates, self.manifest)
+        self.assertEqual(new.read_bytes(), self.old.read_bytes())
+        self.assertEqual(new_debug.read_bytes(), old_debug.read_bytes())
+        self.assertIn('Skipped rebuilt php-zts-cli 8.3.36-r3', output.getvalue())
+        self.assertIn('Skipped rebuilt php-zts-cli-debuginfo 8.3.36-r3', output.getvalue())
+
+        self.baseline()
+        archive(new, revision=3, payload=b'changed again')
+        with redirect_stdout(io.StringIO()):
+            HELPER['retain_published'](candidates, self.manifest)
+        self.assertEqual(new.read_bytes(), self.old.read_bytes())
+        self.assertFalse(new_debug.exists())
+
+        archive(new, revision=4, payload=b'new revision')
+        expected = new.read_bytes()
+        HELPER['retain_published'](candidates, self.manifest)
+        self.assertEqual(new.read_bytes(), expected)
 
     def test_unchanged_payload_reuses_original_archive_despite_build_times(self):
         archive(self.old, revision=3)

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -69,7 +70,7 @@ def contents(path):
     return (name, version, arch), (files, {key: sorted(value) for key, value in fields.items()})
 
 
-def published_records(manifests, name, stem, arch):
+def published_records(manifests, name, stem, arch, exact_version=None):
     matches = []
     for manifest in manifests:
         manifest = Path(manifest)
@@ -85,11 +86,12 @@ def published_records(manifests, name, stem, arch):
         for package in packages:
             published = package.get('version', '')
             if (package.get('name') != name or package.get('architecture') != arch
+                    or (exact_version is not None and published != exact_version)
                     or not re.fullmatch(re.escape(stem) + r'-r\d+', published)):
                 continue
             relative = package.get('path', package.get('archive'))
             checksum = package.get('sha256', package.get('archive_sha256'))
-            if not relative and name.endswith('-debuginfo') and package.get('publication_url') and package.get('published_checksum'):
+            if not relative and (name.endswith('-debuginfo') or exact_version is not None) and package.get('publication_url') and package.get('published_checksum'):
                 freezer = runpy.run_path(str(Path(__file__).with_name('freeze-migration-baseline.py')))
                 output = manifest.parent / 'reuse-published'
                 output.mkdir(exist_ok=True)
@@ -143,10 +145,54 @@ def select(candidate, manifests, with_debug=False):
     return {'revision': max(highest, int(version.rsplit('-r', 1)[1]))}
 
 
+def retain_published(directory, manifest):
+    metadata = runpy.run_path(str(Path(__file__).with_name('forgejo-helper')))['package_metadata']
+    groups = {}
+    for path in sorted(directory.glob('*.apk')):
+        name, version, arch = metadata(path, 'alpine')
+        base = name.removesuffix('-debuginfo')
+        if base.startswith('php-zts-lib-') or base == 'php-zts-runtime-layout':
+            continue
+        groups.setdefault((base, version, arch), []).append((name, path))
+
+    for (base, version, arch), candidates in groups.items():
+        originals = {}
+        changed = False
+        for name, path in candidates:
+            records = published_records([manifest], name, version.rsplit('-r', 1)[0], arch, exact_version=version)
+            if not records:
+                continue
+            source = next((source for _, source, _ in records if source is not None), None)
+            originals[name] = source
+            if source and sha256(path) != sha256(source):
+                changed = True
+        if not changed:
+            continue
+        if base not in originals:
+            raise RuntimeError('Cannot retain published debuginfo without its runtime: ' + base)
+        for name, source in originals.items():
+            if not valid_archive(source) or metadata(source, 'alpine') != (name, version, arch):
+                raise RuntimeError('Cannot retain unverified published APK: ' + name)
+        for name, path in candidates:
+            if not valid_archive(path):
+                raise RuntimeError('Invalid rebuilt APK: ' + name)
+        for name, path in candidates:
+            if name in originals:
+                shutil.copyfile(originals[name], path)
+            else:
+                path.unlink()
+            print(f'Skipped rebuilt {name} {version} ({arch}); keeping the published {base} revision.', flush=True)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('candidate')
     parser.add_argument('--baseline-manifest', action='append', default=[])
     parser.add_argument('--with-debug', action='store_true')
+    parser.add_argument('--retain-published', metavar='FROZEN_BASELINE', type=Path,
+                        help='Stage the published runtime/debug pair for native CI when rebuilt bytes differ at the same revision')
     args = parser.parse_args()
-    print(json.dumps(select(args.candidate, args.baseline_manifest, args.with_debug)))
+    if args.retain_published:
+        retain_published(Path(args.candidate), args.retain_published)
+    else:
+        print(json.dumps(select(args.candidate, args.baseline_manifest, args.with_debug)))

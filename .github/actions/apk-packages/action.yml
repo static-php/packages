@@ -40,6 +40,9 @@ runs:
             shell: bash
             run: |
                 bash .github/actions/shared-libraries/run.sh php
+                if [[ -s stage/skipped-apk-rebuilds.log ]]; then
+                    cat stage/skipped-apk-rebuilds.log >> "$GITHUB_STEP_SUMMARY"
+                fi
                 if [[ -n "$PACKAGES" ]] && jq -e '.reused_payload == false' stage/payload-provenance.json >/dev/null \
                     && jq -e '.packaging_selection == null' "build/$PHPV/build-payload.json" >/dev/null; then
                     echo 'PACKAGES=' >> "$GITHUB_ENV"
