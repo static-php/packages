@@ -3,8 +3,21 @@
 
 declare(strict_types=1);
 
-$path = __DIR__ . '/../vendor/crazywhalecc/static-php-cli/src/StaticPHP/Util/SharedLibraryManifest.php';
-$source = file_get_contents($path);
+function patchSpc(string $file, string $original, string $replacement): void
+{
+    $path = __DIR__ . '/../vendor/crazywhalecc/static-php-cli/src/StaticPHP/' . $file;
+    $source = file_get_contents($path);
+    if (str_contains($source, $replacement)) {
+        return;
+    }
+    if (substr_count($source, $original) !== 1) {
+        throw new RuntimeException("Cannot locate the expected SPC code in $file");
+    }
+    if (file_put_contents($path, str_replace($original, $replacement, $source)) === false) {
+        throw new RuntimeException("Cannot patch SPC file $file");
+    }
+}
+
 $method = <<<'PHP'
     private function compilerRuntimes(bool $allowUpdate = true): void
     {
@@ -17,12 +30,9 @@ $replacement = $method . <<<'PHP'
             return;
         }
 PHP;
-if (str_contains($source, $replacement)) {
-    exit(0);
-}
-if (substr_count($source, $method) !== 1) {
-    throw new RuntimeException('Cannot locate the installed SPC compiler runtime method');
-}
-if (file_put_contents($path, str_replace($method, $replacement, $source)) === false) {
-    throw new RuntimeException('Cannot patch SPC to retain the recorded SDK runtime');
-}
+patchSpc('Util/SharedLibraryManifest.php', $method, $replacement);
+
+$assignment = <<<'PHP'
+preg_match('/^' . $key . '\s*=\s*(.*)$/m', $content, $m)
+PHP;
+patchSpc('Package/PhpExtensionPackage.php', $assignment, str_replace('\s', '[ \t]', $assignment));

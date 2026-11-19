@@ -47,6 +47,7 @@ jobs:
                         composer install --no-interaction --prefer-dist --no-progress
                         php tests/builder-tool-cache.php
                         php tests/attr-install.php
+                        php tests/shared-extension-re2c.php
                         php tests/build-payload.php
                         php tests/extension-assets.php
                         php tests/partial-consumer-preservation.php
