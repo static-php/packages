@@ -24,9 +24,11 @@ def inputs(downloads, output, php=False):
     cache = json.loads((downloads / '.cache.json').read_text())
     names = {path.name for path in downloads.glob('*.json')} | {'pie.phar', 'pie.json', '.cache.json', '.spc-meta.json', '.php-sources.json'}
     names.update(index['sources'][version]['source']['filename'] for version in metadata['php_versions'].values())
-    spx = cache.get('ext-spx', {}).get('source', {}).get('filename')
-    if spx:
-        names.add(spx)
+    profiles = index.get('extensions', {}).values()
+    spx = [cache.get('ext-spx', {}).get('source', {}), *(profile.get('ext-spx', {}) for profile in profiles)]
+    git_assets = {record['dirname'] for record in spx if record.get('cache_type') == 'git'}
+    names.update(record['filename'] for record in spx if 'filename' in record)
+    names.update(git_assets)
     if php:
         sources = [value.get('source', {}) for name, value in cache.items()
                    if name.startswith('ext-') or name in {'frankenphp', 'go', 'go-xcaddy'}]
@@ -35,8 +37,9 @@ def inputs(downloads, output, php=False):
                      for source in sources if source)
     with tarfile.open(output, 'w:gz', compresslevel=1) as archive:
         for name in sorted(names - {MARKER}):
-            if (not isinstance(name, str) or Path(name).name != name or (downloads / name).is_symlink()
-                    or not ((downloads / name).is_file() or php and (downloads / name).is_dir())):
+            if (not isinstance(name, str) or not name or name in ('.', '..') or Path(name).name != name
+                    or (downloads / name).is_symlink()
+                    or not ((downloads / name).is_file() or (php or name in git_assets) and (downloads / name).is_dir())):
                 raise RuntimeError('Missing frozen source input: ' + name)
             archive.add(downloads / name, arcname=name)
 

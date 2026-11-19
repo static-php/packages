@@ -316,17 +316,28 @@ final class BuildPayload
         $context = $payload->data['build_context'] ?? [];
         $record = $context['source_snapshot']['records']['ext-spx']
             ?? $context['reused_source_snapshot']['records']['ext-spx'] ?? null;
-        $cache = json_decode((string) file_get_contents($downloads . '/.cache.json'), true, 512, JSON_THROW_ON_ERROR);
-        $source = $cache['ext-spx']['source'] ?? null;
-        $filename = $source['filename'] ?? '';
-        if (!is_array($record) || ($source['cache_type'] ?? null) !== 'archive'
-            || !is_string($filename) || $filename === '' || basename($filename) !== $filename
-            || str_contains($filename, '\\') || ($source['hash'] ?? null) !== ($record['hash'] ?? null)
-            || !preg_match('/^[a-f0-9]{40}$/D', $source['hash'] ?? '')) {
+        if (isset($record['hash']) && !isset($record['filename']) && !isset($record['dirname'])) {
+            $cache = json_decode(file_get_contents($downloads . '/.cache.json'), true, flags: JSON_THROW_ON_ERROR);
+            $source = $cache['ext-spx']['source'] ?? [];
+            if (($source['hash'] ?? null) === $record['hash']) {
+                $record = $source;
+            }
+        }
+        $git = ($record['cache_type'] ?? null) === 'git';
+        $filename = $git ? ($record['dirname'] ?? '') : ($record['filename'] ?? '');
+        if ((!$git && ($record['cache_type'] ?? null) !== 'archive') || !is_string($filename)
+            || in_array($filename, ['', '.', '..'], true) || basename($filename) !== $filename
+            || str_contains($filename, '\\') || !preg_match('/^[a-f0-9]{40}$/D', $record['hash'] ?? '')) {
             throw new RuntimeException('Missing matching frozen SPX source for cached package assets');
         }
-        $archive = $downloads . '/' . $filename;
-        if (!is_file($archive) || is_link($archive) || hash_file('sha1', $archive) !== $source['hash']) {
+        $path = $downloads . '/' . $filename;
+        if ($git && is_dir($path) && !is_link($path)) {
+            $archive = $stage . '/spx-source.tar';
+            self::command(['git', '-c', 'safe.directory=' . realpath($path), '-C', $path, 'archive',
+                '--format=tar', '--output=' . realpath($stage) . '/spx-source.tar', $record['hash'], 'assets/web-ui']);
+        } elseif (!$git && is_file($path) && !is_link($path) && hash_file('sha1', $path) === $record['hash']) {
+            $archive = $path;
+        } else {
             throw new RuntimeException('Frozen SPX source differs from its recorded hash');
         }
         $count = 0;
@@ -351,6 +362,9 @@ final class BuildPayload
         }
         if ($count === 0) {
             throw new RuntimeException('Frozen SPX source has no web UI assets');
+        }
+        if ($git) {
+            unlink($archive);
         }
     }
 

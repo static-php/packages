@@ -1,0 +1,8 @@
+--- a/php_mysqlnd_ed25519.c
++++ b/php_mysqlnd_ed25519.c
+@@ -102 +102,4 @@
+-	const MYSQLND_SESSION_OPTIONS* const session_options, const MYSQLND_PFC_DATA* const pfc_data,
++#if PHP_VERSION_ID < 80600
++	const MYSQLND_SESSION_OPTIONS* const session_options,
++#endif
++	const MYSQLND_PFC_DATA* const pfc_data,

@@ -42,6 +42,15 @@ class SourceTransfer(unittest.TestCase):
                 self.assertIn('fixture/source.c', bundle.getnames())
                 self.assertNotIn('grpc.tar.gz', bundle.getnames())
                 self.assertEqual(bundle.extractfile('fixture/source.c').read(), b'frozen extension source')
+            values['.php-sources.json']['extensions'] = {'8.6': {'ext-spx': {'cache_type': 'git', 'dirname': 'spx-git'}}}
+            (downloads / '.php-sources.json').write_text(json.dumps(values['.php-sources.json']))
+            (downloads / 'spx-git').mkdir()
+            (downloads / 'spx-git/ui').write_text('branch assets')
+            snapshot.inputs(downloads, archive)
+            with tarfile.open(archive) as bundle:
+                self.assertEqual(bundle.extractfile('spx-git/ui').read(), b'branch assets')
+                self.assertIn('spx.tar.gz', bundle.getnames())
+                self.assertNotIn('fixture/source.c', bundle.getnames())
             (downloads / 'php.tar.gz').unlink()
             with self.assertRaisesRegex(RuntimeError, 'Missing frozen source input'):
                 snapshot.inputs(downloads, archive)

@@ -17,6 +17,20 @@ source = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(source)
 
 class SourceIdentities(unittest.TestCase):
+    def test_backports_select_only_affected_versions_once_and_ga_selects_the_stream(self):
+        packages = ['mysqlnd_ed25519', 'mysqlnd_parsec', 'pdo_sqlsrv', 'sqlsrv']
+        archives = {'ext-' + name: {'source': {'version': '1.0.2' if name.startswith('mysqlnd') else '5.13.3'}}
+                    for name in packages}
+        previous = {'php_versions': {'8.6': '8.6.0RC7'}}
+        current = dict(previous, extension_patches=source.extension_patch_inputs(ROOT, archives, {}))
+        self.assertEqual(source.plan(archives, archives, previous, current)['requests'],
+                         {'8.6': {'full': False, 'packages': packages}})
+        self.assertEqual(source.plan(archives, archives, current, current)['requests'], {})
+        ga = dict(current, php_versions={'8.6': '8.6.0'})
+        self.assertEqual(source.plan(archives, archives, current, ga)['requests'], {'8.6': {'full': True, 'packages': []}})
+        overrides = {'8.6': {'ext-sqlsrv': {'version': '5.14.0'}}}
+        self.assertNotIn('ext-sqlsrv', source.extension_patch_inputs(ROOT, archives, overrides)['8.6'])
+
     def test_automatic_php_release_update_ignores_builder_changes(self):
         for builder in ['Dockerfile.rhel', 'Dockerfile.alpine']:
             for release_changed, force in [(False, False), (True, False), (True, True)]:

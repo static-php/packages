@@ -48,6 +48,7 @@ jobs:
                         php tests/builder-tool-cache.php
                         php tests/attr-install.php
                         php tests/build-payload.php
+                        php tests/extension-assets.php
                         php tests/partial-consumer-preservation.php
                         php tests/module-only-build.php
                         python3 tests/glibc-pipeline.py \
@@ -81,6 +82,7 @@ jobs:
                         python3 tests/library-sonames.py
                         python3 tests/shared-library-plan.py
                         python3 tests/source-state.py
+                        python3 tests/source-snapshot-transfer.py
                         python3 tests/source-plan-identities.py
                         python3 tests/publication-baselines.py
                         python3 tests/publication-retry-plan.py

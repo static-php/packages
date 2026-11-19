@@ -98,13 +98,30 @@ def extension_source_inputs(root):
     return value
 
 
+def extension_patch_inputs(root, sources, overrides):
+    directory = root / 'config/patches/php86-extensions'
+    manifest = directory / 'patches.json'
+    patches = {}
+    if manifest.is_file():
+        for name, versions in json.loads(manifest.read_text()).items():
+            record = overrides.get('8.6', {}).get(name, sources.get(name, {}).get('source', {}))
+            files = versions.get(record.get('version'), [])
+            if files:
+                patches[name] = [hashlib.sha256((directory / file).read_bytes()).hexdigest() for file in files]
+    return {'8.6': patches}
+
+
 def stream_artifacts(artifacts, metadata, stream):
     overrides = metadata.get('extension_sources', {}).get(stream, {})
     names = {name for name in artifacts if name.startswith('ext-')} | overrides.keys()
     result = {}
     for name in names:
         value = overrides[name] if name in overrides else (artifacts.get(name) or {}).get('source')
-        result[name.removeprefix('ext-')] = stable_artifact({'source': value})
+        component = stable_artifact({'source': value})
+        patches = metadata.get('extension_patches', {}).get(stream, {}).get(name)
+        if patches:
+            component['patches'] = patches
+        result[name.removeprefix('ext-')] = component
     for name in ('frankenphp',):
         if name in artifacts:
             result[name] = stable_artifact(artifacts[name])
@@ -177,6 +194,8 @@ def main():
     metadata = read("downloads/.spc-meta.json")
     metadata["php_source_hashes"] = php_archive_inputs(root, metadata, verify=args.reconcile)
     metadata['extension_sources'] = extension_source_inputs(root)
+    if not args.reconcile:
+        metadata['extension_patches'] = extension_patch_inputs(root, read('downloads/.cache.json'), metadata['extension_sources'])
     inventory = json.loads(subprocess.check_output(["php", str(Path(__file__).with_name("inventory.php")), str(root)], cwd=root, universal_newlines=True))
     library_ids = set(inventory["managed_library_artifacts"])
     if args.reconcile:
