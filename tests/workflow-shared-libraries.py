@@ -48,6 +48,26 @@ class SourcePlanTests(unittest.TestCase):
         self.assertEqual(result['libraries'], ['zlib'])
         self.assertEqual(result['requests'], {})
 
+    def test_download_diff_logs_extension_versions_and_keeps_action_outputs_parseable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for directory, lock, meta, version in [
+                ('downloads', '.cache.json', '.spc-meta.json', '2.5.8'),
+                ('.download-state', 'lock.prev.json', 'meta.prev.json', '2.5.7'),
+            ]:
+                path = root / directory
+                path.mkdir()
+                (path / lock).write_text(json.dumps({'ext-mongodb': {'source': {'version': version}}}))
+                (path / meta).write_text(json.dumps(self.metadata))
+            outputs, log = io.StringIO(), io.StringIO()
+            with mock.patch('sys.argv', ['source-plan.py', '--root', str(root)]), \
+                    mock.patch('sys.stdout', outputs), mock.patch('sys.stderr', log), \
+                    mock.patch.object(source.subprocess, 'check_output', return_value=json.dumps(self.inventory)):
+                source.main()
+            self.assertEqual(outputs.getvalue().splitlines(), ['any_change=true', 'changed_libraries='])
+            self.assertEqual(log.getvalue().splitlines(),
+                             [f'PHP {stream} / mongodb 2.5.7 -> 2.5.8' for stream in source.STREAMS])
+
     def test_combines_full_and_partial_requests_in_one_plan(self):
         current = json.loads(json.dumps(self.metadata))
         current['php_versions']['8.4'] = '8.4.2'

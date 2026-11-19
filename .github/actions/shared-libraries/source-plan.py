@@ -8,6 +8,7 @@ import json
 import re
 import runpy
 import subprocess
+import sys
 from pathlib import Path
 
 from workflow import stable_artifact
@@ -128,8 +129,23 @@ def stream_artifacts(artifacts, metadata, stream):
     return result
 
 
+def source_delta(before, after):
+    for field in ('version', 'filename', 'hash'):
+        old = (before or {}).get(field)
+        new = (after or {}).get(field)
+        if old != new:
+            return f"{old or '(none)'} -> {new or '(none)'}"
+    return 'source inputs changed'
+
+
+def artifact_delta(before, after):
+    old = before.get('source') if isinstance(before, dict) else None
+    new = after.get('source') if isinstance(after, dict) else None
+    return source_delta(old, new)
+
+
 def plan(previous, current, previous_meta, current_meta, force=False, library_ids=None,
-         compiled_in=None, active=None):
+         compiled_in=None, active=None, log=None):
     compiled_in = CORE_EXTENSIONS if compiled_in is None else compiled_in
     changed = sorted(key for key in previous.keys() | current.keys() if stable_artifact(previous.get(key)) != stable_artifact(current.get(key)))
     package_only = ["pie"] if any(previous_meta.get(key) != current_meta.get(key) for key in ['pie_version', 'pie_sha256']) else []
@@ -137,16 +153,37 @@ def plan(previous, current, previous_meta, current_meta, force=False, library_id
     library_build_inputs = []
     full = force
     requests, package_requests = {}, {}
+    if log is not None:
+        if force:
+            print('Full rebuild requested for all PHP streams', file=log)
+        for name in libraries:
+            change = artifact_delta(previous.get(name), current.get(name))
+            print(f'Library {name} {change}', file=log)
+        if package_only:
+            old = {'version': previous_meta.get('pie_version'), 'hash': previous_meta.get('pie_sha256')}
+            new = {'version': current_meta.get('pie_version'), 'hash': current_meta.get('pie_sha256')}
+            print(f'PIE {source_delta(old, new)} (package only, all PHP streams)', file=log)
     for stream in STREAMS:
         previous_artifacts = stream_artifacts(previous, previous_meta, stream)
         current_artifacts = stream_artifacts(current, current_meta, stream)
         stream_changes = {name for name in previous_artifacts.keys() | current_artifacts.keys()
                           if previous_artifacts.get(name) != current_artifacts.get(name)}
         stream_changes = {'frankenphp' if name in ('go', 'go-xcaddy') else name for name in stream_changes}
-        stream_full = (full or any(name.replace('_', '-') in compiled_in for name in stream_changes)
-                       or previous_meta.get("php_versions", {}).get(stream) != current_meta.get("php_versions", {}).get(stream)
-                       or previous_meta.get("php_source_hashes", {}).get(stream, {}) != current_meta.get("php_source_hashes", {}).get(stream, {}))
+        core_changes = {name for name in stream_changes if name.replace('_', '-') in compiled_in}
+        old_php = previous_meta.get('php_versions', {}).get(stream)
+        new_php = current_meta.get('php_versions', {}).get(stream)
+        archive_changed = previous_meta.get('php_source_hashes', {}).get(stream, {}) != current_meta.get('php_source_hashes', {}).get(stream, {})
+        stream_full = full or bool(core_changes) or old_php != new_php or archive_changed
         stream_packages = {name for name in stream_changes if component_used(name, stream, artifact=True, active=active)}
+        if log is not None:
+            if old_php != new_php:
+                print(f"PHP {stream} release {old_php or '(none)'} -> {new_php or '(none)'} (full build)", file=log)
+            elif archive_changed:
+                print(f'PHP {stream} source archive changed (full build)', file=log)
+            for name in sorted(stream_packages | core_changes):
+                change = artifact_delta(previous_artifacts.get(name), current_artifacts.get(name))
+                scope = ' (full build)' if name in core_changes else ''
+                print(f'PHP {stream} / {name} {change}{scope}', file=log)
         if stream_full or stream_packages:
             requests[stream] = {"full": bool(stream_full), "packages": [] if stream_full else sorted(stream_packages)}
         if package_only:
@@ -216,7 +253,7 @@ def main():
         return
     request = plan(read(".download-state/lock.prev.json"), read("downloads/.cache.json"), read(".download-state/meta.prev.json"), metadata,
                    force=args.force_full, library_ids=library_ids,
-                   compiled_in=core_components(root), active=active_components(root))
+                   compiled_in=core_components(root), active=active_components(root), log=sys.stderr)
     request["build_inputs"] = inventory
     for field in ('shared_configuration', 'shared_package_configuration', 'shared_library_package_configuration',
                   'shared_variant_configuration', 'shared_format_package_configuration'):
