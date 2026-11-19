@@ -1,0 +1,33 @@
+name: Write encrypted blub on the RPM host
+
+on: workflow_dispatch
+
+permissions:
+    contents: read
+
+jobs:
+    write:
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        steps:
+            -   name: Check out the script
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+                with:
+                    persist-credentials: false
+            -   name: Encrypt blub on the runner
+                run: |
+                    sudo apt-get update -qq
+                    sudo apt-get install -y --no-install-recommends age
+                    umask 077
+                    bin/write-encrypted-blub > "$RUNNER_TEMP/blub.age"
+            -   name: Load the RPM SSH key
+                uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
+                with:
+                    ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
+            -   name: Upload encrypted blub.txt
+                run: |
+                    printf '%s\n' 'rpm.henderkes.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu' > "$RUNNER_TEMP/rpm-known-hosts"
+                    rsync --ignore-times --perms --chmod=F600 \
+                        -e "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$RUNNER_TEMP/rpm-known-hosts'" \
+                        "$RUNNER_TEMP/blub.age" github@rpm.henderkes.com:/mnt/data/blub.txt

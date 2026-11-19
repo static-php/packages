@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf %s blub | age --armor --recipient 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHBx+BX0TPqkmuBFUQjz3dZzbwWTqDdAmI9rYqk7YfJJ'
