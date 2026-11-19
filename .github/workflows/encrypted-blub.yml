@@ -26,8 +26,10 @@ jobs:
                 with:
                     ssh-private-key: ${{ secrets.GITHUBRPMHENDERKESPRIVATEKEY }}
             -   name: Upload encrypted blub.txt
+                env:
+                    RPM_SERVER: ${{ secrets.DEB_SERVER_IP }}
                 run: |
-                    printf '%s\n' 'rpm.henderkes.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu' > "$RUNNER_TEMP/rpm-known-hosts"
+                    printf '%s %s\n' "${RPM_SERVER:?Missing RPM upload endpoint}" 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICaB5IjokRHAH0Y9pzVe/Jx3s6cn0OADJ9uTxQQubBMu' > "$RUNNER_TEMP/rpm-known-hosts"
                     rsync --ignore-times --perms --chmod=F600 \
-                        -e "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$RUNNER_TEMP/rpm-known-hosts'" \
-                        "$RUNNER_TEMP/blub.age" github@rpm.henderkes.com:/mnt/data/blub.txt
+                        -e "ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$RUNNER_TEMP/rpm-known-hosts'" \
+                        "$RUNNER_TEMP/blub.age" "github@$RPM_SERVER:/mnt/data/blub.txt"
