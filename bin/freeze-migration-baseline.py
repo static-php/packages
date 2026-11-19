@@ -383,7 +383,16 @@ def freeze_candidate_dependencies(args):
     incoming = candidate_dependencies(args.type, args.candidate_dependencies)
     incoming_names = {p['name'] for p in incoming}
     inventory = [p for p in baseline['published_packages'] if p['name'] not in incoming_names]
-    selected = select_packages(args.type, inventory, set(), latest={}, incoming=incoming, defects=[])
+    # A fresh PHP install must let the native solver choose the SAPI's two
+    # recommended modules. Include them in partial mirrors without adding them
+    # to the client's install request or to the frozen old installation.
+    profile = set()
+    if baseline['selection']['mode'] == 'affected' and any(
+            p['name'] == 'php-zts-cli' for p in (*baseline['packages'], *incoming)):
+        profile = {'curl', 'fileinfo'}
+    defaults = {'php-zts-' + name for name in profile}
+    roots = latest_packages(args.type, (p for p in inventory if p['name'] in defaults))
+    selected = select_packages(args.type, inventory, profile, latest=roots, incoming=incoming, defects=[])
     frozen = {item['publication_url'] for item in baseline['packages']}
     missing = [p for p in selected.values() if p['publication_url'] not in frozen]
     with tempfile.TemporaryDirectory(prefix='spp-candidate-deps-') as temporary, ThreadPoolExecutor(max_workers=2) as workers:

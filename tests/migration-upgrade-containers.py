@@ -868,7 +868,8 @@ def inside(args):
                 raise RuntimeError('Fresh installation selected the wrong optional-package version: ' + name)
         probe = php_probe()
         if not probe['version'].startswith(args.php + '.') or not probe['curl'] or not probe['fileinfo']:
-            raise RuntimeError('Fresh optional-package dependencies selected an incomplete PHP stream')
+            raise RuntimeError(f"Fresh optional-package installation expected PHP {args.php} with curl and fileinfo, "
+                               f"got PHP {probe['version']}, curl={probe['curl']}, fileinfo={probe['fileinfo']}")
         if any('php-zts-' + module not in after for module in ('curl', 'fileinfo')):
             raise RuntimeError('Fresh optional-package installation did not resolve default recommended modules')
         libraries = sorted(name for name in after if name.startswith('php-zts-lib-'))

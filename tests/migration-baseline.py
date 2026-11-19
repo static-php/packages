@@ -59,6 +59,8 @@ class BaselineCapture(unittest.TestCase):
             for name, depends, provides in [
                 ('php-zts-cli', [], ['php-zts-mysqlnd']), ('php-zts-mysqlnd', ['php-zts-cli'], []),
                 ('php-zts-lib-zstd', ['php-zts-runtime-layout'], ['php-zts-soname-libzstd.so.1']),
+                ('php-zts-fileinfo', [], []), ('php-zts-curl', ['php-zts-lib-curl'], []),
+                ('php-zts-lib-curl', [], []),
                 ('php-zts-runtime-layout', [], []), ('php-zts-unrelated', [], []),
             ]:
                 url = 'https://example.test/' + name + '.apk'
@@ -67,14 +69,15 @@ class BaselineCapture(unittest.TestCase):
                                       published_checksum=dict(algorithm='apk-control-sha1', value=helper['apk_control_checksum'](contents[url]))))
             descriptor = root / 'baseline.json'
             descriptor.write_text(json.dumps(dict(type='apk', php_stream='8.6', architecture='x86_64',
-                                                  packages=[inventory[0]], published_packages=inventory)))
+                                                  selection={'mode': 'affected'}, packages=[inventory[0]], published_packages=inventory)))
             args = SimpleNamespace(type='apk', php='8.6', arch='x86_64', output=root, candidate_dependencies=candidates)
             with patch.dict(helper['download_package'].__globals__, {'fetch': lambda url: contents[url]}):
                 helper['freeze_candidate_dependencies'](args)
             result = json.loads(descriptor.read_text())
             self.assertEqual(result['packages'], [inventory[0]])
             self.assertEqual({item['name'] for item in result['replacement_dependencies']},
-                             {'php-zts-mysqlnd', 'php-zts-lib-zstd', 'php-zts-runtime-layout'})
+                             {'php-zts-mysqlnd', 'php-zts-lib-zstd', 'php-zts-runtime-layout',
+                              'php-zts-fileinfo', 'php-zts-curl', 'php-zts-lib-curl'})
             with patch.dict(helper['download_package'].__globals__, {'fetch': lambda *_: self.fail('Redownloaded verified dependency')}):
                 helper['freeze_candidate_dependencies'](args)
             self.assertEqual(json.loads(descriptor.read_text()), result)
