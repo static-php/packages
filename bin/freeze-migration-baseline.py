@@ -365,7 +365,7 @@ def snapshot_inventory(args, refresh=False):
     return {'schema': 1, 'type': args.type, 'php_stream': args.php, 'architecture': args.arch,
             'base': base, 'inventory': inventory,
             'metadata': {name: base64.b64encode(content).decode() for name, content in metadata.items()},
-            'keys': [(name, base64.b64encode(content).decode()) for name, content in keys]}
+            'keys': [[name, base64.b64encode(content).decode()] for name, content in keys]}
 
 
 def unavailable_baseline(args, error):

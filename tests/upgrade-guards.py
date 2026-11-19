@@ -290,6 +290,25 @@ class UpgradeGuards(unittest.TestCase):
             rpm['verify_package'](local, [remote], '8.6')
             commands.run.assert_not_called()
 
+    def test_rpm_upload_allowlist_omits_matching_bytes_for_the_same_architecture(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / name for name in ('current.rpm', 'missing.rpm')]
+            for path in files:
+                path.write_bytes(b'archive')
+            def local(path):
+                return dict(name=path.stem, arch='x86_64', version='8.6.0', evr='0:8.6.0-1', path=str(path))
+            digest = rpm['hashlib'].sha256(b'archive').hexdigest()
+            published = [dict(local(path), arch=arch, checksum={'type': 'sha256', 'value': digest})
+                         for path, arch in zip(files, ('x86_64', 'aarch64'))]
+            manifest = root / 'upload-files'
+            with patch.dict(rpm_globals, {'local_package': local, 'published_packages': lambda read: published,
+                            'subprocess': Mock(run=Mock(return_value=Mock(returncode=0)))}), \
+                    patch.object(sys, 'argv', ['check-rpm-upgrades', '--base-url', 'https://example.test',
+                                 '--strict-cohort', '--files-from', str(manifest), str(root)]):
+                self.assertEqual(rpm['main'](), 0)
+            self.assertEqual(manifest.read_bytes(), b'missing.rpm\0')
+
     @unittest.skipUnless(shutil.which('dpkg'), 'dpkg required')
     def test_debian_native_comparison(self):
         self.assertTrue(forgejo['version_is_newer']('debian', '3.7.0+php86.0+ext-1', '3.6.0+php86.0+ext-1'))

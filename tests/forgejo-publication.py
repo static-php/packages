@@ -205,15 +205,16 @@ class ForgejoPublication(unittest.TestCase):
         seen = []
         def upload(host, owner, password, kind, path, **kwargs):
             seen.append((path, printed.getvalue()))
+            return True
         helpers = dict(helper, get_remote_candidates=lambda *args: [],
                        verify_upload_versions=lambda host, owner, password, kind, paths, remote, **kwargs: paths,
                        upload_verified_archive=upload)
         with contextlib.redirect_stdout(printed):
             publisher['publish']('https://example.com', 'test', 'alpine', {'84': paths}, helpers)
         for index, (path, output) in enumerate(seen, 1):
-            self.assertIn(f'Uploading {index}/2: https://example.com 84/{path.name}', output)
-            self.assertNotIn(f'Completed {index}/2:', output)
-        self.assertIn('Completed 2/2:', printed.getvalue())
+            self.assertIn(f'Processing {index}/2: https://example.com 84/{path.name}', output)
+            self.assertNotIn(f'Uploaded {index}/2:', output)
+        self.assertIn('Uploaded 2/2:', printed.getvalue())
 
     def test_failed_debug_upload_does_not_cancel_remaining_packages_or_phases(self):
         paths = [self.archive(name=name) for name in (
@@ -276,7 +277,7 @@ class ForgejoPublication(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             publisher['publish']('https://example.com', 'test', 'alpine', {'85': paths}, helpers)
         listing.assert_called_once()
-        preflight.assert_called_once_with('https://example.com', '85', 'test', 'alpine', paths, [])
+        preflight.assert_called_once_with('https://example.com', '85', 'test', 'alpine', paths, [], already_published=set())
         self.assertEqual(uploaded[-1].name, paths[-1].name)
         self.assertCountEqual(uploaded, paths)
 
@@ -454,6 +455,24 @@ class ForgejoPublication(unittest.TestCase):
         }), contextlib.redirect_stdout(io.StringIO()):
             allowed = helper['verify_upload_versions']('https://example.com', '86', 'test', 'alpine', [path], [{'name': 'php-zts-lib-ssl', 'version': '3.6.0-r1'}])
         self.assertEqual(allowed, [])
+
+    def test_cohort_keeps_verified_archives_out_of_upload_queue(self):
+        existing = self.archive(name='php-zts-xdebug')
+        other = self.archive(name='php-zts-cli')
+        remote = [{'name': 'php-zts-xdebug', 'version': '3.6.0-r1'}]
+        record = {'arch': 'x86_64', 'sha256': helper['archive_sha256'](existing)}
+        upload = Mock(return_value=True)
+        sidecar = Mock()
+        helpers = dict(helper, get_remote_candidates=lambda *args: remote, publish_consumer_sidecar=sidecar,
+                       upload_verified_archive=upload)
+        for paths, count in (([existing], 0), ([existing, other], 1)):
+            output = io.StringIO()
+            with patch.dict(helper_globals, {'version_is_newer': lambda *args: False,
+                            'remote_package_archives': lambda *args: [record]}), contextlib.redirect_stdout(output):
+                self.assertEqual(publisher['publish']('https://example.com', 'test', 'alpine', {'86': paths}, helpers), count)
+            self.assertIn('Skipped 86/' + existing.name, output.getvalue())
+            self.assertEqual([call.args[4] for call in upload.call_args_list], [other] if count else [])
+            sidecar.assert_called_with('https://example.com', '86', 'test', 'alpine', existing)
 
     def test_idempotent_archive_is_verified_without_upload_or_git_repository_link(self):
         path = self.archive()

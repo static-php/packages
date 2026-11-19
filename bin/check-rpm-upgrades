@@ -189,6 +189,7 @@ def same_archive(local, remote):
 
 
 def verify_package(local, published, stream=None):
+    already_published = False
     independent = local['name'].startswith('php-zts-lib-') or re.sub(r'-debuginfo$', '', local['name']) == 'php-zts-runtime-layout'
     local_stream = None if independent else php_stream(local['version'])
     if stream is not None and not independent and local_stream != stream:
@@ -204,6 +205,8 @@ def verify_package(local, published, stream=None):
             raise RuntimeError('Cannot compare RPM versions: ' + result.stderr)
         if result.returncode == 0:
             same_archive(local, remote)
+            already_published = True
+    return already_published
 
 
 def main():
@@ -230,24 +233,28 @@ def main():
         raise RuntimeError('No RPM packages to verify')
     candidates = []
     skipped = {}
+    retained = set()
     for path in files:
         local = local_package(path)
         key = (re.sub(r'-debuginfo$', '', local['name']), local['arch'], local['evr'])
         candidates.append((path, key))
         try:
-            verify_package(local, published, arguments.php_version)
+            if verify_package(local, published, arguments.php_version):
+                retained.add(path)
         except PackageDowngradeError as error:
             skipped[key] = str(error)
     allowed = []
     for path, key in candidates:
         if key in skipped:
             print('::warning::Skipping upload of {}: {}'.format(path.name, skipped[key]))
+        elif path in retained:
+            print('Skipped {} (identical RPM already published)'.format(path.name))
         else:
             allowed.append(path.name)
     if skipped and arguments.strict_cohort:
         allowed = []
     arguments.files_from.write_bytes(b''.join(name.encode() + b'\0' for name in allowed))
-    print('Verified upgrade ordering for {} RPM packages; skipped {}.'.format(len(allowed), len(files) - len(allowed)))
+    print('Checked {} RPM packages. Selected {} for upload.'.format(len(files), len(allowed)))
     return 3 if skipped else 0
 
 

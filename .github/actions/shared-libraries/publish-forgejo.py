@@ -94,6 +94,7 @@ def verify_alpine_indexes(host, password, groups, helper):
 def publish(host, password, kind, groups, helper):
     digests = {}
     selected = {}
+    retained = {}
     for owner, paths in sorted(groups.items()):
         print(f'Preflight: {host} owner {owner}, {len(paths)} packages', flush=True)
         remote = helper['get_remote_candidates'](host, owner, password, kind, paths)
@@ -116,7 +117,8 @@ def publish(host, password, kind, groups, helper):
                             path.write_bytes(data)
                             print('Reusing identical published DEB: ' + path.name, flush=True)
         before = {path: helper['archive_sha256'](path) for path in paths}
-        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote)
+        retained[owner] = set()
+        allowed = helper['verify_upload_versions'](host, owner, password, kind, paths, remote, already_published=retained[owner])
         if len(allowed) != len(paths):
             raise RuntimeError('A version/archive identity guard rejected the cohort for owner ' + owner)
         digests.update({path: before[path] for path in allowed})
@@ -125,18 +127,27 @@ def publish(host, password, kind, groups, helper):
         raise RuntimeError('A cohort archive changed during publication preflight')
     ordered = publication_order(selected, helper, kind)
     completed = {owner: [] for owner in selected}
+    uploaded = []
     def upload(item):
         index, (_, owner, path) = item
-        print(f'Uploading {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         if helper['archive_sha256'](path) != digests[path]:
             raise RuntimeError('A cohort archive changed after publication preflight: ' + path.name)
         try:
-            helper['upload_verified_archive'](host, owner, password, kind, path, preflighted=True)
+            if path in retained[owner]:
+                helper['publish_consumer_sidecar'](host, owner, password, kind, path)
+                created = False
+            else:
+                print(f'Processing {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
+                created = helper['upload_verified_archive'](host, owner, password, kind, path, preflighted=True)
         except Exception as error:
             failure = f'Upload failed for {host} {owner}/{path.name}: {error}'
             print(failure + '; continuing with remaining packages', flush=True)
             return failure
-        print(f'Completed {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
+        if created:
+            uploaded.append(path)
+            print(f'Uploaded {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
+        else:
+            print(f'Skipped {owner}/{path.name} (identical archive already published)', flush=True)
         completed[owner].append(path)
     failures = []
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -149,6 +160,7 @@ def publish(host, password, kind, groups, helper):
     if failures:
         raise RuntimeError(f'{len(failures)} package uploads failed; remaining packages were attempted: '
                            + ' | '.join(failures[:5]))
+    return len(uploaded)
 
 
 def main(argv=None):
@@ -156,6 +168,7 @@ def main(argv=None):
     parser.add_argument('package_type', choices=('deb', 'apk'))
     parser.add_argument('--cohort', type=Path)
     parser.add_argument('--directory', type=Path, default=Path('.'))
+    parser.add_argument('--upload-count', type=Path)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[3]
     helper = runpy.run_path(str(root / 'bin/forgejo-helper'))
@@ -166,7 +179,9 @@ def main(argv=None):
     if set(selected) - set(STREAM_OWNERS):
         raise RuntimeError('Invalid publication PHP streams')
     groups = package_groups(args.directory, args.package_type, owners, helper, selected)
-    publish(helper['host'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper)
+    uploaded = publish(helper['host'], os.environ['FORGEJO_PASSWORD'], kind, groups, helper)
+    if args.upload_count:
+        args.upload_count.write_text(str(uploaded) + '\n')
 
 
 

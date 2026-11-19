@@ -267,5 +267,8 @@ def record_publication(source, kind, target, stream):
                       and compare(kind, item['version'], layout['package_version']) == 0), None)
         if match:
             layout['download_url'] = match['publication_url']
+    if value == previous:
+        print('Published repository state is current.', flush=True)
+        return
     value['publication_run_id'] = os.environ.get('GITHUB_RUN_ID')
     save(value)

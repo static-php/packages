@@ -299,8 +299,10 @@ def publish_available(source, kind, target, selected_php='all', selected_version
                 run('bash', '.github/actions/shared-libraries/run.sh', 'publish')
                 uploading = True
                 run('bash', '.github/actions/shared-libraries/run.sh', 'publish-rpm' if kind == 'rpm' else 'upload')
+                uploaded = (Path('rpm-upload-files').stat().st_size > 0 if kind == 'rpm'
+                            else int((destination / 'upload-count').read_text()) > 0)
                 run('bash', '.github/actions/shared-libraries/run.sh', 'record-repository')
-                results.append((label, 'published'))
+                results.append((label, 'published' if uploaded else 'skipped (already published)'))
                 outcomes.write_text(json.dumps([stream for stream, state in results if state == 'published']) + '\n')
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 if uploading:
@@ -315,7 +317,7 @@ def publish_available(source, kind, target, selected_php='all', selected_version
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
             output.write(summary + '\n')
-    return all(state == 'published' for _, state in results)
+    return all(state in ('published', 'skipped (already published)') for _, state in results)
 
 
 def main():

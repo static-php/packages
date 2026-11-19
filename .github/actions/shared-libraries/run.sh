@@ -130,7 +130,7 @@ PY
         ;;
     upload)
         cd "dist/$TYPE"
-        python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE"
+        python3 ../../.github/actions/shared-libraries/publish-forgejo.py "$TYPE" --upload-count upload-count
         ;;
     record)
         jq -n --arg type "$TYPE" --arg arch "$MATRIX_ARCH" --arg alma "$ALMA" --arg target "$TARGET" --arg image "$IMAGE" --arg source "$SOURCE_RUN_ID" \
@@ -179,8 +179,11 @@ PY
             echo 'RPM publication requires the architecture/el8 destination' >&2
             exit 1
         fi
+        test -f rpm-upload-files
         ssh "$RPM_HOST" "test ! -L '$RPM_DIRECTORY' || { echo 'EL8 repository is a symlink; refusing to redirect the upload' >&2; exit 1; }; mkdir -p '$RPM_DIRECTORY'"
-        rsync -av --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$RPM_DIRECTORY/"
+        if [[ -s rpm-upload-files ]]; then
+            rsync -av --from0 --files-from=rpm-upload-files dist/rpm/ "$RPM_HOST:$RPM_DIRECTORY/"
+        fi
         arch="${RPM_DIRECTORY%/el8}"
         arch="${arch##*/}"
         ssh "$RPM_HOST" "set -e; cd '$RPM_DIRECTORY'; python=python3; if command -v python3.9 >/dev/null 2>&1; then python=python3.9; fi; \"\$python\" - --platform el8 --arch '$arch'; createrepo_c --update --retain-old-md-by-age 2h .; modifyrepo_c --mdtype=modules modules.yaml repodata" < bin/createrepo_static

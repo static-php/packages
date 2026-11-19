@@ -155,8 +155,10 @@ class Publication(unittest.TestCase):
                 path.chmod(0o755)
             environment = dict(os.environ, TYPE='rpm', MODE='full', LIBRARIES='', RPM_HOST='test-host',
                 RPM_DIRECTORY='/mnt/data/rpm/aarch64/el8', COMMAND_LOG=str(log), PATH=str(root) + os.pathsep + os.environ['PATH'])
+            (root / 'rpm-upload-files').write_bytes(b'new.rpm\0')
+            (root / 'bin').symlink_to(ROOT / 'bin', target_is_directory=True)
             subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'publish-rpm'],
-                           cwd=ROOT, env=environment, check=True, input='', text=True, capture_output=True)
+                           cwd=root, env=environment, check=True, input='', text=True, capture_output=True)
             commands = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(len(commands), 3)
             self.assertIn("test ! -L '/mnt/data/rpm/aarch64/el8'", commands[0][-1])
@@ -167,11 +169,16 @@ class Publication(unittest.TestCase):
             self.assertIn('createrepo_c --update --retain-old-md-by-age 2h .; modifyrepo_c --mdtype=modules modules.yaml repodata', update)
             for forbidden in ('.php-zts', '/el9', '/el10', ' ln ', ' mv ', ' rm '):
                 self.assertNotIn(forbidden, json.dumps(commands))
+            (root / 'rpm-upload-files').write_bytes(b'')
+            subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'publish-rpm'],
+                           cwd=root, env=environment, check=True, capture_output=True)
+            repeated = [json.loads(line) for line in log.read_text().splitlines()][3:]
+            self.assertTrue(all(Path(command[0]).name == 'ssh' for command in repeated))
             environment['RPM_DIRECTORY'] = '/mnt/data/rpm/aarch64/el9'
             result = subprocess.run(['bash', str(ROOT / '.github/actions/shared-libraries/run.sh'), 'publish-rpm'],
                                     cwd=ROOT, env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(log.read_text().splitlines()), 3)
+            self.assertEqual(len(log.read_text().splitlines()), 3 + len(repeated))
 
     def test_failed_validation_preflight_and_upload_do_not_stop_other_streams(self):
         for kind in ('rpm', 'deb', 'apk'):
@@ -196,6 +203,11 @@ class Publication(unittest.TestCase):
                                          'Traceback:\n  caller\n  publisher\n  raise RuntimeError\nRuntimeError: cohort rejected\n')
                     if stream == '8.3' and phase == 'publish' or stream == '8.4' and phase in ('upload', 'publish-rpm'):
                         raise subprocess.CalledProcessError(1, command)
+                    if phase in ('upload', 'publish-rpm'):
+                        dist = root / 'dist' / kind
+                        dist.mkdir(parents=True, exist_ok=True)
+                        (dist / 'upload-count').write_text('1' if stream == '8.5' else '0')
+                        (root / 'rpm-upload-files').write_bytes(b'new.rpm\0' if stream == '8.5' else b'')
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
@@ -217,7 +229,8 @@ class Publication(unittest.TestCase):
                 for stream in ('8.5', '8.6'):
                     self.assertLess(events.index((stream, 'verify')), events.index((stream, 'publish')))
                     self.assertLess(events.index((stream, 'publish')), events.index((stream, upload)))
-                    self.assertIn(f'PHP {stream}: published', primary_summary)
+                self.assertIn('PHP 8.5: published', primary_summary)
+                self.assertIn('PHP 8.6: skipped (already published)', primary_summary)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='spp-publication-')
@@ -340,7 +353,10 @@ class Publication(unittest.TestCase):
         previous = Path.cwd()
         try:
             os.chdir(self.plans)
-            with patch.object(publication, 'prune_consumers'), patch.object(publication, 'assemble'), \
+            def assemble(_source, destination, kind, scope):
+                destination.mkdir(parents=True)
+                (destination / 'upload-count').write_text('1')
+            with patch.object(publication, 'prune_consumers'), patch.object(publication, 'assemble', side_effect=assemble), \
                     patch.object(publication, 'verify_upgrades') as verify, patch.object(publication, 'run_logged') as run, \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(publication.publish_available(source, 'apk', 'arm64', selected_php='8.2'))

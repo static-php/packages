@@ -207,6 +207,10 @@ class RepositoryState(unittest.TestCase):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
         self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['consumer_versions']['8.6'],
             {'php-zts-cli': package['version'], 'php-zts-grpc': '1.85.1-5', 'php-zts-ssh2': '1.0-1'})
+        with patch.dict(os.environ, MATRIX_ARCH='arm64', GITHUB_RUN_ID='12345'), \
+                patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]), patch.object(state, 'save') as save:
+            state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
+            save.assert_not_called()
 
 
 if __name__ == '__main__':
