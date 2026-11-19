@@ -46,6 +46,39 @@ def apk_fixture(name, version, *, depends=(), provides=(), replaces=(), metadata
 
 class BaselineCapture(unittest.TestCase):
 
+    def test_new_candidate_freezes_its_published_dependencies_only_for_the_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = root / 'candidates'
+            candidates.mkdir()
+            requires = ['php-zts-mysqlnd', 'php-zts-lib-zstd>=1', 'php-zts-soname-libzstd.so.1', 'php-zts-new-provider']
+            (candidates / 'new.apk').write_bytes(apk_fixture('php-zts-new', '1-r0', depends=requires))
+            (candidates / 'provider.apk').write_bytes(apk_fixture('php-zts-provider', '1-r0', provides=['php-zts-new-provider']))
+            (candidates / 'debug.apk').write_bytes(apk_fixture('php-zts-new-debuginfo', '1-r0', depends=['php-zts-unrelated']))
+            inventory, contents = [], {}
+            for name, depends, provides in [
+                ('php-zts-cli', [], ['php-zts-mysqlnd']), ('php-zts-mysqlnd', ['php-zts-cli'], []),
+                ('php-zts-lib-zstd', ['php-zts-runtime-layout'], ['php-zts-soname-libzstd.so.1']),
+                ('php-zts-runtime-layout', [], []), ('php-zts-unrelated', [], []),
+            ]:
+                url = 'https://example.test/' + name + '.apk'
+                contents[url] = apk_fixture(name, '1-r0', depends=depends, provides=provides)
+                inventory.append(dict(name=name, version='1-r0', requires=depends, provides=provides, publication_url=url,
+                                      published_checksum=dict(algorithm='apk-control-sha1', value=helper['apk_control_checksum'](contents[url]))))
+            descriptor = root / 'baseline.json'
+            descriptor.write_text(json.dumps(dict(type='apk', php_stream='8.6', architecture='x86_64',
+                                                  packages=[inventory[0]], published_packages=inventory)))
+            args = SimpleNamespace(type='apk', php='8.6', arch='x86_64', output=root, candidate_dependencies=candidates)
+            with patch.dict(helper['download_package'].__globals__, {'fetch': lambda url: contents[url]}):
+                helper['freeze_candidate_dependencies'](args)
+            result = json.loads(descriptor.read_text())
+            self.assertEqual(result['packages'], [inventory[0]])
+            self.assertEqual({item['name'] for item in result['replacement_dependencies']},
+                             {'php-zts-mysqlnd', 'php-zts-lib-zstd', 'php-zts-runtime-layout'})
+            with patch.dict(helper['download_package'].__globals__, {'fetch': lambda *_: self.fail('Redownloaded verified dependency')}):
+                helper['freeze_candidate_dependencies'](args)
+            self.assertEqual(json.loads(descriptor.read_text()), result)
+
     def test_selective_tls_baseline_includes_published_curl_and_its_closure(self):
         inventory = [{'name': name, 'version': '1-1', 'requires': requires, 'provides': []} for name, requires in [
             ('php-zts-cli', []), ('php-zts-fpm', []), ('frankenphp', []), ('php-zts-xdebug', []),

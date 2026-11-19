@@ -301,6 +301,7 @@ jobs:
                 env:
                     LIBRARY_ONLY: ${{ matrix.library-only }}
                 run: |
+                    bash .github/actions/shared-libraries/run.sh candidate-dependencies
                     args=()
                     if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
                     profile=auto

@@ -129,6 +129,14 @@ def rpm_index(base, architecture, php):
     return packages, metadata, []
 
 
+def deb_dependency_names(value):
+    return re.findall(r'\b(?:(?:lib)?php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
+
+
+def apk_dependency_names(value):
+    return [re.split(r'[<>=~]', item, maxsplit=1)[0] for item in value.split() if not item.startswith('!')]
+
+
 def deb_index(base, architecture):
     packages = []
     metadata = {}
@@ -145,11 +153,10 @@ def deb_index(base, architecture):
         for fields in paragraphs(data.decode()):
             if fields.get('Architecture') not in (architecture, 'all'):
                 continue
-            names = lambda value: re.findall(r'\b(?:(?:lib)?php-zts-[A-Za-z0-9+_.-]+|frankenphp|pie-zts)\b', value)
             packages.append({'name': fields['Package'], 'version': fields['Version'],
                              'architecture': fields['Architecture'],
-                             'requires': names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
-                             'provides': names(fields.get('Provides', '')),
+                             'requires': deb_dependency_names(fields.get('Depends', '') + ',' + fields.get('Pre-Depends', '') + ',' + fields.get('Recommends', '')),
+                             'provides': deb_dependency_names(fields.get('Provides', '')),
                              'publication_url': urllib.parse.urljoin(base, fields['Filename']),
                              'published_checksum': {'algorithm': 'sha256', 'value': fields['SHA256']}})
     key = fetch(base + 'repository.key')
@@ -167,10 +174,9 @@ def apk_index(base, architecture):
         if fields.get('A') not in (architecture, 'noarch'):
             continue
         filename = fields['P'] + '-' + fields['V'] + '.apk'
-        dependency_names = lambda value: [re.split(r'[<>=~]', item, 1)[0] for item in value.split() if not item.startswith('!')]
         packages.append({'name': fields['P'], 'version': fields['V'], 'architecture': fields['A'],
-                         'requires': dependency_names(fields.get('D', '')),
-                         'provides': dependency_names(fields.get('p', '')),
+                         'requires': apk_dependency_names(fields.get('D', '')),
+                         'provides': apk_dependency_names(fields.get('p', '')),
                          'publication_url': base + architecture + '/' + filename,
                          'published_checksum': {'algorithm': 'apk-control-sha1', 'value': fields['C']}})
     key_url = base.split('/alpine/')[0] + '/alpine/key'
@@ -246,7 +252,7 @@ def affected_profile(latest, packages, libraries, tls=False):
     return {normalize(name) for name in names}
 
 
-def select_packages(kind, inventory, profile, include_debug=False, latest=None, defects=None):
+def select_packages(kind, inventory, profile, include_debug=False, latest=None, defects=None, incoming=()):
     latest = latest_packages(kind, inventory) if latest is None else latest
     def wanted(name):
         if 'all' not in profile:
@@ -263,6 +269,8 @@ def select_packages(kind, inventory, profile, include_debug=False, latest=None, 
         versions.setdefault(package['name'], []).append(package)
         for capability in [package['name'], *package.get('provides', [])]:
             providers.setdefault(capability, set()).add(package['name'])
+    incoming_names = {p['name'] for p in incoming}
+    incoming_provides = {cap for p in incoming for cap in p.get('provides', [])}
     seen = set()
     cache = {}
     while True:
@@ -276,9 +284,11 @@ def select_packages(kind, inventory, profile, include_debug=False, latest=None, 
         seen.add(identity)
         requirements = {}
         missing = []
-        for package in selected.values():
+        for package in (*selected.values(), *incoming):
             for dependency in package.get('requires', []):
                 if not dependency.startswith(('php-zts-', 'libphp-zts-', 'frankenphp', 'pie-zts')):
+                    continue
+                if dependency in incoming_names or (dependency in incoming_provides and dependency not in versions):
                     continue
                 # Historical builtin provides must not hide a real module package.
                 choices = {dependency} if dependency in versions else providers.get(dependency, set())
@@ -332,6 +342,57 @@ def download_package(package, kind, output, stage):
         shutil.copy2(temporary_file, destination)
         temporary_file.unlink()
     return dict(package, path=str(destination.relative_to(output)), sha256=hashlib.sha256(data).hexdigest())
+
+
+def candidate_dependencies(kind, directory):
+    paths = sorted(directory.glob('*.' + kind))
+    if not paths:
+        raise RuntimeError('No candidate archives in ' + str(directory))
+    if kind == 'apk':
+        apk_header = runpy.run_path(str(Path(__file__).with_name('forgejo-helper')))['apk_native_metadata']
+    if kind == 'rpm':
+        import rpm
+        ts = rpm.TransactionSet()
+        ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
+    records = []
+    for path in paths:
+        if kind == 'apk':
+            header = apk_header(path)
+            name = header['name']
+            requires = apk_dependency_names(' '.join(header['depends']))
+            provides = apk_dependency_names(' '.join(header['provides']))
+        elif kind == 'deb':
+            fields = next(paragraphs(subprocess.check_output(['dpkg-deb', '-f', path], text=True)))
+            name = fields['Package']
+            requires = deb_dependency_names(','.join(fields.get(key, '') for key in ('Depends', 'Pre-Depends', 'Recommends')))
+            provides = deb_dependency_names(fields.get('Provides', ''))
+        else:
+            with path.open('rb') as source:
+                header = ts.hdrFromFdno(source.fileno())
+            name, requires, provides = header['name'], header['requirename'], header['providename']
+        if not name.endswith(('-debuginfo', '-dbgsym')):
+            records.append(dict(name=name, requires=requires, provides=provides))
+    return records
+
+
+def freeze_candidate_dependencies(args):
+    descriptor = args.output / 'baseline.json'
+    baseline = json.loads(descriptor.read_text())
+    if (baseline['type'], baseline['php_stream'], baseline['architecture']) != (args.type, args.php, args.arch):
+        raise RuntimeError('Candidate dependencies and published baseline have different targets')
+    incoming = candidate_dependencies(args.type, args.candidate_dependencies)
+    incoming_names = {p['name'] for p in incoming}
+    inventory = [p for p in baseline['published_packages'] if p['name'] not in incoming_names]
+    selected = select_packages(args.type, inventory, set(), latest={}, incoming=incoming, defects=[])
+    frozen = {item['publication_url'] for item in baseline['packages']}
+    missing = [p for p in selected.values() if p['publication_url'] not in frozen]
+    with tempfile.TemporaryDirectory(prefix='spp-candidate-deps-') as temporary, ThreadPoolExecutor(max_workers=2) as workers:
+        packages = list(workers.map(lambda p: download_package(p, args.type, args.output, Path(temporary)), missing))
+    baseline['replacement_dependencies'] = packages
+    stage = descriptor.with_suffix('.tmp')
+    stage.write_text(json.dumps(baseline, indent=2) + '\n')
+    stage.replace(descriptor)
+    print('Additional published packages required by candidates: ' + ', '.join(p['name'] for p in packages))
 
 
 def published_inventory(args):
@@ -481,9 +542,13 @@ def main():
     parser.add_argument('--include-debug', action='store_true', help='Include debug packages with --profile=all')
     parser.add_argument('--tls', action='store_true', help='Include published TLS validation hosts and their dependencies')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--candidate-dependencies', type=Path, help='Complete the replacement repository using native candidate headers')
     args = parser.parse_args()
     try:
-        freeze(args)
+        if args.candidate_dependencies:
+            freeze_candidate_dependencies(args)
+        else:
+            freeze(args)
     except Exception as error:
         message = f'{args.type.upper()} PHP {args.php} / {args.arch}: baseline capture failed: {error}'
         print('::error::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))

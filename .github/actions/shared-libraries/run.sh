@@ -117,6 +117,10 @@ PY
     prepare-runtime)
         python3 .github/actions/shared-libraries/runtime-checks.py --type "$TYPE" --payload "build/$PHPV"             --candidates "dist/$TYPE" --baseline-dir stage/published-baseline --output stage/runtime-libraries
         ;;
+    candidate-dependencies)
+        python3 bin/freeze-migration-baseline.py --type "$TYPE" --php "$PHPV" --arch "$MATRIX_ARCH" \
+            --candidate-dependencies "dist/$TYPE" --output stage/published-baseline
+        ;;
     freeze-baseline)
         baseline_stage=stage
         if [[ "$TYPE" != apk ]]; then baseline_stage="stage/$TYPE"; fi

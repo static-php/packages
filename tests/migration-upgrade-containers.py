@@ -147,7 +147,7 @@ def load_baseline(root, kind, stream, arch):
     if not isinstance(packages, list):
         raise RuntimeError('Frozen baseline package inventory must be a list')
     checked = []
-    for item in packages:
+    for item in packages + record.get('replacement_dependencies', []):
         path = (root / item['path']).resolve()
         if root not in path.parents or not path.is_file():
             raise RuntimeError('Baseline archive escapes its frozen directory')
@@ -158,7 +158,8 @@ def load_baseline(root, kind, stream, arch):
         if not item.get('publication_url'):
             raise RuntimeError('Frozen archive lacks its publication URL')
         checked.append(dict(item, source=str(path)))
-    record['packages'] = checked
+    record['packages'] = checked[:len(packages)]
+    record['replacement_dependencies'] = checked[len(packages):]
     return record
 
 
@@ -781,7 +782,14 @@ def inside(args):
             incoming_changes = validate_partial_candidates(kind, frozen, incoming)
         make_keys(kind)
         old, baseline_index_failure = index_baseline(kind, args.php, args.arch, partial)
-        retain_baseline_packages(old, incoming, Path('/spp/repository/generations/new'), partial, args.arch)
+        new_directory = Path('/spp/repository/generations/new')
+        support = Path('/spp/replacement-dependencies')
+        dependencies = inspect_directory(kind, support) if support.is_dir() else []
+        if {item['name'] for item in incoming} & {item['name'] for item in dependencies}:
+            raise RuntimeError('A published dependency overlaps an incoming package')
+        retain_baseline_packages(old, incoming + dependencies, new_directory, partial, args.arch)
+        for item in dependencies:
+            shutil.copy2(item['path'], new_directory / Path(item['path']).name)
         new = index_generation(kind, 'new', args.php, args.arch)
         for item in new:
             if item['architecture'] not in (architecture(args.arch), 'all'):
@@ -1128,9 +1136,10 @@ class PreparedMirror:
         if args.library_artifacts and not library:
             raise RuntimeError('Compatible library package directory is empty')
         records = []
-        for item in self.baseline['packages']:
-            records.append({'role': 'baseline', 'name': Path(item['source']).name,
-                            'path': item['source'], 'sha256': item['sha256']})
+        for field, role in [('packages', 'baseline'), ('replacement_dependencies', 'published-dependency')]:
+            for item in self.baseline.get(field, []):
+                records.append({'role': role, 'name': Path(item['source']).name,
+                                'path': item['source'], 'sha256': item['sha256']})
         helpers = [Path(__file__), HERE / 'container-architecture.py', HERE / 'shared-runtime.php', HERE / 'shared-runtime-containers.py', HERE / 'package-repository-server.py']
         if args.tls:
             helpers.append(HERE / 'tls-runtime-containers.py')
@@ -1178,6 +1187,11 @@ class PreparedMirror:
             (repository / 'generations' / generation).mkdir(parents=True)
         for item in baseline['packages']:
             self.copy_checked(item['source'], repository / 'generations/old' / Path(item['source']).name)
+        if baseline.get('replacement_dependencies'):
+            support = scratch / 'replacement-dependencies'
+            support.mkdir()
+            for item in baseline['replacement_dependencies']:
+                self.copy_checked(item['source'], support / Path(item['source']).name)
         candidates = list(Path(args.artifacts).resolve().glob('*.' + args.type))
         if not candidates:
             raise RuntimeError('Candidate package directory is empty')

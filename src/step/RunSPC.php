@@ -181,11 +181,11 @@ class RunSPC
                         if (!is_dir($assets)) {
                             throw new RuntimeException('Built FrankenPHP is missing its pinned source package assets');
                         }
-                        (new Process(['rm', '-rf', $destination]))->mustRun();
+                        (new Process(['rm', '-rf', $destination], timeout: null))->mustRun();
                         if (!mkdir($destination, 0755, true) && !is_dir($destination)) {
                             throw new RuntimeException('Cannot create FrankenPHP package asset directory');
                         }
-                        (new Process(['cp', '-a', $assets . '/.', $destination . '/']))->mustRun();
+                        (new Process(['cp', '-a', $assets . '/.', $destination . '/'], timeout: null))->mustRun();
                     } elseif (!is_dir($destination)) {
                         throw new RuntimeException('Cached FrankenPHP is missing its recorded package assets');
                     }
@@ -196,7 +196,7 @@ class RunSPC
                 self::publishBuiltFiles($candidate, BUILD_ROOT_PATH);
             } finally {
                 if (is_dir($candidate)) {
-                    (new Process(['rm', '-rf', $candidate]))->mustRun();
+                    (new Process(['rm', '-rf', $candidate], timeout: null))->mustRun();
                 }
             }
         } else {
@@ -372,9 +372,9 @@ class RunSPC
             throw new RuntimeException("Failed to create directory: {$buildDir}");
         }
         try {
-            (new Process(['cp', '-a', $sourceDir . '/.', $buildDir . '/']))->mustRun();
+            (new Process(['cp', '-a', $sourceDir . '/.', $buildDir . '/'], timeout: null))->mustRun();
         } catch (\Throwable $error) {
-            (new Process(['rm', '-rf', $buildDir]))->mustRun();
+            (new Process(['rm', '-rf', $buildDir], timeout: null))->mustRun();
             throw $error;
         }
         echo "Copied PHP {$phpVersion} files to {$buildDir}\n";

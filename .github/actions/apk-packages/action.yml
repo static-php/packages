@@ -59,6 +59,7 @@ runs:
         -   name: Verify ordinary APK upgrade
             shell: bash
             run: |
+                bash .github/actions/shared-libraries/run.sh candidate-dependencies
                 args=()
                 if [[ "$TLS_CHECKS" == true ]]; then args+=(--tls); fi
                 profile=auto
