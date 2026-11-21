@@ -206,12 +206,6 @@ def record_publication(source, kind, target, stream):
             for field in ('id', 'runtime_libdir', 'architecture', 'libc'):
                 entry.pop(field, None)
             entry.update(reference)
-            debug = next((item for item in inventory if item['name'] == package_name + '-debuginfo' and item['version'] == package['version']), None)
-            entry['published_debug_required'] = debug is not None
-            if debug:
-                entry['published_debug_archive'] = {'type': kind, 'name': debug['name'], 'package_version': version,
-                    'architecture': debug['architecture'], 'download_url': debug['publication_url'],
-                    'checksum': debug['published_checksum']}
             baseline['libraries'][identifier] = entry
         elif package_name == 'php-zts-runtime-layout':
             layout = planner['archive_runtime_json'](archive_path, kind, 'usr/share/php-zts/runtime-layout.json')

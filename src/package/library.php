@@ -12,7 +12,6 @@ use staticphp\util\BuildPayload;
 final class library implements package
 {
     private ?array $runtimeFiles = null;
-    private array $debugFiles = [];
 
     public function __construct(private SharedLibraries $libraries, private string $id)
     {
@@ -72,8 +71,7 @@ final class library implements package
 
     public function getDebuginfoFpmConfig(): array
     {
-        $this->prepareFiles();
-        return $this->debugFiles === [] ? [] : ['files' => $this->debugFiles, 'depends' => [$this->getName()]];
+        return [];
     }
 
     private function prepareFiles(): void
@@ -93,9 +91,6 @@ final class library implements package
                 $prepared = $payload->prepareFile($source);
                 unset($files[$source]);
                 $files[$prepared['runtime']] = $destination;
-                if ($prepared['debug'] !== null) {
-                    $this->debugFiles[$prepared['debug']] = '/usr/lib/debug' . $destination . '.debug';
-                }
                 continue;
             }
             $relative = substr($source, strlen($this->libraries->getRoot()) + 1);
@@ -123,7 +118,6 @@ final class library implements package
             $this->command(['strip', '--strip-unneeded', $runtime]);
             if ($hasDebug) {
                 $this->command(['objcopy', '--add-gnu-debuglink=' . $debug, $runtime]);
-                $this->debugFiles[$debug] = '/usr/lib/debug' . $destination . '.debug';
             }
             unset($files[$source]);
             $files[$runtime] = $destination;

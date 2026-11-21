@@ -43,6 +43,11 @@ configured set. Compile glibc payloads on EL8 only, then package the same sealed
 and DEB. Alpine uses its separate native-musl build. The shared glibc workflow
 produces both package formats without a second compilation.
 
+Private shared libraries ship as runtime packages in RPM, DEB and APK.
+Use `--debuginfo` for PHP, FrankenPHP and extension debug symbols. If an older
+`php-zts-lib-*-debuginfo` package pins its runtime to an exact version, remove
+that debug package to allow the runtime to upgrade.
+
 ### Parameters
 
 - `--target`: Optional. Specify the target architecture using a target triple that Zig understands, such as `native-native-gnu` or `native-native-musl -dynamic`. Default uses current OS defaults.

@@ -121,7 +121,7 @@ try {
     try {
         CreatePackages::run(null, '1', true, false, true, null, BUILD_ROOT_PATH);
         $revisionOne = glob(DIST_PATH . '/' . $type . '/*.' . $type);
-        $oldConsumer = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'fixture-consumer') && !str_contains(basename($file), '-debuginfo')));
+        $oldConsumer = current(array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'fixture-consumer')));
         $oldHeader = packageHeader($oldConsumer, $type);
         $manifest = json_decode(file_get_contents(BUILD_ROOT_PATH . '/shared-libraries.json'), true, flags: JSON_THROW_ON_ERROR);
         $oldFloor = staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH)->getPackageVersion('fixture-base', $type);
@@ -139,19 +139,16 @@ try {
     }
     check(!is_file(BUILD_BIN_PATH . '/php'), 'Fixture unexpectedly contains PHP');
     $artifacts = array_values(array_diff(glob(DIST_PATH . '/' . $type . '/*.' . $type), $revisionOne));
-    check(count($artifacts) === 4, "Expected runtime/debuginfo pairs for {$type}: {$log}");
+    check(count($artifacts) === 2, "Expected two library runtime packages for {$type}: {$log}");
     $headers = [];
     foreach ($artifacts as $artifact) {
-        $debug = str_contains(basename($artifact), '-debuginfo');
+        check(!str_contains(basename($artifact), '-debuginfo'), 'Unexpected library debuginfo package');
         if ($type === 'rpm') {
-            check(command(['rpm', '-qp', '--qf', '%{PAYLOADCOMPRESSOR}', $artifact]) === ($debug ? 'gzip' : 'xz'), 'Incorrect RPM payload compression');
+            check(command(['rpm', '-qp', '--qf', '%{PAYLOADCOMPRESSOR}', $artifact]) === 'xz', 'Incorrect RPM payload compression');
             check(command(['rpm2cpio', $artifact]) !== '', 'RPM payload could not be decompressed');
         } elseif ($type === 'deb') {
             $members = explode("\n", command(['ar', 't', $artifact]));
-            check(in_array($debug ? 'data.tar.gz' : 'data.tar.xz', $members, true), 'Incorrect DEB payload compression');
-        }
-        if ($debug) {
-            continue;
+            check(in_array('data.tar.xz', $members, true), 'Incorrect DEB payload compression');
         }
         $header = packageHeader($artifact, $type);
         $id = str_contains(basename($artifact), 'fixture-consumer') ? 'consumer' : 'base';
@@ -182,10 +179,9 @@ try {
     check(str_contains($headers['base'], $soname), 'Library package omits its actual private SONAME provide');
     check(str_contains($headers['consumer'], $soname), 'Consumer package omits its required private SONAME');
     if ($type === 'rpm') {
-        $runtimeArtifacts = array_values(array_filter($artifacts, static fn ($file) => !str_contains(basename($file), '-debuginfo')));
         $provides = [];
         $requires = [];
-        foreach ($runtimeArtifacts as $artifact) {
+        foreach ($artifacts as $artifact) {
             $provides = [...$provides, ...explode("\n", trim(command(['rpm', '-qp', '--qf', "[%{PROVIDENAME}\n]", $artifact])))];
             $requires = [...$requires, ...explode("\n", trim(command(['rpm', '-qp', '--qf', "[%{REQUIRENAME}\n]", $artifact])))];
         }
@@ -211,23 +207,17 @@ try {
     check($consumers['consumers']['php-zts-lib-fixture-consumer']['libraries'] === ['fixture-base'], 'Incorrect consumer metadata');
     if ($type === 'apk') {
         foreach ($artifacts as $artifact) {
-            $debug = str_contains(basename($artifact), '-debuginfo');
             $name = 'php-zts-lib-fixture-' . (str_contains(basename($artifact), 'fixture-consumer') ? 'consumer' : 'base');
             $version = str_contains($name, 'consumer') ? '1.2.3-r2' : '1.19-r2';
             $header = packageHeader($artifact, $type);
             check(str_contains($header, "pkgver = {$version}\n"), "APK normalized the upstream version: {$header}");
-            if ($debug) {
-                check(str_contains($header, "depend = {$name}={$version}\n"), "Incorrect exact debuginfo dependency: {$header}");
-            }
         }
         installApkFixture($root . '/installed-libraries', [...$artifacts, ...array_filter($revisionOne, static fn ($file) => str_contains(basename($file), 'php-zts-runtime-layout'))], [
             'php-zts-lib-fixture-base' => '1.19-r2',
-            'php-zts-lib-fixture-base-debuginfo' => '1.19-r2',
             'php-zts-lib-fixture-consumer' => '1.2.3-r2',
-            'php-zts-lib-fixture-consumer-debuginfo' => '1.2.3-r2',
         ]);
         $createApk = new ReflectionMethod(CreatePackages::class, 'createApkWithNfpm');
-        $library = new staticphp\package\library(staticphp\util\SharedLibraries::load(BUILD_ROOT_PATH, true, $libdir), 'fixture-base');
+        $fixture = new staticphp\package\runtime_layout();
         $versions = [
             '1' => '1', '1.19' => '1.19', '1.19.0' => '1.19.0',
             '1.19~alpha1' => '1.19_alpha1', '1.19~~dev' => '1.19_alpha0_alpha0',
@@ -238,13 +228,13 @@ try {
         foreach ($versions as $input => $expected) {
             $version = CreatePackages::toApkVersion((string) $input);
             check($version === $expected, 'Unexpected APK version conversion');
-            $name = 'php-zts-lib-fixture-version-' . $index;
+            $name = 'php-zts-fixture-version-' . $index;
             $pair = [];
             foreach (['' => false, '-debuginfo' => true] as $suffix => $debug) {
                 $packageName = $name . $suffix;
                 ob_start();
                 try {
-                    $createApk->invoke(null, $library, $packageName, $version, $architecture, '1', [
+                    $createApk->invoke(null, $fixture, $packageName, $version, $architecture, '1', [
                         'files' => [$root . '/base.c' => '/usr/share/php-zts/' . $packageName],
                     ], $debug);
                 } finally {
@@ -336,7 +326,7 @@ try {
             . command(['dpkg-deb', '-f', $layout]) . "Status: install ok installed\n\n");
         command(['apt-get', '-s', '-o', 'Dir::State::status=' . $status, '-o', 'Debug::NoLocking=true', 'install', $newConsumer]);
     }
-    echo "Passed {$type} shared library packages, incremental published providers, revision floors and debuginfo without PHP.\n";
+    echo "Passed {$type} shared library packages, incremental published providers, revision floors and runtime-only library packaging without PHP.\n";
 } finally {
     $oldTmp === false ? putenv('TMPDIR') : putenv('TMPDIR=' . $oldTmp);
     removeFixture($root);

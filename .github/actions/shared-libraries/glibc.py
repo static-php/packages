@@ -281,7 +281,7 @@ def package_library_archives(kind, directory, sdk, manifest, stream=None):
     if selected or retry.get('layout_required'):
         selection = ['--libraries=' + ','.join(selected)] if selected else ['--packages=runtime_layout']
         run(['php', 'bin/spp', 'package', '--libs-only', '--type=' + kind, '--buildroot=' + str(sdk),
-             *manifest_option, *selection, '--debuginfo', *(['--phpv=' + stream] if stream else []),
+             *manifest_option, *selection, *(['--phpv=' + stream] if stream else []),
              *revision_flags()], env=environment)
     run(['php', 'bin/build-payload', 'manifest', '--root', sdk, '--type', kind,
          *manifest_option, '--output', owner / 'shared-libraries.json'], env=environment)

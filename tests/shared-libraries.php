@@ -237,13 +237,13 @@ try {
     expect($metadata['id'] === 'base' && array_intersect_key($metadata, array_flip(['abi_epoch', 'abi_capability', 'abi_capabilities'])) === [], 'Published library metadata retains synthetic ABI capabilities');
     expect(!isset($metadata['abi_dump']), 'Published library metadata retains obsolete ABI dumps');
     $debugSource = $temporary . '/library-base/debug/lib/libbase.so.1.0.debug';
-    expect($package->getDebuginfoFpmConfig()['files'][$debugSource] === '/usr/lib/debug' . $runtime . '/libbase.so.1.0.debug', 'Library debuginfo path incorrect');
+    expect($package->getDebuginfoFpmConfig() === [] && !isset($config['files'][$debugSource]), 'Library package exposes a debuginfo payload');
     expect(hash_file('sha256', $temporary . '/lib/libbase.so.1.0') === $originalHash, 'Packaging mutated the ABI comparison input');
     $runtimeSource = array_search($runtime . '/libbase.so.1.0', $config['files'], true);
     expect($runtimeSource !== $temporary . '/lib/libbase.so.1.0', 'Runtime ELF was not staged before stripping');
     expect(!str_contains(run(['readelf', '--wide', '--sections', $runtimeSource]), '.debug_info'), 'Runtime package retains DWARF information');
-    expect(str_contains(run(['readelf', '--string-dump=.gnu_debuglink', $runtimeSource]), 'libbase.so.1.0.debug'), 'Runtime debug link does not name installed debuginfo');
-    expect(str_contains(run(['readelf', '--wide', '--sections', $debugSource]), '.debug_info'), 'Debuginfo package lost DWARF information');
+    expect(str_contains(run(['readelf', '--string-dump=.gnu_debuglink', $runtimeSource]), 'libbase.so.1.0.debug'), 'Runtime debug link does not match the prepared ELF');
+    expect(str_contains(run(['readelf', '--wide', '--sections', $debugSource]), '.debug_info'), 'Prepared debug file lost DWARF information');
     expect($package->getFpmConfig()['files'] === $config['files'], 'Preparing runtime payload twice changed staging paths');
 
     $libraries->setPackageVersion('base', 'deb', '1.0-3');

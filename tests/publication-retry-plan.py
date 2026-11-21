@@ -240,7 +240,7 @@ class PublicationRetryPlan(unittest.TestCase):
             self.merge([(planner['manifest'](first / 'shared-libraries.json'), first),
                         (planner['manifest'](second / 'shared-libraries.json'), second)])
 
-    def test_equal_runtime_archive_prefers_peer_with_matching_debug_descriptor(self):
+    def test_legacy_debug_descriptor_does_not_trigger_publication_drift(self):
         archive = b'identical signed runtime library'
         first_library = library(1, archive)
         first_library['published_debug_required'] = True
@@ -255,12 +255,17 @@ class PublicationRetryPlan(unittest.TestCase):
                                {'archives/fixture-1.rpm': archive})
         merged, divergent, destination = self.merge([(manifest(first_library), first),
                                                     (manifest(second_library), second)])
-        self.assertEqual(merged['libraries']['fixture']['published_debug_archive'], descriptor)
-        self.assertEqual(merged['publication_drift'], ['fixture'])
+        self.assertFalse(merged.get('publication_drift'))
         self.assertEqual(divergent, set())
         self.assertEqual((destination / 'archives/fixture-1.rpm').read_bytes(), archive)
+        current = manifest(library(1, archive))
+        previous = manifest(first_library)
+        current['stream_libraries'] = {'8.4': current['libraries']}
+        previous['stream_libraries'] = {'8.4': {'fixture': second_library}}
+        self.assertEqual(planner['fingerprint'](previous), planner['fingerprint'](current))
+        self.assertTrue(planner['candidate_progress'](current, previous, {}, {}))
 
-    def test_missing_required_debug_archive_leaves_library_for_sdk_repack(self):
+    def test_runtime_archive_can_be_retried_without_legacy_debug_archive(self):
         archive = b'published runtime without matching debug archive'
         previous_library = library(1, archive)
         previous_library['published_debug_required'] = True
@@ -278,15 +283,14 @@ class PublicationRetryPlan(unittest.TestCase):
                                   manifest_output=str(self.root / 'staged-manifest.json'),
                                   output=str(self.root / 'staged.json'),
                                   layout_source_hash='fixture-recipe')
-        inspect_archive = Mock()
-        with patch.dict(namespace, {'archive_identity': inspect_archive}):
+        with patch.dict(namespace, {'archive_identity': lambda *_: ('php-zts-lib-fixture', retry['published_version'], 'x86_64'),
+                                    'native_compare': lambda *_: 0}):
             planner['stage_publication_retries'](args)
         result = json.loads(Path(args.output).read_text())
-        self.assertEqual(result['remaining_libraries'], ['fixture'])
-        self.assertEqual(result['retry_libraries'], [])
-        self.assertEqual(result['copied_archives'], [])
-        self.assertFalse((Path(args.destination) / 'fixture-1.rpm').exists())
-        inspect_archive.assert_not_called()
+        self.assertEqual(result['remaining_libraries'], [])
+        self.assertEqual(result['retry_libraries'], ['fixture'])
+        self.assertEqual([Path(item['path']).name for item in result['copied_archives']], ['fixture-1.rpm'])
+        self.assertEqual((Path(args.destination) / 'fixture-1.rpm').read_bytes(), archive)
 
     def test_missing_runtime_layout_owner_marks_incomplete_and_retains_archive(self):
         archive = b'layout archive'

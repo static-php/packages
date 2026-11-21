@@ -320,54 +320,6 @@ class PublicationBaselines(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Cannot prove identical'):
                 guard['verify_package'](local, [local], '8.6')
 
-    def test_matching_debug_retry_streams_exact_existing_archive(self):
-        data = b'previously signed native debug archive'
-        destination = self.root / 'debug'
-        destination.mkdir()
-        record = {'type': 'rpm', 'name': 'php-zts-lib-fixture-debuginfo', 'package_version': '0:1-7',
-                  'architecture': 'x86_64', 'base_url': 'https://fixture/el8',
-                  'location': 'php-zts-lib-fixture-debuginfo-1-7.x86_64.rpm',
-                  'checksum': {'type': 'sha256', 'value': hashlib.sha256(data).hexdigest()}}
-        with patch.dict(plan_globals, {'archive_identity': lambda *args: (record['name'], record['package_version'], record['architecture']),
-                                      'native_compare': lambda *args: 0}), patch.object(plan_globals['urllib'].request, 'urlopen', return_value=io.BytesIO(data)):
-            copied = planner['stage_debug_archive'](record, destination)
-        self.assertEqual(Path(copied['path']).read_bytes(), data)
-        self.assertEqual(copied['sha256'], record['checksum']['value'])
-
-    def test_debug_retry_bad_checksum_is_rejected_before_staging(self):
-        destination = self.root / 'debug'
-        destination.mkdir()
-        record = {'type': 'rpm', 'name': 'php-zts-lib-fixture-debuginfo', 'package_version': '0:1-7',
-                  'architecture': 'x86_64', 'base_url': 'https://fixture/el8',
-                  'location': 'php-zts-lib-fixture-debuginfo-1-7.x86_64.rpm',
-                  'checksum': {'type': 'sha256', 'value': '0' * 64}}
-        with patch.object(plan_globals['urllib'].request, 'urlopen', return_value=io.BytesIO(b'changed archive')):
-            with self.assertRaisesRegex(RuntimeError, 'different bytes'):
-                planner['stage_debug_archive'](record, destination)
-        self.assertEqual(list(destination.iterdir()), [])
-
-    def test_forgejo_debug_retry_reuses_verified_download_and_selects_native_architecture(self):
-        destination = self.root / 'debug'
-        destination.mkdir()
-        data = b'published ARM debug archive'
-        digest = hashlib.sha256(data).hexdigest()
-        record = {'type': 'apk', 'host': 'https://primary.test', 'owner': '85',
-                  'name': 'php-zts-lib-fixture-debuginfo', 'package_version': '1-r1', 'architecture': 'aarch64'}
-        archives = [{'arch': arch, 'filename': arch + '.apk', 'url': 'https://primary.test/' + arch,
-                     'sha256': digest} for arch in ('x86_64', 'aarch64')]
-        def download(method, url, read, **kwargs):
-            self.assertEqual(url, 'https://primary.test/aarch64')
-            read(Mock(iter_content=lambda *_: [data]))
-        request = Mock(side_effect=download)
-        helpers = {'remote_package_archives': lambda *_: archives, 'registry_request': request}
-        with patch.object(plan_globals['runpy'], 'run_path', return_value=helpers), \
-                patch.dict(plan_globals, {'archive_identity': lambda *_: (record['name'], record['package_version'], 'aarch64'),
-                                          'native_compare': lambda *_: 0}):
-            first = planner['stage_debug_archive'](record, destination)
-            self.assertEqual(planner['stage_debug_archive'](record, destination), first)
-        self.assertEqual(request.call_count, 1)
-        self.assertEqual(Path(first['path']).read_bytes(), data)
-
     def test_strict_cohort_rejects_entire_upload_if_one_candidate_is_lower(self):
         directory = self.root / 'artifacts'
         directory.mkdir()

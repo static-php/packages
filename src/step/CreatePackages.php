@@ -776,9 +776,6 @@ class CreatePackages
         }
         foreach ($packages as $package) {
             self::createPackageWithFpm($package, $package->getVersion(), $architecture);
-            if (self::$debuginfo && !empty($package->getDebuginfoFpmConfig()['files'])) {
-                self::createPackageWithFpm($package, $package->getVersion(), $architecture, true);
-            }
         }
         $manifest->persist();
     }

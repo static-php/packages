@@ -182,8 +182,9 @@ class RepositoryState(unittest.TestCase):
         with patch.dict(os.environ, MATRIX_ARCH='arm64'), patch.object(state.runpy, 'run_path', side_effect=[planner, freezer]):
             state.record_publication(Path('cohort'), 'deb', 'alma8-arm64', '8.6')
         self.assertEqual(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['source_hash'], 'new-source')
-        self.assertTrue(state.load('deb', 'arm64', '8.6')['baseline']['libraries']['zlib']['published_debug_required'])
         baseline = state.load('deb', 'arm64', '8.6')['baseline']
+        self.assertNotIn('published_debug_required', baseline['libraries']['zlib'])
+        self.assertNotIn('published_debug_archive', baseline['libraries']['zlib'])
         self.assertEqual(baseline['consumers']['8.6'], ['php-zts-grpc', 'php-zts-ssh2'])
         self.assertEqual(baseline['consumer_dependencies']['8.6']['php-zts-grpc'], ['grpc'])
         self.assertEqual(state.load('deb', 'arm64', '8.5'), other)
