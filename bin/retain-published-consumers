@@ -66,7 +66,10 @@ def retain_published(kind, directory, manifest):
         if not changed:
             continue
         if base not in originals:
-            raise RuntimeError('Cannot retain published debuginfo without its runtime: ' + base)
+            # A failed runtime upload can leave only the debuginfo published. Keep that
+            # debuginfo and publish the rebuilt runtime: bumping is reserved for --bump,
+            # so a non-bump rebuild must not abandon this revision.
+            print(f'Publishing rebuilt {base} {version} ({arch}) beside its published debuginfo.', flush=True)
         for name, source in originals.items():
             verify(source, kind)
             if planner['archive_identity'](source, kind) != (name, version, arch):
@@ -76,9 +79,9 @@ def retain_published(kind, directory, manifest):
         for name, path in candidates:
             if name in originals:
                 shutil.copyfile(originals[name], path)
-            else:
+                print(f'Skipped rebuilt {name} {version} ({arch}); keeping the published {base} revision.', flush=True)
+            elif base in originals:
                 path.unlink()
-            print(f'Skipped rebuilt {name} {version} ({arch}); keeping the published {base} revision.', flush=True)
 
 
 if __name__ == '__main__':

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import runpy
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -54,6 +55,41 @@ class PackageContent(unittest.TestCase):
             old.write_bytes(b'wrong frozen archive')
             with self.assertRaisesRegex(RuntimeError, 'checksum/path mismatch'):
                 retain('deb', dist, manifest)
+
+    @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB tools unavailable')
+    def test_orphaned_published_debuginfo_does_not_block_its_new_runtime(self):
+        retain = runpy.run_path(str(ROOT / 'bin/retain-published-consumers'))['retain_published']
+
+        def build(path, name, marker):
+            tree = path.parent / (name + '-tree')
+            (tree / 'DEBIAN').mkdir(parents=True)
+            (tree / 'usr/share').mkdir(parents=True)
+            (tree / 'DEBIAN/control').write_text(
+                f'Package: {name}\nVersion: 1.5.5+php86-1\nArchitecture: amd64\n'
+                'Maintainer: test <test@example.com>\nDescription: test\n')
+            (tree / 'usr/share' / name).write_text(marker)
+            subprocess.run(['dpkg-deb', '--build', str(tree), str(path)], check=True, capture_output=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dist, published = root / 'dist', root / 'published'
+            dist.mkdir()
+            published.mkdir()
+            old_debug = published / 'pie-zts-debuginfo_1.5.5+php86-1_amd64.deb'
+            build(old_debug, 'pie-zts-debuginfo', 'old symbols')
+            new_debug = dist / old_debug.name
+            build(new_debug, 'pie-zts-debuginfo', 'new symbols')
+            runtime = dist / 'pie-zts_1.5.5+php86-1_amd64.deb'
+            build(runtime, 'pie-zts', 'runtime')
+            before_runtime = runtime.read_bytes()
+            record = dict(name='pie-zts-debuginfo', version='1.5.5+php86-1', architecture='amd64',
+                          path=old_debug.relative_to(root).as_posix(),
+                          sha256=hashlib.sha256(old_debug.read_bytes()).hexdigest())
+            manifest = root / 'baseline.json'
+            manifest.write_text(json.dumps(dict(type='deb', packages=[record])))
+            retain('deb', dist, manifest)
+            self.assertEqual(old_debug.read_bytes(), new_debug.read_bytes())
+            self.assertEqual(before_runtime, runtime.read_bytes())
 
     @unittest.skipUnless(shutil.which('dpkg-deb'), 'native DEB tools unavailable')
     def test_timestamp_only_rebuild_can_reuse_bytes_but_payload_metadata_and_modes_cannot(self):
