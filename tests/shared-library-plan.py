@@ -322,6 +322,41 @@ class SharedLibraryPlan(unittest.TestCase):
         self.assertEqual(plan['expected_consumers']['8.4'], ['php-zts-imagick'])
         self.assertEqual(plan['published_consumers']['8.4'], {'php-zts-imagick': '1.0-1'})
 
+    def test_soname_flip_keeps_consumers_that_require_the_restored_name(self):
+        previous = manifest({'fixture': library(soname='libfixture.so.1')})
+        previous['stream_libraries'] = {'8.4': copy.deepcopy(previous['libraries'])}
+        previous['consumers'] = {'8.4': ['php-zts-yaml']}
+        previous['consumer_dependencies'] = {'8.4': {'php-zts-yaml': ['fixture']}}
+        previous['consumer_components'] = {'8.4': {'php-zts-yaml': 'yaml'}}
+        previous['consumer_native_metadata'] = {'8.4': {'php-zts-yaml': {'version': '2.3.0-r4',
+            'requires': sorted(planner['soname_capabilities']('libfixture.so.2', 'x86_64'))}}}
+        previous['consumer_inventory_complete'] = True
+        requests = planner['abi_consumers'](previous, ['fixture'], manifest({'fixture': library(soname='libfixture.so.2')}))
+        self.assertEqual(requests['8.4'], {'full': False, 'packages': [], 'consumers': [], 'missing_metadata': []})
+
+    def test_only_consumers_requiring_a_removed_soname_rebuild(self):
+        previous = manifest({'fixture': library(soname='libfixture.so.1')})
+        previous['stream_libraries'] = {'8.4': copy.deepcopy(previous['libraries'])}
+        names = ['php-zts-yaml', 'php-zts-redis', 'php-zts-curl', 'php-zts-grpc']
+        previous['consumers'] = {'8.4': names}
+        previous['consumer_dependencies'] = {'8.4': {
+            'php-zts-yaml': ['fixture'], 'php-zts-redis': ['fixture'],
+            'php-zts-curl': ['fixture'], 'php-zts-grpc': []}}
+        previous['consumer_components'] = {'8.4': {
+            'php-zts-yaml': 'yaml', 'php-zts-redis': 'redis',
+            'php-zts-curl': 'curl', 'php-zts-grpc': 'grpc'}}
+        previous['consumer_native_metadata'] = {'8.4': {
+            'php-zts-yaml': {'version': '2.3.0-r4',
+                             'requires': sorted(planner['soname_capabilities']('libfixture.so.2', 'x86_64'))},
+            'php-zts-redis': {'version': '6.4.0-r0',
+                              'requires': sorted(planner['soname_capabilities']('libfixture.so.1', 'x86_64'))},
+            'php-zts-curl': {'version': '8.4.0-r0', 'requires': ['php-zts-lib-fixture']}}}
+        previous['consumer_inventory_complete'] = True
+        requests = planner['abi_consumers'](previous, ['fixture'], manifest({'fixture': library(soname='libfixture.so.2')}))
+        self.assertFalse(requests['8.4']['full'])
+        self.assertEqual(requests['8.4']['packages'], ['curl', 'redis'])
+        self.assertEqual(requests['8.4']['consumers'], ['php-zts-curl', 'php-zts-redis'])
+
     def test_abi_break_in_core_library_requires_core_build_but_only_affected_packages(self):
         dependencies = {'8.4': {'php-zts-cli': ['fixture'], 'php-zts-fpm': ['fixture'], 'frankenphp': ['fixture'], 'php-zts-imagick': ['other']}}
         plan = self.manual_plan(breaking=('fixture',), dependencies=dependencies)

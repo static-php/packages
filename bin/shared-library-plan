@@ -202,6 +202,26 @@ def library_names(library):
                    if elf.get('soname') or re.search(r'\.so(?:\.|$)', PurePosixPath(path).name)})
 
 
+def soname_capabilities(soname, architecture):
+    """Every spelling a consumer may use to require one private ELF SONAME."""
+    capabilities = set()
+    for pattern in (r'[^a-z0-9.+]', r'[^a-z0-9.]'):
+        encode = lambda value: re.sub(pattern, lambda match: '-' + match.group(0).encode().hex(), value)
+        encoded = encode(soname)
+        capabilities.add('php-zts-soname-' + encoded)
+        if architecture:
+            capabilities.add('php-zts-soname-' + encode(architecture) + '-' + encoded)
+    return capabilities
+
+
+def required_soname_capabilities(value, stream, name):
+    record = value.get('consumer_native_metadata', {}).get(stream, {}).get(name)
+    requires = record.get('requires') if isinstance(record, dict) else None
+    if not isinstance(requires, list) or not all(isinstance(item, str) for item in requires):
+        return None
+    return {item for item in requires if item.startswith('php-zts-soname-')}
+
+
 def compare(old, new, rebuilt_libraries=None):
     if not old['libraries'] and old.get('metadata_scope') != []:
         raise RuntimeError('No published shared-library SONAME baseline')
@@ -269,9 +289,34 @@ def abi_consumers(value, roots, candidate=None):
         affected_libraries = set(reverse_closure(dict(value, libraries=previous) if previous is not None else value, changed))
         known = value.get('consumer_dependencies', {}).get(stream, {})
         names = consumer_names(value, stream)
-        missing = names - known.keys() if changed else set()
-        affected = sorted(name for name in names if affected_libraries.intersection(known.get(name, [])))
-        inventory_missing = bool(changed) and not value.get('consumer_inventory_complete', 'consumers' in value)
+        if previous is not None and candidate is not None:
+            # A SONAME is only breaking for the consumers that require the spelling
+            # the rebuilt library stopped providing. A library release that changes
+            # its SONAME back and forth must not rebuild consumers that never asked
+            # for the intermediate spelling.
+            removed = set()
+            for identifier in changed:
+                after = library_names(candidate['libraries'].get(identifier, {'elf': {}}))
+                removed.update(set(library_names(previous[identifier])) - set(after))
+            removed_capabilities = {capability for soname in removed
+                                    for capability in soname_capabilities(soname, value.get('architecture'))}
+            affected = []
+            if removed:
+                for name in names:
+                    required = required_soname_capabilities(value, stream, name)
+                    if required:
+                        if required & removed_capabilities:
+                            affected.append(name)
+                    elif affected_libraries.intersection(known.get(name, [])):
+                        # No recorded SONAME requirements: stay conservative.
+                        affected.append(name)
+                affected.sort()
+            rebuild_needed = bool(removed)
+        else:
+            affected = sorted(name for name in names if affected_libraries.intersection(known.get(name, [])))
+            rebuild_needed = bool(changed)
+        missing = names - known.keys() if rebuild_needed else set()
+        inventory_missing = rebuild_needed and not value.get('consumer_inventory_complete', 'consumers' in value)
         result[stream] = {'full': bool(missing) or inventory_missing, 'packages': [],
                           'consumers': sorted(names) if missing else affected,
                           'missing_metadata': sorted(missing)}
