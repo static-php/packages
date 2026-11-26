@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 helper = runpy.run_path(str(ROOT / 'bin/forgejo-helper'))
 publisher = runpy.run_path(str(ROOT / '.github/actions/shared-libraries/publish-forgejo.py'))
 helper_globals = helper['upload_verified_archive'].__globals__
+real_link_packages = helper['link_packages']
 
 
 def apk_bytes(name, version, arch, signed=False, cutoffs=None):
@@ -53,6 +54,10 @@ class ForgejoPublication(unittest.TestCase):
         indexes = patch.dict(publisher['publish'].__globals__, {'verify_debian_indexes': Mock(return_value=[]), 'verify_alpine_indexes': Mock(return_value=[])})
         indexes.start()
         self.addCleanup(indexes.stop)
+        links = patch.dict(helper, {'link_packages': Mock(return_value=[])})
+        links.start()
+        self.addCleanup(links.stop)
+        self.link_packages = helper['link_packages']
         self.temporary = TemporaryDirectory(prefix='forgejo-publication-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -273,13 +278,26 @@ class ForgejoPublication(unittest.TestCase):
         preflight = Mock(side_effect=lambda host, owner, password, kind, files, remote, **kwargs: files)
         uploaded = []
         helpers = dict(helper, get_remote_candidates=listing, verify_upload_versions=preflight,
-                       upload_verified_archive=lambda host, owner, password, kind, path, **kwargs: uploaded.append(path))
+                       upload_verified_archive=lambda host, owner, password, kind, path, **kwargs: (uploaded.append(path), True)[1])
         with contextlib.redirect_stdout(io.StringIO()):
             publisher['publish']('https://example.com', 'test', 'alpine', {'85': paths}, helpers)
         listing.assert_called_once()
         preflight.assert_called_once_with('https://example.com', '85', 'test', 'alpine', paths, [], already_published=set())
         self.assertEqual(uploaded[-1].name, paths[-1].name)
         self.assertCountEqual(uploaded, paths)
+        self.link_packages.assert_called_once_with('https://example.com', '85', 'test', 'alpine',
+            {'php-zts-cli', 'php-zts-lib-libaom', 'php-zts-lib-libaom-debuginfo'})
+
+    def test_unchanged_cohort_does_not_relink_existing_packages(self):
+        path = self.archive(name='php-zts-cli')
+        def preflight(host, owner, password, kind, files, remote, *, already_published):
+            already_published.update(files)
+            return files
+        helpers = dict(helper, get_remote_candidates=lambda *args: [{'name': 'php-zts-cli', 'version': '3.6.0-r1'}],
+                       verify_upload_versions=preflight, publish_consumer_sidecar=Mock())
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher['publish']('https://example.com', 'test', 'alpine', {'86': [path]}, helpers)
+        self.link_packages.assert_not_called()
 
     def test_library_only_cohort_publishes_only_the_selected_archives(self):
         names = {'php-zts-lib-' + identifier + suffix for identifier in ('libaom', 'libjxl')
@@ -521,6 +539,48 @@ class ForgejoPublication(unittest.TestCase):
             helper['upload_verified_archive']('https://example.com', '86', 'test', 'alpine', path)
         upload.assert_called_once()
         link.assert_not_called()
+
+    def test_unlinked_package_is_linked_to_its_repository(self):
+        listing = [{'name': 'php-zts-lib-libffi', 'version': '3.8.2-1', 'repository': None}]
+        with patch.dict(helper_globals, {'get_remote_packages': lambda *args: listing}), \
+                patch.object(helper_globals['requests'], 'post', return_value=response(status=201)) as link, \
+                contextlib.redirect_stdout(io.StringIO()):
+            failures = real_link_packages('https://example.com', '86', 'test', 'debian', ['php-zts-lib-libffi'])
+        self.assertEqual(failures, [])
+        link.assert_called_once()
+        self.assertEqual(link.call_args.args[0],
+                         'https://example.com/api/v1/packages/86/debian/php-zts-lib-libffi/-/link/php-zts')
+        self.assertEqual(link.call_args.kwargs['auth'], ('86', 'test'))
+
+    def test_already_linked_package_is_not_linked_again(self):
+        listing = [{'name': 'php-zts-lib-libffi', 'version': '3.8.2-1',
+                    'repository': {'name': 'php-zts', 'full_name': '86/php-zts'}}]
+        with patch.dict(helper_globals, {'get_remote_packages': lambda *args: listing}), \
+                patch.object(helper_globals['requests'], 'post') as link, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(real_link_packages('https://example.com', '86', 'test', 'debian', ['php-zts-lib-libffi']), [])
+        link.assert_not_called()
+
+    def test_link_failure_warns_without_stopping_publication(self):
+        listing = [{'name': 'php-zts-lib-libffi', 'version': '3.8.2-1', 'repository': None}]
+        rejected = response(status=400)
+        rejected.text = 'cannot link package'
+        output = io.StringIO()
+        with patch.dict(helper_globals, {'get_remote_packages': lambda *args: listing}), \
+                patch.object(helper_globals['requests'], 'post', return_value=rejected), \
+                contextlib.redirect_stdout(output):
+            failures = real_link_packages('https://example.com', '86', 'test', 'debian', ['php-zts-lib-libffi'])
+        self.assertEqual(failures, ['86/php-zts-lib-libffi: HTTP 400: cannot link package'])
+        self.assertIn('::warning::Cannot link package to 86/php-zts', output.getvalue())
+
+    def test_link_command_deduplicates_names_and_applies_the_pattern(self):
+        listing = [{'name': 'php-zts-lib-libffi', 'version': '3.8.2-1', 'repository': None},
+                   {'name': 'php-zts-lib-libffi', 'version': '3.8.1-2', 'repository': None},
+                   {'name': 'php-zts-lib-libzip', 'version': '1.12.1-5', 'repository': {'name': 'php-zts', 'full_name': '86/php-zts'}},
+                   {'name': 'php-zts-curl', 'version': '8.6.0-1', 'repository': None}]
+        link = Mock(return_value=[])
+        with patch.dict(helper_globals, {'get_remote_packages': lambda *args: listing, 'link_packages': link}):
+            self.assertEqual(helper['link_remote_packages']('https://example.com', '86', 'test', 'debian', 'php-zts-lib-*'), 0)
+        link.assert_called_once_with('https://example.com', '86', 'test', 'debian', {'php-zts-lib-libffi'})
 
     def test_second_architecture_cannot_remove_existing_archive(self):
         path = self.archive(arch='aarch64')

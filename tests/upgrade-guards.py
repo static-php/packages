@@ -213,6 +213,34 @@ class UpgradeGuards(unittest.TestCase):
         self.assertIn('::warning::Skipping upload of older.deb:', output.getvalue())
         self.assertIn('::error::Skipped 2 package files', output.getvalue())
 
+    def test_forgejo_links_packages_after_upload(self):
+        files = [root / 'safe.deb']
+        link = Mock(return_value=[])
+        with patch.dict(forgejo_globals, {
+            'get_remote_candidates': lambda *args: [],
+            'verify_upload_versions': lambda host, owner, password, kind, files, packages: files,
+            'get_package_info': lambda file, kind: ('php-zts-safe', 'safe', 'amd64', 'php-zts-safe-safe'),
+            'link_packages': link,
+        }), patch.object(Path, 'glob', return_value=files), patch.object(Path, 'is_file', return_value=True), \
+                patch('builtins.open', mock_open()), patch.object(requests, 'put', return_value=Mock(status_code=201)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(forgejo['upload_packages']('https://example.com', '86', 'test', 'debian', '*.deb'), 0)
+        link.assert_called_once_with('https://example.com', '86', 'test', 'debian', {'php-zts-safe'}, 'php-zts')
+
+    def test_forgejo_does_not_relink_an_existing_package(self):
+        files = [root / 'safe.deb']
+        link = Mock(return_value=[])
+        with patch.dict(forgejo_globals, {
+            'get_remote_candidates': lambda *args: [],
+            'verify_upload_versions': lambda host, owner, password, kind, files, packages: files,
+            'get_package_info': lambda file, kind: ('php-zts-safe', 'safe', 'amd64', 'php-zts-safe-safe'),
+            'link_packages': link,
+        }), patch.object(Path, 'glob', return_value=files), patch.object(Path, 'is_file', return_value=True), \
+                patch('builtins.open', mock_open()), patch.object(requests, 'put', return_value=Mock(status_code=409)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(forgejo['upload_packages']('https://example.com', '86', 'test', 'debian', '*.deb'), 0)
+        link.assert_not_called()
+
     def test_forgejo_read_failure_prevents_upload(self):
         with patch.dict(forgejo_globals, {'get_remote_candidates': Mock(side_effect=requests.HTTPError('offline'))}), patch.object(requests, 'put') as put:
             with self.assertRaises(requests.HTTPError):

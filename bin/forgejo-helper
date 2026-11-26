@@ -615,6 +615,53 @@ def delete_packages(host, owner, password, pkg_type, pattern):
                 if resp.status_code not in [200, 204]:
                     print(f"Error: {resp.text}")
 
+def link_packages(host, owner, password, pkg_type, names, repo='php-zts'):
+    if pkg_type not in ('debian', 'alpine'):
+        return []
+    def ensure(name):
+        try:
+            listing = [package for package in get_remote_packages(host, owner, password, pkg_type, name)
+                       if package.get('name') == name]
+            if not listing:
+                raise RuntimeError('package is missing from the registry')
+            linked = next((package.get('repository') for package in listing if package.get('repository')), None)
+            if linked is not None:
+                if linked.get('full_name') != f'{owner}/{repo}':
+                    print(f"::warning::Package {owner}/{name} is linked to {linked.get('full_name')}, expected {owner}/{repo}", flush=True)
+                return None
+            url = (f"{host.rstrip('/')}/api/v1/packages/{quote(owner, safe='')}/{pkg_type}/"
+                   f"{quote(name, safe='')}/-/link/{quote(repo, safe='')}")
+            response = registry_request('post', url, auth=registry_auth(owner, password), timeout=30)
+            if response.status_code not in (200, 201, 204, 409):
+                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+            print(f"Linked {owner}/{name} to {owner}/{repo}", flush=True)
+            return None
+        except Exception as error:
+            return f'{owner}/{name}: {error}'
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        failures = [failure for failure in pool.map(ensure, sorted(set(names))) if failure]
+    for failure in failures:
+        print(f"::warning::Cannot link package to {owner}/{repo}: {failure}", flush=True)
+    return failures
+
+def link_remote_packages(host, owner, password, pkg_type, pattern=None):
+    if pkg_type not in ('debian', 'alpine'):
+        raise RuntimeError('Repository links are supported for DEB and APK.')
+    selected = {}
+    for package in get_remote_packages(host, owner, password, pkg_type):
+        name = package.get('name')
+        if not isinstance(name, str):
+            continue
+        if pattern and not (fnmatch(name, pattern) or fnmatch(f"{name}-{package.get('version')}", pattern)):
+            continue
+        selected.setdefault(name, []).append(package)
+    names = {name for name, packages in selected.items()
+             if all(not package.get('repository') for package in packages)}
+    print(f'{len(names)} unlinked names of {len(selected)} selected for {owner}/{pkg_type}', flush=True)
+    failures = link_packages(host, owner, password, pkg_type, names)
+    print(f'Linked or verified {len(names) - len(failures)}/{len(names)} package names.', flush=True)
+    return 0 if not failures else 3
+
 def upload_verified_archive(host, owner, password, pkg_type, pkg_file, repo='php-zts', branch='main', *, preflighted=False):
     path = Path(pkg_file)
     name, version, arch = package_metadata(path, pkg_type)
@@ -660,6 +707,7 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
 
     # Cache arch lookups so we only fetch files once per name-version
     arch_cache = {}
+    created_names = set()
 
     for pkg_file in files:
 
@@ -703,7 +751,11 @@ def upload_packages(host, owner, password, pkg_type, pattern, repo="php-zts", br
                 print(f"Error: {resp.text}")
                 skipped += 1
                 continue
+        if pkg_type in ('debian', 'alpine'):
+            created_names.add(name.replace('_', '-') if pkg_type == 'debian' else name)
 
+    if created_names:
+        link_packages(host, owner, password, pkg_type, created_names, repo)
     if skipped:
         print(f"::error::Skipped {skipped} package files after upgrade checks; remaining uploads completed.")
         return 3
@@ -723,9 +775,10 @@ def check_packages(host, owner, password, pkg_type, pattern):
 if __name__ == "__main__":
     args = sys.argv[1:]
     if len(args) < 4:
-        print("Usage: script.py <upload|check|list|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
+        print("Usage: script.py <upload|check|list|link|delete> <alpine|arch|debian|rpm> <owner> <password> [pattern]")
         print("Examples:")
         print("  script.py upload alpine 85 pass '*.apk'")
+        print("  script.py link debian 86 pass 'php-zts-lib-*'")
         print("  script.py list alpine 85 pass")
         sys.exit(1)
 
@@ -747,6 +800,8 @@ if __name__ == "__main__":
     elif action == "list":
         pattern = args[4] if len(args) > 4 else None
         list_packages(host, owner, password, pkg_type, pattern)
+    elif action == "link":
+        sys.exit(link_remote_packages(host, owner, password, pkg_type, args[4] if len(args) > 4 else None))
     elif action == "delete":
         if len(args) < 5:
             print("Error: delete requires a pattern")

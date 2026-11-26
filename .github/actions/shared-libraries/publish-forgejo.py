@@ -127,6 +127,7 @@ def publish(host, password, kind, groups, helper):
         raise RuntimeError('A cohort archive changed during publication preflight')
     ordered = publication_order(selected, helper, kind)
     completed = {owner: [] for owner in selected}
+    created_names = {owner: set() for owner in selected}
     uploaded = []
     def upload(item):
         index, (_, owner, path) = item
@@ -145,6 +146,7 @@ def publish(host, password, kind, groups, helper):
             return failure
         if created:
             uploaded.append(path)
+            created_names[owner].add(helper['package_metadata'](path, kind)[0])
             print(f'Uploaded {index}/{len(ordered)}: {host} {owner}/{path.name}', flush=True)
         else:
             print(f'Skipped {owner}/{path.name} (identical archive already published)', flush=True)
@@ -153,6 +155,13 @@ def publish(host, password, kind, groups, helper):
     with ThreadPoolExecutor(max_workers=4) as pool:
         for _, phase in groupby(enumerate(ordered, 1), key=lambda item: item[1][0]):
             failures.extend(error for error in pool.map(upload, phase) if error)
+    for owner, names in created_names.items():
+        if not names:
+            continue
+        try:
+            helper['link_packages'](host, owner, password, kind, names)
+        except Exception as error:
+            print(f'::warning::Cannot link {owner} packages to {owner}/php-zts: {error}', flush=True)
     if kind == 'debian':
         failures.extend(verify_debian_indexes(host, password, completed, helper))
     else:
